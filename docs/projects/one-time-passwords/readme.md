@@ -32,7 +32,7 @@ Each entry gains an optional `otp` field that holds an `otpauth://totp/` URI. A 
 | Command | Effect |
 | --- | --- |
 | `multipass otp <name>` | Prints the current code. Fails with `<name> has no one-time password` when the entry has no `otp`. |
-| `multipass otp <name> --set` | Reads an `otpauth://totp/` URI or a bare base32 setup key from stdin when piped, or from a hidden prompt, and stores it in the entry's `otp`. It creates the entry when none exists, and keeps the entry's other fields when one does. A bare key is stored as `otpauth://totp/<name>?secret=<KEY>`, with the key in upper case and spaces removed. |
+| `multipass otp <name> --set` | Reads an `otpauth://totp/` URI or a bare base32 setup key from stdin when piped, or from a hidden prompt, and stores it in the entry's `otp`. It creates the entry when none exists, and keeps the entry's other fields when one does. A bare key is stored as `otpauth://totp/<label>?secret=<KEY>`, with the key in upper case and spaces removed. The label is the entry name percent-encoded: every byte outside RFC 3986's unreserved characters (letters, digits, `-`, `.`, `_`, and `~`) becomes `%XX`, so a name holding a space, `#`, `?`, `/`, or `%` still builds a valid URI. |
 | `multipass otp <name> --clear` | Removes the `otp` field. It fails when that would leave the entry with neither a secret nor an `otp`; use `rm` for that. |
 | `multipass get <name> --field otp` | Prints the stored URI, so you can move the key to another authenticator. |
 | `multipass add <name> --force` | Replaces the secret, username, and notes, and keeps an existing `otp`. |
@@ -82,7 +82,7 @@ aws-root
 | `src/crypto/sha256.rs` | `hmac` becomes generic over a small `Digest` trait that `Sha1`, `Sha256`, and `Sha512` implement. The trait gives each hash's block length, 64 bytes for SHA-1 and SHA-256 and 128 for SHA-512, so one HMAC pads the key correctly for all three. HKDF and PBKDF2 stay SHA-256. |
 | `src/crypto/base32.rs` | New. A base32 decoder (RFC 4648 § 6) that ignores case, spaces, and `=` padding, and rejects any other character. |
 | `src/crypto/mod.rs` | Registers the three new modules and the `Digest` trait. |
-| `src/otp.rs` | New. Parses and checks an `otpauth` URI, and computes `code(at_unix_seconds)`. The caller passes in the time, so tests control the clock. |
+| `src/otp.rs` | New. Parses and checks an `otpauth` URI, builds one from a bare key and an entry name with the name percent-encoded as the label, and computes `code(at_unix_seconds)`. The caller passes in the time, so tests control the clock. |
 | `src/store.rs` | `Entry.secret` becomes optional, and `Entry` gains `otp`. Writes format 2 and reads formats 1 and 2. Rejects an entry with neither `secret` nor `otp`, and an `otp` that fails the URI checks. |
 | `src/main.rs` | Adds the `otp` command with `--set` and `--clear`, adds `otp` as a `get --field` value, and makes `add --force` keep `otp`. Updates `USAGE`. |
 | `README.md` | Documents the `otp` command, the field, and the advice in § 3 about which setup keys belong in multipass. |
@@ -104,6 +104,7 @@ aws-root
 | --- | --- |
 | `printf 'JBSW Y3DP EHPK 3PXP' \| multipass otp demo --set`, then `multipass otp demo` | The same code that `oathtool --totp -b JBSWY3DPEHPK3PXP` prints in the same 30-second window |
 | `multipass otp github.com --set` on an entry with a secret and username, then `multipass get github.com` | The secret is unchanged, and `get --field otp` prints the URI |
+| `printf JBSWY3DPEHPK3PXP \| multipass otp 'Chase Bank #2' --set`, then `multipass get 'Chase Bank #2' --field otp` | Prints `otpauth://totp/Chase%20Bank%20%232?secret=JBSWY3DPEHPK3PXP` |
 | `printf 'otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&algorithm=SHA512' \| multipass otp x --set`, then `multipass otp x` | The same code that `oathtool --totp=sha512 -b JBSWY3DPEHPK3PXP` prints in the same 30-second window |
 | `multipass otp aws-root --clear` on an entry with no secret | Fails, and the entry keeps its `otp` |
 | `multipass list` on a store that a format 1 multipass wrote | Opens. The next save writes format 2. |
@@ -117,7 +118,7 @@ Tests that must fail before the change and pass after it:
 - **HOTP against RFC 4226 Appendix D**, counters 0 to 9. Catches an error in dynamic truncation, such as taking the offset from the wrong byte or forgetting to mask the top bit.
 - **TOTP against RFC 6238 Appendix B**, the SHA-1, SHA-256, and SHA-512 rows at 8 digits. Catches a wrong counter (seconds against milliseconds, or rounding), the wrong hash for `algorithm`, and a code that drops its leading zero (`07081804`).
 - **base32 against the RFC 4648 § 10 vectors**, plus lower case, spaces, and missing padding. Catches a setup key that copies from a site in lower case or in groups and then decodes to the wrong bytes.
-- **URI parsing**, table-driven. Accepts each default and each listed value, and rejects `hotp`, a missing `secret`, `digits=9`, `period=0`, and an unknown algorithm such as `MD5`. Catches a malformed key that is stored and only fails when you need the code.
+- **URI parsing**, table-driven. Accepts each default and each listed value, and rejects `hotp`, a missing `secret`, `digits=9`, `period=0`, and an unknown algorithm such as `MD5`. A bare key set under names holding a space, `#`, `?`, `/`, and `%` builds a URI that passes the checks and parses back to the same key. Catches a malformed key that is stored and only fails when you need the code, and a name that breaks the URI built from it.
 - **Store format 2** round-trips an entry with all four fields, an entry with only `otp`, and awkward characters in the URI. It reads a literal format 1 store. It rejects an entry with neither `secret` nor `otp`, and an `otp` line holding a bad URI. Catches a writer and a reader that disagree, and an old store that stops opening.
 - **Argument parsing** for `otp`, `--set`, `--clear`, and `get --field otp`. It rejects `--set` together with `--clear`, and `--set` on any other command.
 
