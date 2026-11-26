@@ -47,7 +47,7 @@ The URI takes the form `otpauth://totp/<label>?secret=<base32>&issuer=…&algori
 | --- | --- | --- |
 | Type | `totp` only. `hotp` is rejected, because a counter-based code would have to rewrite the store on every use. | |
 | `secret` | Base32, case-insensitive, with optional `=` padding. It must decode to at least 1 byte. | Required |
-| `algorithm` | `SHA1`, `SHA256`. `SHA512` is rejected with `SHA-512 one-time passwords are not supported`. | `SHA1` |
+| `algorithm` | `SHA1`, `SHA256`, `SHA512` | `SHA1` |
 | `digits` | 6, 7, or 8 | 6 |
 | `period` | 1 to 300 seconds | 30 |
 | Label, `issuer` | Any percent-encoded text. multipass keeps them but does not use them. | |
@@ -78,21 +78,22 @@ aws-root
 | File | Change |
 | --- | --- |
 | `src/crypto/sha1.rs` | New. SHA-1 (FIPS 180-4), with the FIPS and RFC 3174 vectors as tests. |
-| `src/crypto/sha256.rs` | `hmac` becomes generic over a small `Digest` trait that `Sha256` and `Sha1` both implement. Both hashes use a 64-byte block. HKDF and PBKDF2 stay SHA-256. |
+| `src/crypto/sha512.rs` | New. SHA-512 (FIPS 180-4), with 64-bit words and a 128-byte block, and the FIPS vectors as tests. |
+| `src/crypto/sha256.rs` | `hmac` becomes generic over a small `Digest` trait that `Sha1`, `Sha256`, and `Sha512` implement. The trait gives each hash's block length, 64 bytes for SHA-1 and SHA-256 and 128 for SHA-512, so one HMAC pads the key correctly for all three. HKDF and PBKDF2 stay SHA-256. |
 | `src/crypto/base32.rs` | New. A base32 decoder (RFC 4648 § 6) that ignores case, spaces, and `=` padding, and rejects any other character. |
-| `src/crypto/mod.rs` | Registers the two new modules and the `Digest` trait. |
+| `src/crypto/mod.rs` | Registers the three new modules and the `Digest` trait. |
 | `src/otp.rs` | New. Parses and checks an `otpauth` URI, and computes `code(at_unix_seconds)`. The caller passes in the time, so tests control the clock. |
 | `src/store.rs` | `Entry.secret` becomes optional, and `Entry` gains `otp`. Writes format 2 and reads formats 1 and 2. Rejects an entry with neither `secret` nor `otp`, and an `otp` that fails the URI checks. |
 | `src/main.rs` | Adds the `otp` command with `--set` and `--clear`, adds `otp` as a `get --field` value, and makes `add --force` keep `otp`. Updates `USAGE`. |
 | `README.md` | Documents the `otp` command, the field, and the advice in § 3 about which setup keys belong in multipass. |
-| `AGENTS.md` | Adds SHA-1 (FIPS 180-4), HOTP (RFC 4226), TOTP (RFC 6238), and base32 (RFC 4648) to the list of required test vectors. |
+| `AGENTS.md` | Adds SHA-1 and SHA-512 (FIPS 180-4), HOTP (RFC 4226), TOTP (RFC 6238), and base32 (RFC 4648) to the list of required test vectors. |
 
 ## 3. Why this design
 
 - **One entry per account.** The `otp` field sits beside the password, username, and notes, so `list` shows one name per account. A second entry such as `github.com-otp` would split one account across two names that nothing ties together.
 - **Store the URI, not just the key.** The URI carries the algorithm, digit count, and period that some sites change from the defaults. Storing it verbatim means `age -d` gives back something any authenticator app can import.
 - **Reuse the existing HMAC.** `hmac` in `src/crypto/sha256.rs` already implements RFC 2104 over a 64-byte block. Making it generic over the hash adds SHA-1 without a second HMAC. SHA-1 is weak for collisions, but HMAC-SHA1 is not broken, and RFC 6238 and nearly every site still use it.
-- **No SHA-512 for now.** SHA-512 needs its own 64-bit hash core of about 100 lines, and few sites ask for it. A clear error tells you when one does.
+- **Every algorithm the URI format defines.** The `otpauth` format allows SHA-1, SHA-256, and SHA-512, and multipass supports all three, so no site's setup key is turned away. SHA-512 needs its own hash core with 64-bit words, about 100 lines, tested like the others. Its 128-byte block is why the `Digest` trait carries a block length instead of HMAC assuming 64.
 - **No HOTP.** A counter-based code changes the counter on every use, so each `otp` call would have to re-encrypt and save the store.
 - **Format 2 instead of tolerating unknown fields.** The format 1 reader rejects any field it does not know, which keeps a typo or a damaged store from passing silently. Bumping the version keeps that strictness, and the old binary's message says exactly what happened.
 - **Both factors in one place is a choice you make.** A setup key stored next to its password means anyone with the passphrase holds both factors. The README says so, and recommends multipass for the setup keys of accounts whose password lives elsewhere.
@@ -103,7 +104,7 @@ aws-root
 | --- | --- |
 | `printf 'JBSW Y3DP EHPK 3PXP' \| multipass otp demo --set`, then `multipass otp demo` | The same code that `oathtool --totp -b JBSWY3DPEHPK3PXP` prints in the same 30-second window |
 | `multipass otp github.com --set` on an entry with a secret and username, then `multipass get github.com` | The secret is unchanged, and `get --field otp` prints the URI |
-| `printf 'otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&algorithm=SHA512' \| multipass otp x --set` | Fails with `SHA-512 one-time passwords are not supported`, and the store is unchanged |
+| `printf 'otpauth://totp/x?secret=JBSWY3DPEHPK3PXP&algorithm=SHA512' \| multipass otp x --set`, then `multipass otp x` | The same code that `oathtool --totp=sha512 -b JBSWY3DPEHPK3PXP` prints in the same 30-second window |
 | `multipass otp aws-root --clear` on an entry with no secret | Fails, and the entry keeps its `otp` |
 | `multipass list` on a store that a format 1 multipass wrote | Opens. The next save writes format 2. |
 | `age -d` on a store after `otp --set` | Shows `multipass 2` and the entry's `otp` line holding the URI exactly as entered |
@@ -111,20 +112,22 @@ aws-root
 Tests that must fail before the change and pass after it:
 
 - **`sha1` against the FIPS 180-4 and RFC 3174 vectors** (`""`, `"abc"`, the 448-bit message, and a million `a`s fed in uneven pieces). Catches a wrong round constant, rotation, or padding length.
+- **`sha512` against the FIPS 180-4 vectors** (`""`, `"abc"`, the 896-bit message, and a million `a`s fed in uneven pieces). Catches a 32-bit operation left in the 64-bit core, and a length field written in 8 bytes where SHA-512 needs 16.
+- **HMAC-SHA-512 against RFC 4231**, test cases 1 and 6. Catches an HMAC that pads the key to 64 bytes for a hash whose block is 128, and a long key that is not hashed first.
 - **HOTP against RFC 4226 Appendix D**, counters 0 to 9. Catches an error in dynamic truncation, such as taking the offset from the wrong byte or forgetting to mask the top bit.
-- **TOTP against RFC 6238 Appendix B**, the SHA-1 and SHA-256 rows at 8 digits. Catches a wrong counter (seconds against milliseconds, or rounding), the wrong hash for `algorithm`, and a code that drops its leading zero (`07081804`).
+- **TOTP against RFC 6238 Appendix B**, the SHA-1, SHA-256, and SHA-512 rows at 8 digits. Catches a wrong counter (seconds against milliseconds, or rounding), the wrong hash for `algorithm`, and a code that drops its leading zero (`07081804`).
 - **base32 against the RFC 4648 § 10 vectors**, plus lower case, spaces, and missing padding. Catches a setup key that copies from a site in lower case or in groups and then decodes to the wrong bytes.
-- **URI parsing**, table-driven. Accepts each default and each listed value, and rejects `hotp`, a missing `secret`, `digits=9`, `period=0`, and an unknown algorithm. Catches a malformed key that is stored and only fails when you need the code.
+- **URI parsing**, table-driven. Accepts each default and each listed value, and rejects `hotp`, a missing `secret`, `digits=9`, `period=0`, and an unknown algorithm such as `MD5`. Catches a malformed key that is stored and only fails when you need the code.
 - **Store format 2** round-trips an entry with all four fields, an entry with only `otp`, and awkward characters in the URI. It reads a literal format 1 store. It rejects an entry with neither `secret` nor `otp`, and an `otp` line holding a bad URI. Catches a writer and a reader that disagree, and an old store that stops opening.
 - **Argument parsing** for `otp`, `--set`, `--clear`, and `get --field otp`. It rejects `--set` together with `--clear`, and `--set` on any other command.
 
 ## 5. Cost
 
-Computing a code takes two SHA-1 compressions and is too small to measure. Every `otp` call still decrypts the store first, which takes about 300 ms at work factor 18 in a release build, the same as `get`. That is the cost the user feels, and this project does not change it. The planned session unlock would remove it.
+Computing a code takes a few hash compressions, two for SHA-1 or SHA-256 and two 128-byte blocks for SHA-512, and is too small to measure. Every `otp` call still decrypts the store first, which takes about 300 ms at work factor 18 in a release build, the same as `get`. That is the cost the user feels, and this project does not change it. The planned session unlock would remove it.
 
 ## 6. Open questions
 
-- **SHA-512 setup keys.** Deferred. multipass rejects them with a clear error until a site you use needs one. Then it gets a hand-written SHA-512 tested against the FIPS 180-4 vectors. Owner: the user, who decides when it is needed.
+- **SHA-512 setup keys.** Decided: this project includes a hand-written SHA-512, so every algorithm the `otpauth` format defines works from the start.
 - **Fields beyond the four.** Decided: entries hold exactly `secret`, `username`, `notes`, and `otp` in this project. Arbitrary named fields, such as security questions or a PIN, get a plan of their own later, with their own store format.
 
 ## 7. Background
