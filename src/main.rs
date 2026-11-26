@@ -164,9 +164,12 @@ fn parse(args: Vec<String>) -> Result<Parsed> {
     let Some(command) = positional.next() else {
         return Err("missing command; see multipass --help".into());
     };
+    // The store text marks each entry with its name on a line of its own,
+    // so an empty name could be saved but never read back.
     let mut name = || {
         positional
             .next()
+            .filter(|name| !name.is_empty())
             .ok_or_else(|| format!("{command} needs an entry name"))
     };
     let command = match command.as_str() {
@@ -424,6 +427,11 @@ mod tests {
             "list --store",
         ] {
             assert!(parse(args(bad)).is_err(), "{bad:?} parsed");
+        }
+        // The store text cannot hold an entry with no name.
+        for command in ["add", "get", "rm"] {
+            let argv = vec![command.to_string(), String::new()];
+            assert!(parse(argv).is_err(), "{command} with an empty name parsed");
         }
     }
 
