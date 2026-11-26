@@ -83,12 +83,12 @@ multipass does not merge. When two devices save before iCloud syncs, iCloud keep
 | `src/main.rs` | `list` marks entries that hold a passkey; `get --field passkey` prints the site and creation date, never the key. |
 | `apple/` | New. One Xcode project, in Swift, that builds the app and its extension for iOS and macOS from shared sources (question 6 in § 6 settles how). It uses only Apple's frameworks: AuthenticationServices for the provider, CryptoKit for keys and signatures, LocalAuthentication and Security for Face ID, Touch ID, and the Keychain item, and Foundation's file coordination for iCloud Drive. The app's settings show the store's path, resolve sync conflicts, and remove the Keychain item. |
 | `.github/workflows/ci.yml` | Builds the XCFramework and both apps on `macos-latest`, unsigned. |
-| `README.md`, `AGENTS.md` | Document the app, its install, and its rules, including which Apple frameworks it may use. |
+| `README.md`, `AGENTS.md` | Document the app and its install. `AGENTS.md` extends the dependency rule: Apple's system frameworks are allowed like the Rust standard library, and third-party code stays banned on every platform, including Swift packages. |
 
 ## 3. Why this design
 
 - **A credential provider extension is the only way in.** Safari and the system passkey sheet send requests only to an extension that the app registers. A browser extension that overrides `navigator.credentials` works only inside that browser, and it moves the private key into the browser's process.
-- **CryptoKit instead of hand-written P-256.** Constant-time elliptic-curve scalar multiplication is far harder to get right than the symmetric code in `src/crypto`, and a subtle mistake leaks the private key through timing or bad signatures. CryptoKit ships with macOS, like the Rust standard library ships with Rust. Whether that keeps the "no dependencies" promise is question 1 in § 6.
+- **CryptoKit instead of hand-written P-256.** Constant-time elliptic-curve scalar multiplication is far harder to get right than the symmetric code in `src/crypto`, and a subtle mistake leaks the private key through timing or bad signatures. CryptoKit ships with macOS and iOS, as the Rust standard library ships with Rust. So the "no dependencies" rule treats Apple's system frameworks like the standard library: allowed, while third-party code stays banned.
 - **Face ID and Touch ID from the start.** A passkey sign-in is meant to take a second, and typing a long passphrase each time defeats that, on a phone most of all. The cost is a second way into the store: anyone who passes Face ID or Touch ID on one of your devices can read the passphrase. `biometryCurrentSet` and `ThisDeviceOnly` limit that way in to your enrolled face or fingers on each device.
 - **The Mac and iPhone together, through iCloud Drive.** A passkey that exists on only one device fails you on the other, so both ship at once. iCloud Drive is already on both devices and moves only ciphertext. A sync service of multipass's own would mean a server, which multipass refuses to run.
 - **One store implementation.** Linking the Rust code means the extension reads and writes the store exactly as the CLI does. A Swift port would be a second implementation of scrypt, the age format, and the store text to keep in agreement.
@@ -117,9 +117,9 @@ Each sign-in decrypts the store once after the Face ID or Touch ID prompt. That 
 
 ## 6. Open questions
 
-Questions 1, 3, 5, and 6 block the design. Questions 2 and 4 are decided.
+Questions 3, 5, and 6 block the design. Questions 1, 2, and 4 are decided.
 
-1. **Apple frameworks and "no dependencies".** Sign with CryptoKit, or hand-write P-256 to keep the code fully in this repository? Recommended: CryptoKit, treated like the standard library. Owner: the user.
+1. **Apple frameworks and "no dependencies".** Decided: sign with CryptoKit. Apple's system frameworks count like the Rust standard library, and third-party code stays banned.
 2. **Platforms.** Decided: the Mac and iPhone together, with the store synced through iCloud Drive as § 2.4 describes.
 3. **Distribution.** An iPhone app can only be installed through App Store Connect (TestFlight or the App Store) or as a development build on your own devices, and Developer ID covers only the Mac. Recommended: TestFlight for both platforms under one App Store Connect record, moving to the App Store when it is ready. Owner: the user.
 4. **Unlocking in the extension.** Decided: Touch ID from the start, with the passphrase kept in the Keychain as § 2.3 describes.
