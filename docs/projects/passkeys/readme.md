@@ -117,11 +117,11 @@ Each sign-in decrypts the store once after the Face ID or Touch ID prompt. That 
 
 ## 6. Open questions
 
-Questions 3 and 5 block the design. Questions 1, 2, 4, and 6 are decided.
+Question 5 blocks the plan until the prototype in § 8 answers it. Questions 1 to 4 and 6 are decided.
 
 1. **Apple frameworks and "no dependencies".** Decided: sign with CryptoKit. Apple's system frameworks count like the Rust standard library, and third-party code stays banned.
 2. **Platforms.** Decided: the Mac and iPhone together, with the store synced through iCloud Drive as § 2.4 describes.
-3. **Distribution.** An iPhone app can only be installed through App Store Connect (TestFlight or the App Store) or as a development build on your own devices, and Developer ID covers only the Mac. Recommended: TestFlight for both platforms under one App Store Connect record, moving to the App Store when it is ready. Owner: the user.
+3. **Distribution.** Decided: TestFlight on both the Mac and the iPhone, under one App Store Connect record, so every device updates the same way. The App Store can follow later, if the app is opened to others.
 4. **Unlocking in the extension.** Decided: Touch ID from the start, with the passphrase kept in the Keychain as § 2.3 describes.
 5. **Reaching the iCloud container from the extension.** § 2.4 has the extension read the store from the app's iCloud container. Whether an AutoFill extension may open that container directly, or needs the app to keep a copy in a shared App Group container, is unverified. Owner: the implementer, through a prototype, before this plan goes `ready`.
 6. **How one project builds both apps.** Decided: a SwiftUI multiplatform app. If the prototype shows that Mac Catalyst would share more of the extension's code, the implementer switches to Catalyst and records why here. The unmodified iPad build on the Mac ("Designed for iPad") is ruled out, because it runs only on Apple-silicon Macs and may not run the extension.
@@ -130,5 +130,14 @@ Questions 3 and 5 block the design. Questions 1, 2, 4, and 6 are decided.
 
 - Apple opened passkey providers to third-party apps in iOS 17 and macOS 14 (Sonoma), with new methods on `ASCredentialProviderViewController` (Matt Miller, "WWDC23 passkeys", blog.millerti.me, 2023-06-10).
 - The Rust standard library supports `aarch64-apple-ios` and `aarch64-apple-ios-sim` as well as the Mac targets, so the same zero-dependency code builds for the iPhone.
-- Not yet verified, so a prototype comes first: whether the provider entitlement works under Developer ID signing (a GitHub discussion says it does; Apple's documentation does not say), and whether Chrome on macOS offers third-party providers. One developer reports that macOS shows third-party providers to sites as "iCloud Keychain" by zeroing the AAGUID.
+- Not yet verified, so the prototype checks it: whether Chrome on macOS offers third-party providers. Safari does. One developer reports that macOS shows third-party providers to sites as "iCloud Keychain" by zeroing the AAGUID.
 - The FIDO Alliance's Credential Exchange Format, v1.0 with errata dated 2026-03-09, and its Credential Exchange Protocol define how to move passkeys between providers. 1Password helped write them. Importing your existing passkeys from 1Password would use them, and that belongs in a later project.
+
+## 8. Rollout
+
+These steps run in order. Steps 2 and 4 need the user's Apple developer account and devices.
+
+1. **Prototype.** Build a bare extension that registers and signs with a fixed test key on both platforms, and answer question 5: can the extension open the app's iCloud container directly? Also measure scrypt at work factor 18 inside the iPhone extension's memory limit, and check whether Chrome on the Mac offers the extension. Record the results in § 7, and move this plan to `ready`.
+2. **Apple setup.** The user creates the App Store Connect record and the identifiers the app needs: the bundle IDs for the app and its extensions, the App Group, the iCloud container, and the Keychain access group. App Store Connect also asks whether the app uses encryption. It does, both its own and Apple's, so the user answers the export compliance questions for an app that encrypts only the user's own data.
+3. **Build.** Implement § 2 and pass the tests in § 4, on CI and locally.
+4. **TestFlight.** Upload builds for both platforms. The user installs them from TestFlight on the Mac and the iPhone, and runs the checks in § 4's table.
