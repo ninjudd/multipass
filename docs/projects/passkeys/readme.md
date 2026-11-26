@@ -78,6 +78,7 @@ multipass does not merge. When two devices save before iCloud syncs, iCloud keep
 | --- | --- |
 | `Cargo.toml` | Adds a `[lib]` target with `crate-type = ["staticlib", "rlib"]`, so the extension can link the store code. Still no dependencies. |
 | `scripts/build-xcframework.sh` | New. Builds the static library for macOS, iOS, and the iOS simulator, and bundles the three into one XCFramework for Xcode. |
+| `src/crypto/base64.rs` | `encode` and `decode` stop branching on the data and indexing memory with it, because the `passkey` field's `key` is a private key. Each 6-bit value maps to its character, and each character to its value and an invalid flag, with masked arithmetic in place of `ALPHABET` and the `match` in `value`. Every rejection, the stray-bits check included, folds into that flag, and `decode` branches on it once, after the last character. The RFC 4648 tests stay and must still pass. |
 | `src/ffi.rs` | New. A C interface over `Store`: open with a passphrase, find a passkey, add an entry, save, and free. |
 | `src/store.rs` | Format 3: the `passkey` field, and reading formats 1 to 3. |
 | `src/main.rs` | `list` marks entries that hold a passkey; `get --field passkey` prints the site and creation date, never the key. |
