@@ -70,7 +70,7 @@ The store lives at `Documents/store.age` in the app's iCloud container, which iC
 | The app and its extension, on both systems | Through the iCloud container, with `NSFileCoordinator` around each read and save |
 | The CLI on the Mac | Through `MULTIPASS_STORE`, set to the container's path under `~/Library/Mobile Documents/`. The app's settings show the exact path and the `export` line to copy. |
 
-multipass does not merge. When two devices save before iCloud syncs, iCloud keeps both versions as a conflict. The app checks for unresolved conflict versions before each save, refuses to save while any exist, and shows which devices wrote them, so a passkey registration never silently replaces another device's change. You resolve the conflict in the app by choosing a version. The CLI does not see conflict versions, so the README tells you to edit from the CLI only while no other device is saving.
+multipass does not merge. When two devices save before iCloud syncs, iCloud keeps both versions as a conflict. The app and its extension both check for unresolved conflict versions before each save, and refuse to save while any exist. The extension saves on every registration, so it checks too: it cancels the registration and tells you to open the app, and the app shows which devices wrote the versions. So a passkey registration never silently replaces another device's change. You resolve the conflict in the app by choosing a version. The CLI does not see conflict versions, so the README tells you to edit from the CLI only while no other device is saving.
 
 ### 2.5 Changes by file
 
