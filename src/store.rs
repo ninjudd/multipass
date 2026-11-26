@@ -86,6 +86,10 @@ impl Store {
     }
 
     pub fn from_text(text: &str) -> Result<Self, Error> {
+        // Earlier versions of multipass wrote the store as one JSON object.
+        if text.starts_with('{') {
+            return Err(Error::JsonFormat);
+        }
         let body = text.strip_suffix('\n').ok_or(Error::Format { line: 1 })?;
         let mut lines = body.split('\n').zip(1..);
 
@@ -266,6 +270,7 @@ pub enum Error {
     },
     NotText,
     UnsupportedFormat(String),
+    JsonFormat,
 }
 
 impl fmt::Display for Error {
@@ -280,6 +285,11 @@ impl fmt::Display for Error {
             Error::UnsupportedFormat(v) => write!(
                 f,
                 "the store uses format {v}, but this multipass reads format 1"
+            ),
+            Error::JsonFormat => write!(
+                f,
+                "the store is in the earlier JSON format, which this multipass cannot read; \
+                 `age -d` on the store prints its entries so you can add them again"
             ),
         }
     }
@@ -406,6 +416,10 @@ mod tests {
         assert!(matches!(
             Store::from_text("multipass 2\n"),
             Err(Error::UnsupportedFormat(v)) if v == "2"
+        ));
+        assert!(matches!(
+            Store::from_text(r#"{"format":1,"entries":{"a":{"secret":"x"}}}"#),
+            Err(Error::JsonFormat)
         ));
     }
 
