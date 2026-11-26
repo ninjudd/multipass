@@ -1,0 +1,3 @@
+[review]
+require_check = false
+ci = false
