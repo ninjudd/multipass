@@ -9,12 +9,15 @@ use std::process::Command;
 /// both a dependency and unsafe terminal calls.
 pub fn read_hidden(prompt: &str) -> io::Result<String> {
     let mut tty = OpenOptions::new().read(true).write(true).open("/dev/tty")?;
-    tty.write_all(prompt.as_bytes())?;
-    tty.flush()?;
 
+    // Echo goes off before the prompt appears, because `stty` takes a
+    // moment to start and anything typed in that moment would be shown.
     stty(&tty, "-echo")?;
     let mut line = String::new();
-    let read = BufReader::new(&tty).read_line(&mut line);
+    let read = tty
+        .write_all(prompt.as_bytes())
+        .and_then(|()| tty.flush())
+        .and_then(|()| BufReader::new(&tty).read_line(&mut line));
     let restored = stty(&tty, "echo");
     tty.write_all(b"\n")?;
     read?;
