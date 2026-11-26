@@ -21,6 +21,7 @@ multipass has no dependencies, not even dev-dependencies, and that is a feature 
 
 - **Never put a secret or passphrase in argv, an environment variable, a log line or an error message.** Passphrases come from `/dev/tty` through `tty::read_hidden`; secrets come from a hidden prompt or stdin. Store errors name a line number, never the line.
 - **Write the store atomically.** `Store::save` writes a temporary file with mode 0600 and renames it into place; keep any new write path on that route.
+- **Never commit a store or any other encrypted file**, even a test one with fake secrets. Tests build their stores in memory or in a temporary directory. The reference fixtures under `testdata/` are the one exception, as the age section says.
 
 ## Tests
 

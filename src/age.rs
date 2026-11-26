@@ -18,8 +18,8 @@ const INTRO: &[u8] = b"age-encryption.org/v1\n";
 const SCRYPT_LABEL: &[u8] = b"age-encryption.org/v1/scrypt";
 const CHUNK: usize = 64 * 1024;
 
-/// scrypt cost `2^18`, which takes about a second and 256 MiB. It matches the
-/// reference age implementation's default.
+/// scrypt cost `2^18`, which takes 256 MiB and about a third of a second in a
+/// release build. It matches the reference age implementation's default.
 pub const DEFAULT_WORK_FACTOR: u8 = 18;
 
 /// The highest scrypt cost `decrypt` will attempt, so a hostile file cannot
