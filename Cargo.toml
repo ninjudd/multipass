@@ -8,27 +8,11 @@ license = "MIT"
 repository = "https://github.com/ninjudd/multipass"
 publish = false
 
-# Each dependency is a deliberate choice.
-#
-#   age        the file format and all of the cryptography. multipass uses only
-#              passphrase mode (scrypt, then ChaCha20-Poly1305), which is
-#              symmetric: there is no public-key step for a quantum computer to
-#              break. Any stock age tool can decrypt the store.
-#   clap       the CLI
-#   rpassword  reads the passphrase from the terminal, never from argv
-#   serde      the plaintext inside the age file is JSON
-#
-# Deliberately absent: any other cryptography crate. multipass never calls a
-# primitive directly.
+# multipass has no dependencies, not even for tests, and CI fails if one
+# appears. The cryptography is written by hand in src/crypto and checked
+# against the official test vectors and against files written by the
+# reference age implementation. See AGENTS.md before adding anything here.
 [dependencies]
-age = "0.12.1"
-clap = { version = "4", features = ["derive", "env"] }
-rpassword = "7"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-
-[dev-dependencies]
-tempfile = "3"
 
 [profile.release]
 strip = true

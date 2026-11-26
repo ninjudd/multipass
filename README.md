@@ -4,13 +4,16 @@ multipass is a small password manager for one person. It keeps your secrets in a
 
 It is meant to sit beside a full password manager, not replace it. Keep shared and everyday logins in something like 1Password, and keep the few secrets you never want on someone else's server (recovery codes, seed phrases, the master password itself) in multipass.
 
+multipass has no dependencies. Every line of multipass, cryptography included, is in this repository: about 600 lines of cryptography and 600 of everything else, small enough to read in an afternoon. There are no third-party crates to compromise; what is left to trust is the Rust toolchain and its standard library.
+
 > [!WARNING]
-> multipass is new and has not been audited. The cryptography is age's, not ours, but the code around it is young.
+> multipass is new and has not been audited. Its cryptography is written by hand and checked against the official test vectors and against files from the reference age implementation, but no one outside the project has reviewed it.
 
 ## Why it is built this way
 
 - **One passphrase, no public keys.** age's passphrase mode derives a key with scrypt and encrypts with ChaCha20-Poly1305. Both are symmetric, so there is no public-key step for a future quantum computer to break.
-- **A standard file format.** The store is an ordinary age file. If multipass ever breaks or disappears, `age -d ~/.multipass/store.age` still prints everything, as JSON.
+- **No dependencies.** SHA-256, HMAC, HKDF, PBKDF2, scrypt, ChaCha20-Poly1305 and base64 are each implemented in `src/crypto` and tested against the official vectors from their specifications. `cargo tree` lists multipass and nothing else, and CI fails if that ever changes.
+- **A standard file format.** The store is an ordinary age file, compatible with the reference implementation in both directions. If multipass ever breaks or disappears, `age -d ~/.multipass/store.age` still prints everything as plain text.
 - **Nothing readable on disk.** Entry names live inside the encrypted file, so the file does not even reveal which accounts you have.
 - **Secrets never touch argv.** Passphrases come from a hidden terminal prompt and secrets from a prompt or stdin, so neither shows up in `ps` or your shell history.
 
@@ -52,6 +55,7 @@ The store is ciphertext, so it is safe to sync with iCloud Drive, Dropbox or a p
 - Unlocking once per session, the way `ssh-agent` does, instead of asking for the passphrase on every command.
 - Copying to the clipboard directly and clearing it after 30 seconds.
 - Wiping secrets from memory once a command is done.
+- Restoring terminal echo if you press Ctrl-C at a passphrase prompt. Until then, type `stty echo` (or `reset`) if your terminal stops showing what you type.
 
 ## Recovery
 
@@ -60,6 +64,15 @@ If you lose multipass, install any age implementation and decrypt the file direc
 ```sh
 brew install age
 age -d ~/.multipass/store.age
+```
+
+It prints the store as text: each entry's name on its own line, then its fields indented by a tab.
+
+```text
+multipass 1
+github.com
+	secret hunter2
+	username octocat
 ```
 
 If you lose the passphrase, the store cannot be recovered. That is the point.
