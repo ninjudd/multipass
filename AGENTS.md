@@ -7,7 +7,7 @@ multipass is a single-user password manager: a Rust CLI over one age file encryp
 multipass has no dependencies, not even dev-dependencies, and that is a feature people choose it for. CI fails if `cargo tree` shows anything but multipass itself.
 
 - **Do not add a crate**, for code or for tests, without the maintainer's explicit approval in the pull request. Write the code instead.
-- **Every primitive lives in `src/crypto`** and is checked against the official test vectors from its specification: FIPS 180-4 for SHA-256, RFC 4231 for HMAC, RFC 5869 for HKDF, RFC 8018 for PBKDF2, RFC 7914 for scrypt and Salsa20/8, RFC 8439 for ChaCha20 and Poly1305, and RFC 4648 for base64. A change to a primitive keeps those tests and adds any vector that covers the changed path.
+- **Every primitive lives in `src/crypto`** and is checked against the official test vectors from its specification: FIPS 180-4 for SHA-256, RFC 4231 for HMAC, RFC 5869 for HKDF, RFC 7914 for PBKDF2, scrypt and Salsa20/8, RFC 8439 for ChaCha20 and Poly1305, and RFC 4648 for base64. A change to a primitive keeps those tests and adds any vector that covers the changed path.
 - **Never branch on secret data or index memory with it**, apart from scrypt's data-dependent lookups, which the algorithm requires. Compare MACs and tags with `crypto::ct_eq`.
 - **Stay in age's passphrase (scrypt) mode.** Adding public-key recipients would bring back the quantum exposure the design avoids.
 

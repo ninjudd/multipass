@@ -241,7 +241,31 @@ mod tests {
     }
 
     #[test]
-    fn pbkdf2_matches_known_vectors() {
+    fn pbkdf2_matches_rfc_7914() {
+        // RFC 7914 section 11, the PBKDF2-HMAC-SHA-256 vectors.
+        let mut out = [0u8; 64];
+        pbkdf2(b"passwd", b"salt", 1, &mut out);
+        assert_eq!(
+            out.to_vec(),
+            hex(concat!(
+                "55ac046e56e3089fec1691c22544b605f94185216dde0465e68b9d57c20dacbc",
+                "49ca9cccf179b645991664b39d77ef317c71b845b1e30bd509112041d3a19783"
+            ))
+        );
+        pbkdf2(b"Password", b"NaCl", 80000, &mut out);
+        assert_eq!(
+            out.to_vec(),
+            hex(concat!(
+                "4ddcd8f60b98be21830cee5ef22701f9641a4418d04c0414aeff08876b34ab56",
+                "a1d425a1225833549adb841b51c9b3176a272bdebba1d078478f62b397f33c8d"
+            ))
+        );
+    }
+
+    #[test]
+    fn pbkdf2_matches_widely_published_vectors() {
+        // Not from a specification, but they cover two iterations and an
+        // output that ends partway through a block.
         let mut out = [0u8; 32];
         pbkdf2(b"password", b"salt", 1, &mut out);
         assert_eq!(

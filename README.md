@@ -12,7 +12,7 @@ multipass has no dependencies. Every line of multipass, cryptography included, i
 ## Why it is built this way
 
 - **One passphrase, no public keys.** age's passphrase mode derives a key with scrypt and encrypts with ChaCha20-Poly1305. Both are symmetric, so there is no public-key step for a future quantum computer to break.
-- **No dependencies.** SHA-256, HMAC, HKDF, PBKDF2, scrypt, ChaCha20-Poly1305 and base64 are each implemented in `src/crypto` and tested against the vectors in their RFCs. `cargo tree` lists multipass and nothing else, and CI fails if that ever changes.
+- **No dependencies.** SHA-256, HMAC, HKDF, PBKDF2, scrypt, ChaCha20-Poly1305 and base64 are each implemented in `src/crypto` and tested against the official vectors from their specifications. `cargo tree` lists multipass and nothing else, and CI fails if that ever changes.
 - **A standard file format.** The store is an ordinary age file, compatible with the reference implementation in both directions. If multipass ever breaks or disappears, `age -d ~/.multipass/store.age` still prints everything as plain text.
 - **Nothing readable on disk.** Entry names live inside the encrypted file, so the file does not even reveal which accounts you have.
 - **Secrets never touch argv.** Passphrases come from a hidden terminal prompt and secrets from a prompt or stdin, so neither shows up in `ps` or your shell history.
