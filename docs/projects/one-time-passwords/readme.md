@@ -81,8 +81,9 @@ aws-root
 | `src/crypto/sha512.rs` | New. SHA-512 (FIPS 180-4), with 64-bit words and a 128-byte block, and the FIPS vectors as tests. |
 | `src/crypto/sha256.rs` | `hmac` becomes generic over a small `Digest` trait that `Sha1`, `Sha256`, and `Sha512` implement. The trait gives each hash's block length, 64 bytes for SHA-1 and SHA-256 and 128 for SHA-512, so one HMAC pads the key correctly for all three. HKDF and PBKDF2 stay SHA-256. |
 | `src/crypto/base32.rs` | New. A base32 decoder (RFC 4648 § 6) that ignores case, spaces, and `=` padding, and rejects any other character. |
-| `src/crypto/mod.rs` | Registers the three new modules and the `Digest` trait. |
-| `src/otp.rs` | New. Parses and checks an `otpauth` URI, builds one from a bare key and an entry name with the name percent-encoded as the label, and computes `code(at_unix_seconds)`. The caller passes in the time, so tests control the clock. |
+| `src/crypto/hotp.rs` | New. HOTP (RFC 4226) and TOTP (RFC 6238), generic over the `Digest` trait: `hotp(key, counter, digits)` and `totp(key, unix_seconds, period, digits)`, with the RFC 4226 Appendix D and RFC 6238 Appendix B vectors as tests. |
+| `src/crypto/mod.rs` | Registers the four new modules and the `Digest` trait. |
+| `src/otp.rs` | New. Parses and checks an `otpauth` URI, builds one from a bare key and an entry name with the name percent-encoded as the label, and computes `code(at_unix_seconds)` by passing the decoded key, digits, and period to `crypto::hotp::totp` under the URI's algorithm. The caller passes in the time, so tests control the clock. The module holds no cryptography of its own. |
 | `src/store.rs` | `Entry.secret` becomes optional, and `Entry` gains `otp`. Writes format 2 and reads formats 1 and 2. Rejects an entry with neither `secret` nor `otp`, and an `otp` that fails the URI checks. |
 | `src/main.rs` | Adds the `otp` command with `--set` and `--clear`, adds `otp` as a `get --field` value, and makes `add --force` keep `otp`. Updates `USAGE`. |
 | `README.md` | Documents the `otp` command, the field, and the advice in § 3 about which setup keys belong in multipass. |
