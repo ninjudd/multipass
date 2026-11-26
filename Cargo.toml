@@ -1,0 +1,36 @@
+[package]
+name = "multipass"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "A small single-user password manager: one passphrase, one age-encrypted file"
+license = "MIT"
+repository = "https://github.com/ninjudd/multipass"
+publish = false
+
+# Each dependency is a deliberate choice.
+#
+#   age        the file format and all of the cryptography. multipass uses only
+#              passphrase mode (scrypt, then ChaCha20-Poly1305), which is
+#              symmetric: there is no public-key step for a quantum computer to
+#              break. Any stock age tool can decrypt the store.
+#   clap       the CLI
+#   rpassword  reads the passphrase from the terminal, never from argv
+#   serde      the plaintext inside the age file is JSON
+#
+# Deliberately absent: any other cryptography crate. multipass never calls a
+# primitive directly.
+[dependencies]
+age = "0.12.1"
+clap = { version = "4", features = ["derive", "env"] }
+rpassword = "7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1
