@@ -81,7 +81,7 @@ multipass does not merge. When two devices save before iCloud syncs, iCloud keep
 | `src/ffi.rs` | New. A C interface over `Store`: open with a passphrase, find a passkey, add an entry, save, and free. |
 | `src/store.rs` | Format 3: the `passkey` field, and reading formats 1 to 3. |
 | `src/main.rs` | `list` marks entries that hold a passkey; `get --field passkey` prints the site and creation date, never the key. |
-| `apple/` | New. One Xcode project, in Swift, that builds the app and its extension for iOS and macOS from shared sources (question 6 in § 6 settles how). It uses only Apple's frameworks: AuthenticationServices for the provider, CryptoKit for keys and signatures, LocalAuthentication and Security for Face ID, Touch ID, and the Keychain item, and Foundation's file coordination for iCloud Drive. The app's settings show the store's path, resolve sync conflicts, and remove the Keychain item. |
+| `apple/` | New. One Xcode project, in Swift, that builds the app and its extension for iOS and macOS from shared sources, as a SwiftUI multiplatform app: shared SwiftUI views, with a thin per-platform `ASCredentialProviderViewController` subclass in each extension. It uses only Apple's frameworks: AuthenticationServices for the provider, CryptoKit for keys and signatures, LocalAuthentication and Security for Face ID, Touch ID, and the Keychain item, and Foundation's file coordination for iCloud Drive. The app's settings show the store's path, resolve sync conflicts, and remove the Keychain item. |
 | `.github/workflows/ci.yml` | Builds the XCFramework and both apps on `macos-latest`, unsigned. |
 | `README.md`, `AGENTS.md` | Document the app and its install. `AGENTS.md` extends the dependency rule: Apple's system frameworks are allowed like the Rust standard library, and third-party code stays banned on every platform, including Swift packages. |
 
@@ -117,14 +117,14 @@ Each sign-in decrypts the store once after the Face ID or Touch ID prompt. That 
 
 ## 6. Open questions
 
-Questions 3, 5, and 6 block the design. Questions 1, 2, and 4 are decided.
+Questions 3 and 5 block the design. Questions 1, 2, 4, and 6 are decided.
 
 1. **Apple frameworks and "no dependencies".** Decided: sign with CryptoKit. Apple's system frameworks count like the Rust standard library, and third-party code stays banned.
 2. **Platforms.** Decided: the Mac and iPhone together, with the store synced through iCloud Drive as § 2.4 describes.
 3. **Distribution.** An iPhone app can only be installed through App Store Connect (TestFlight or the App Store) or as a development build on your own devices, and Developer ID covers only the Mac. Recommended: TestFlight for both platforms under one App Store Connect record, moving to the App Store when it is ready. Owner: the user.
 4. **Unlocking in the extension.** Decided: Touch ID from the start, with the passphrase kept in the Keychain as § 2.3 describes.
 5. **Reaching the iCloud container from the extension.** § 2.4 has the extension read the store from the app's iCloud container. Whether an AutoFill extension may open that container directly, or needs the app to keep a copy in a shared App Group container, is unverified. Owner: the implementer, through a prototype, before this plan goes `ready`.
-6. **How one project builds both apps.** A SwiftUI multiplatform app builds a native app for each system from shared Swift, with a thin per-platform extension class. Mac Catalyst compiles the iPhone app's UIKit code for the Mac, so the extension is written once. Running the iPad build unmodified on the Mac ("Designed for iPad") works only on Apple-silicon Macs, and may not run the extension at all. Recommended: SwiftUI multiplatform, with Mac Catalyst as the fallback. Owner: the user.
+6. **How one project builds both apps.** Decided: a SwiftUI multiplatform app. If the prototype shows that Mac Catalyst would share more of the extension's code, the implementer switches to Catalyst and records why here. The unmodified iPad build on the Mac ("Designed for iPad") is ruled out, because it runs only on Apple-silicon Macs and may not run the extension.
 
 ## 7. Background
 
