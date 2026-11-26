@@ -125,7 +125,7 @@ Computing a code takes two SHA-1 compressions and is too small to measure. Every
 ## 6. Open questions
 
 - **SHA-512 setup keys.** Deferred. multipass rejects them with a clear error until a site you use needs one. Then it gets a hand-written SHA-512 tested against the FIPS 180-4 vectors. Owner: the user, who decides when it is needed.
-- **Fields beyond the four.** Entries hold `secret`, `username`, `notes`, and `otp`. Arbitrary named fields, such as security questions or a PIN, would be their own project and their own store format. Deferred; owner: the user.
+- **Fields beyond the four.** Decided: entries hold exactly `secret`, `username`, `notes`, and `otp` in this project. Arbitrary named fields, such as security questions or a PIN, get a plan of their own later, with their own store format.
 
 ## 7. Background
 
