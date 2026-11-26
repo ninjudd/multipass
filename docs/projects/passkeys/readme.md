@@ -119,7 +119,7 @@ Each sign-in decrypts the store once after the Face ID or Touch ID prompt. That 
 
 ## 6. Open questions
 
-Question 5 blocks the plan until the prototype in § 8 answers it. Questions 1 to 4 and 6 are decided.
+Question 5 blocks the plan until the prototype in § 8 answers it, and questions 7 to 9 wait on the user. Questions 1 to 4 and 6 are decided.
 
 1. **Apple frameworks and "no dependencies".** Decided: sign with CryptoKit. Apple's system frameworks count like the Rust standard library, and third-party code stays banned.
 2. **Platforms.** Decided: the Mac and iPhone together, with the store synced through iCloud Drive as § 2.4 describes.
@@ -127,6 +127,9 @@ Question 5 blocks the plan until the prototype in § 8 answers it. Questions 1 t
 4. **Unlocking in the extension.** Decided: Touch ID from the start, with the passphrase kept in the Keychain as § 2.3 describes.
 5. **Reaching the iCloud container from the extension.** § 2.4 has the extension read the store from the app's iCloud container. Whether an AutoFill extension may open that container directly, or needs the app to keep a copy in a shared App Group container, is unverified. Owner: the implementer, through a prototype, before this plan goes `ready`.
 6. **How one project builds both apps.** Decided: a SwiftUI multiplatform app. If the prototype shows that Mac Catalyst would share more of the extension's code, the implementer switches to Catalyst and records why here. The unmodified iPad build on the Mac ("Designed for iPad") is ruled out, because it runs only on Apple-silicon Macs and may not run the extension.
+7. **Naming a new passkey's entry.** When a site registers a passkey, the extension must choose an entry. Recommended: use the site's relying party ID, such as `github.com`, as the name. When an entry with that name exists, add the `passkey` field to it, grouped with its password and one-time password as `otp` is. Owner: the user.
+8. **One passkey per entry, or several.** A second account on the same site registers a second passkey for the same relying party ID. Recommended: one passkey per entry, with the second account's entry named `<rp id> <user name>`, such as `github.com octocat-work`, so each entry still describes one account. Owner: the user.
+9. **Removing a passkey without its entry.** `rm` deletes a whole entry, including its password. Recommended: `multipass passkey <name> --clear`, which mirrors `otp --clear`. An entry must then hold at least one of `secret`, `otp`, and `passkey`, so `--clear` fails when it would leave the entry empty. Owner: the user.
 
 ## 7. Background
 
