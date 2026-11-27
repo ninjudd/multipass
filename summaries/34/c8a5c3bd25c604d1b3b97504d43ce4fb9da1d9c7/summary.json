@@ -1,0 +1,132 @@
+{
+ "version": 1,
+ "name": "Vault key package",
+ "project": "vault-key",
+ "pr": {
+  "repo": "ninjudd/multipass",
+  "number": 34,
+  "title": "Move a single-file store into a package, and merge later saves to it",
+  "head": "c8a5c3bd25c604d1b3b97504d43ce4fb9da1d9c7",
+  "headRef": "vault-key-move",
+  "base": "58cb2302f8f3bfd0ebc504ff854029d8634e438e",
+  "baseRef": "vault-key-format",
+  "basePr": 33
+ },
+ "overview": {
+  "summary": [
+   "multipass keeps a password store encrypted with age under one passphrase. Earlier releases kept it in a single file, <code>~/.multipass/store.age</code>. The layer below this one replaces that file with a <b>package</b>: a folder, <code>store.multipass</code>, holding a key file under the passphrase and store files under a random vault key. That layer refuses to open a single-file store, so anyone upgrading would be stuck.",
+   "This pull request moves a single-file store into a package at its first passphrase prompt. It leaves the old file in place, because another Mac still on an older multipass may keep saving to it, and at each later prompt it merges any such save into the package. Once the old file has gone 30 days unchanged, multipass deletes it. A small record inside the package, the <b>move record</b>, remembers what the old file held so that a later change to it can be told apart.",
+   "It is the last layer of the vault-key plan, so it also marks that plan completed and adds an outcome section that records what the build settled."
+  ],
+  "cards": [
+   {
+    "id": "terms",
+    "title": "Terms on this page",
+    "html": "<ul class=\"tight\"><li><b>Old file</b>: the single-file store from before the package, normally <code>~/.multipass/store.age</code>.</li><li><b>Package</b>: the <code>store.multipass</code> folder of key and store files.</li><li><b>Move record</b>: <code>moved.&lt;gen&gt;.&lt;id&gt;.age</code> in the package, under the vault key. It holds the old file's name, the SHA-256 of its bytes, when that hash was recorded (<code>since</code>), and a snapshot of the old store's text.</li><li><b>Stamp</b>: an entry's <code>modified</code> time in milliseconds. When two copies of the store merge, the entry with the later stamp wins.</li><li><b>Retirement</b>: deleting the old file and then its record, once the file has gone 30 days unchanged.</li></ul>"
+   },
+   {
+    "id": "review",
+    "title": "Review status at this head",
+    "html": "<p>This head merges the moved <code>vault-key-format</code> branch in and changes nothing else in this layer. Its review requested changes again: the three findings from the review of <code>abef916</code> still reproduce and stay open, each flagged under its line below:</p><ul class=\"tight\"><li>A second Mac can re-apply an old-file save over a newer edit, because merged changes are stamped with the time of each merge.</li><li><code>--store</code> or <code>MULTIPASS_STORE</code> naming the old file stops working once the old file is retired.</li><li>After a <code>passwd</code>, saves that an older multipass makes to the old file never merge.</li></ul><p class=\"note\">All repository checks pass, and CI's <code>test</code> job passed.</p>"
+   }
+  ]
+ },
+ "groups": [
+  {
+   "id": "core",
+   "title": "The move and the old-file check",
+   "kicker": "How src/vault.rs builds the package from the old file and checks that file at every later prompt",
+   "intro": [
+    "<code>Vault::open_or_move</code> decides between opening the package and moving the old file into one. It moves only when the package folder does not exist and the old file does. <code>move_in</code> asks for the passphrase, decrypts the old file, and builds the package in <code>store.multipass.tmp</code> with a key file, one store file, and a move record, then renames the folder into place, so the package appears whole or not at all. The old file is never written.",
+    "Every later prompt that can write runs <code>Session::settle</code>, which now calls <code>check_old_file</code> after any rotation. That function compares the old file's SHA-256 with each move record:",
+    "<div class=\"tblwrap\"><table class=\"tbl\"><thead><tr><th>What it finds</th><th>What it does</th></tr></thead><tbody><tr><td>Same hash</td><td class=\"r\">Nothing, or retires the old file and the record once <code>since</code> is 30 days ago</td></tr><tr><td>Different hash</td><td class=\"r\">Decrypts the old file, compares each entry with the snapshot, applies each difference stamped now, saves, writes a new record, deletes the old one</td></tr><tr><td>Old file gone</td><td class=\"r\">Deletes the record</td></tr><tr><td>No record at all</td><td class=\"r\">Adds the old file's entries at <code>modified 0</code>, so only missing names are added, and writes a record</td></tr></tbody></table></div>",
+    "A rotation writes each move record again under the new key, then deletes the old copies with the store files and key files it read. <code>hex_digest</code> in <code>src/crypto/sha256.rs</code> gives the hash as hex. The old file's bytes are ciphertext, so the hash is public and compared with an ordinary <code>==</code>."
+   ],
+   "checks": [
+    {
+     "kind": "context",
+     "text": "Several Macs share the package through a sync service, which brings over new files and deletions in any order. Hold that in mind at each step of <code>check_old_file</code>: another Mac may still see a record this Mac has already replaced."
+    },
+    {
+     "kind": "verify",
+     "text": "Two copies that move the same old file at once, with the sync service merging the two folders, keep every entry, rotate into one key at the next prompt, and retire both move records together after 30 days. Checked with a scratch unit test."
+    }
+   ],
+   "files": [
+    {
+     "path": "src/vault.rs",
+     "note": "Adds <code>MoveRecord</code>, the move (<code>open_or_move</code>, <code>move_in</code>, <code>build</code>), <code>check_old_file</code> in <code>settle</code>, records in <code>rotate</code>, and tests for every format, a wrong passphrase, a later save, rotation, a missing record, and a crash during the move.",
+     "checks": [
+      {
+       "kind": "flag",
+       "line": 937,
+       "text": "After a <code>passwd</code>, the package has one key file, so <code>open</code> never asks for another passphrase, and <code>typed</code> holds only the new one. An older multipass still saves to the old file under the old passphrase, so this branch warns at every prompt, never merges the save, and never retires the old file."
+      },
+      {
+       "kind": "flag",
+       "line": 953,
+       "text": "Each merged change gets <code>stamp(now_ms)</code>, so a repeat merge of the same save is a newer change, not a no-op. A second Mac that still holds the replaced record, or a retry after a crash between the save and the new record, re-applies the old file's value over an edit made since. A scratch test with two package copies reproduced the reverted edit."
+      },
+      {
+       "kind": "verify",
+       "line": 963,
+       "text": "With <code>main</code>'s build saving a new entry to the old file after the move, the next prompt of a release build warns <code>changed after the move; merged its changes</code> and lists the entry, and the prompt after it warns nothing. Checked with <code>expect</code>."
+      }
+     ]
+    },
+    {
+     "path": "src/crypto/sha256.rs",
+     "note": "Adds <code>hex_digest</code>, the SHA-256 of a byte slice as lower-case hex, for public data only. The FIPS 180-4 vector test now checks it too."
+    }
+   ]
+  },
+  {
+   "id": "cli",
+   "title": "Finding the old file from the command line",
+   "kicker": "How src/main.rs maps --store, MULTIPASS_STORE, and the default path to a package and an old file",
+   "intro": [
+    "<code>package_path</code> now returns a <code>Place</code>: the package, the old file it was or will be moved from, and whether the user named that old file. When <code>--store</code> or <code>MULTIPASS_STORE</code> names a file, the package is the same path ending in <code>.multipass</code>. Without either, the package is <code>~/.multipass/store.multipass</code> and the old file is <code>~/.multipass/store.age</code>.",
+    "<code>run</code> prints <code>note: … moved to …; update MULTIPASS_STORE or --store</code> while the user still names the old file and its package exists. <code>open_with</code> prints <code>Moved … into …</code> after a move, and prints the session's warnings after <code>settle</code>, so the old-file check's warnings reach the user. When <code>settle</code> fails, as in a folder multipass cannot write, a read command such as <code>list</code> warns and reads the store as it is, and a saving command fails. <code>init</code> refuses while the old file exists, because any other command moves it."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": "src/main.rs",
+     "note": "Replaces the refusal of a single-file store with <code>Place</code>, the <code>note:</code> and <code>Moved</code> lines, and <code>init</code>'s new refusal.",
+     "checks": [
+      {
+       "kind": "verify",
+       "line": 326,
+       "text": "A release build pointed at a format 2 store made by <code>main</code>'s build prints <code>Moved … into …</code> on the first <code>list</code> and the <code>note:</code> line on the second, and the old file stays. Checked with <code>expect</code>."
+      },
+      {
+       "kind": "flag",
+       "line": 737,
+       "text": "The named path maps to its package only while it is a file. After retirement deletes the old file, <code>--store …/store.age</code> fails with <code>no store at …/store.age; run multipass init</code>, and following that hint creates an empty package named <code>store.age</code> beside the real one. Reproduced with a release build."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "docs",
+   "title": "README and the vault-key plan",
+   "kicker": "What a user reads about the move, and how the plan records it",
+   "intro": [
+    "README gains a warning beside the install instructions: once the store is in a package, do not go back to a multipass from before the package, because after the old file is retired an older multipass finds no store, and its <code>init</code> would create a new, empty one. It also gains a paragraph on the move: where the package goes, that the old file stays and is merged for 30 unchanged days, and the reminder printed while <code>--store</code> names the old file.",
+    "The vault-key plan moves to <code>completed</code> and gains § 7, Outcome. It records the move record's fields, that a format 3 store keeps its stamps when it moves, that the old file is tried with every passphrase typed at the prompt, and the by-hand checks the author ran."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": "README.md",
+     "note": "Adds the downgrade warning under Install and a paragraph on the move under Use."
+    },
+    {
+     "path": "docs/projects/vault-key/readme.md",
+     "note": "Marks the plan completed and adds § 7, Outcome, with the details the build settled."
+    }
+   ]
+  }
+ ]
+}
