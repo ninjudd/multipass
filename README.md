@@ -48,7 +48,7 @@ multipass get github.com --field otp                          # the stored otpau
 multipass otp github.com --clear                              # remove the one-time password
 ```
 
-`--set` creates the entry when none exists, so an entry can hold only a one-time password. It keeps an `otpauth://` URI exactly as you give it, and turns a bare key into one. Codes use SHA-1, SHA-256, or SHA-512, 6 to 8 digits, and a period of up to 300 seconds, as the URI says. Counter-based (`hotp`) one-time passwords are not supported. `add --force` replaces an entry's secret, username, and notes, and keeps its one-time password.
+`--set` creates the entry when none exists, so an entry can hold only a one-time password. It refuses to replace a one-time password the entry already has, because a replaced setup key cannot be recovered and losing it can lock you out of the account; pass `--force` to replace it. It keeps an `otpauth://` URI exactly as you give it, and turns a bare key into one. Codes use SHA-1, SHA-256, or SHA-512, 6 to 8 digits, and a period of up to 300 seconds, as the URI says. Counter-based (`hotp`) one-time passwords are not supported. `add --force` replaces an entry's secret, username, and notes, and keeps its one-time password.
 
 A setup key stored next to its password means that anyone with your passphrase holds both factors for that account. multipass suits best the setup keys of accounts whose password lives elsewhere, such as in 1Password, so that no single vault holds both.
 
