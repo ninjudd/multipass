@@ -15,7 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use otp::Otp;
 use store::{Entry, Store, Version};
-use vault::{Ask, Session, Vault};
+use vault::{Ask, Opened, Session, Vault};
 
 const USAGE: &str = "\
 multipass: a small single-user password manager
@@ -562,6 +562,16 @@ fn open(vault: &Vault, now: u64, settle: Settle) -> Result<Session> {
                 let other = terminal_prompt("Other passphrase: ")?;
                 Ok((!other.is_empty()).then_some(other))
             }
+            Ask::OldFile(path) => {
+                eprintln!(
+                    "multipass: {} changed after the move, under a passphrase you have not \
+                     typed, such as the one before a passwd; type it to merge the change, or \
+                     press return to leave it for now",
+                    path.display()
+                );
+                let old = terminal_prompt("Old file's passphrase: ")?;
+                Ok((!old.is_empty()).then_some(old))
+            }
         }
     };
     open_with(vault, now, settle, &mut ask)
@@ -581,9 +591,21 @@ fn open_with(
     settle: Settle,
     ask: &mut dyn FnMut(Ask) -> io::Result<Option<String>>,
 ) -> Result<Session> {
-    let (mut session, moved) = vault.open_or_move(ask, now).map_err(|e| e.to_string())?;
-    if let (Some(old), true) = (vault.old(), moved) {
-        eprintln!("Moved {} into {}", old.display(), vault.path().display());
+    let (mut session, opened) = vault.open_or_move(ask, now).map_err(|e| e.to_string())?;
+    let old = vault.old().unwrap_or(vault.path()).display();
+    match opened {
+        Opened::Package => {}
+        Opened::Moved => eprintln!("Moved {old} into {}", vault.path().display()),
+        // The old file holds the whole store, so a command that only reads
+        // can use it where the package cannot be built.
+        Opened::Unmoved(e) => {
+            let message = format!("could not move {old}: {}", write_error(vault, e));
+            if settle != Settle::Try {
+                return Err(message);
+            }
+            eprintln!("multipass: {message}; reading {old} as it is");
+            return Ok(session);
+        }
     }
     if session.writable().is_err() {
         eprintln!("multipass: opened read-only; another passphrase was set on another Mac");
@@ -735,10 +757,13 @@ fn civil_from_days(days: u64) -> (u64, u64, u64) {
 fn package_path(named: Option<PathBuf>) -> Result<Place> {
     if let Some(path) = named {
         // A file is a single-file store from before the package: its
-        // package sits beside it, named for it.
-        return Ok(if path.is_file() {
+        // package sits beside it, named for it. Once a prompt retires the
+        // file, the package beside the name is still the one it means.
+        let beside = path.with_extension("multipass");
+        let retired = !path.exists() && path != beside && beside.is_dir();
+        return Ok(if path.is_file() || retired {
             Place {
-                package: path.with_extension("multipass"),
+                package: beside,
                 old: Some(path),
                 named_old: true,
             }
@@ -1246,5 +1271,77 @@ mod tests {
             let save = save.unwrap().unwrap_err();
             assert!(save.starts_with(&refused), "{case}: {save}");
         }
+    }
+
+    /// An old single-file store in a folder this process cannot write, as
+    /// in a read-only backup: a command that reads gets the old store as it
+    /// is, and one that saves, rotates or changes the passphrase fails,
+    /// naming the folder, before it asks for anything more.
+    #[test]
+    fn reads_an_old_store_it_cannot_move_and_refuses_to_save_to_it() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!("multipass-main-old-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let old = root.join("store.age");
+        let text = "multipass 2\nexample.com\n\tsecret hunter2\n";
+        fs::write(&old, age::encrypt(b"pass", text.as_bytes(), 10).unwrap()).unwrap();
+        let vault = Vault::new(root.join("store.multipass"), 10).with_old(Some(old.clone()));
+        let mut ask = |_: Ask| -> io::Result<Option<String>> { Ok(Some("pass".into())) };
+        let mode = |m| fs::set_permissions(&root, fs::Permissions::from_mode(m));
+        mode(0o500).unwrap();
+
+        let now = 1_764_000_000_000;
+        let read = open_with(&vault, now, Settle::Try, &mut ask);
+        let saving = open_with(&vault, now, Settle::Must, &mut ask).err();
+        let rekeying = open_with(&vault, now, Settle::Skip, &mut ask).err();
+        let package_made = vault.path().exists();
+
+        mode(0o700).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        let read = read.unwrap_or_else(|e| panic!("{e}"));
+        let secret = read.store.get("example.com").unwrap().secret.as_deref();
+        assert_eq!(secret, Some("hunter2"));
+        assert!(!package_made);
+        let refused = format!(
+            "could not move {}: could not write to {}: ",
+            old.display(),
+            vault.path().display()
+        );
+        for error in [saving, rekeying] {
+            let error = error.expect("an open that writes succeeded");
+            assert!(error.starts_with(&refused), "{error}");
+        }
+    }
+
+    /// `--store` naming the old single-file store keeps opening its package
+    /// once a prompt has retired the old file, and a path that names
+    /// nothing, with no package beside it, is a new package for `init`.
+    #[test]
+    fn a_named_old_file_opens_its_package_after_it_is_retired() {
+        use std::fs;
+
+        let root =
+            std::env::temp_dir().join(format!("multipass-main-named-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("store.multipass")).unwrap();
+        let old = root.join("store.age");
+        let retired = package_path(Some(old.clone())).unwrap();
+        fs::write(&old, b"old").unwrap();
+        let present = package_path(Some(old.clone())).unwrap();
+        let new = package_path(Some(root.join("other"))).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        for place in [&retired, &present] {
+            assert_eq!(place.package, root.join("store.multipass"));
+            assert_eq!(place.old.as_deref(), Some(old.as_path()));
+            assert!(place.named_old);
+        }
+        assert_eq!(new.package, root.join("other"));
+        assert_eq!(new.old, None);
+        assert!(!new.named_old);
     }
 }
