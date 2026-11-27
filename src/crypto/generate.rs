@@ -283,6 +283,16 @@ fn pick(table: &[u8], i: usize) -> u8 {
         .fold(0u8, |acc, (j, &b)| acc | (b & ct_eq_mask(i, j) as u8))
 }
 
+/// The longest run `draw_chars` allows. No run is longer than the password,
+/// so a limit at or past the length is no limit, and clamping it there
+/// keeps `ct_lt_mask`'s operands below `2^63` whatever the caller passes.
+/// The limit and the length are public, so this may branch on them.
+fn run_limit(chars: &Chars) -> usize {
+    chars
+        .max_consecutive
+        .map_or(chars.length, |limit| limit.min(chars.length))
+}
+
 fn draw_chars(chars: &Chars, source: &mut Source) -> io::Result<Generated> {
     let alphabet: Vec<u8> = chars
         .cells
@@ -296,7 +306,7 @@ fn draw_chars(chars: &Chars, source: &mut Source) -> io::Result<Generated> {
         start += cell.chars.len();
     }
     let full = (1usize << chars.requirements) - 1;
-    let limit = chars.max_consecutive.unwrap_or(usize::MAX >> 1);
+    let limit = run_limit(chars);
     let mut indexes = vec![0usize; chars.length];
     loop {
         let mut met = 0usize;
@@ -611,6 +621,27 @@ mod tests {
         for _ in 0..10_000 {
             let s = draw(&recipe, &mut fill);
             assert!(!s.contains("aaa") && !s.contains("bbb"), "{s}");
+        }
+    }
+
+    #[test]
+    fn draws_with_any_run_limit() {
+        // The run limit must stay within the password's length, where the
+        // draw's masked comparison is correct; checking that before drawing
+        // makes a wrong limit fail the test rather than loop forever.
+        for (limit, expected) in [
+            (None, 20),
+            (Some(20), 20),
+            (Some(19), 19),
+            (Some(1 << 63), 20),
+            (Some(usize::MAX), 20),
+        ] {
+            let chars = Chars {
+                max_consecutive: limit,
+                ..sets(&[LOWERCASE, DIGITS])
+            };
+            assert_eq!(run_limit(&chars), expected, "{limit:?}");
+            assert_eq!(draw(&Recipe::Chars(chars), &mut stream(3)).len(), 20);
         }
     }
 
