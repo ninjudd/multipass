@@ -7,9 +7,10 @@
 #   check-site.sh live <url>            check the deployed redirects with curl
 #
 # A URL passes when it starts with the repository's releases URL and holds no
-# dot segment, plain or percent-encoded, because curl collapses
-# /releases/../../ before it sends the request, so such a URL passes a prefix
-# check and still leaves the repository. The design is
+# dot segment and no percent sign, because curl collapses /releases/../../
+# before it sends the request, so such a URL passes a prefix check and still
+# leaves the repository. The real URLs hold no percent-encoding at all, so
+# refusing every % also refuses %2e, %252e, and %2f without naming each. The design is
 # docs/projects/installer/readme.md § 2.10.
 
 set -euo pipefail
@@ -28,10 +29,8 @@ problem() {
 }
 
 under_releases() {
-  local lower
-  lower="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
   case "$1" in "$RELEASES"*) ;; *) return 1 ;; esac
-  case "$lower/" in */../* | */./* | *%2e* | *\\*) return 1 ;; esac
+  case "$1/" in */../* | */./* | *%* | *\\*) return 1 ;; esac
 }
 
 # A destination on this site itself, absolute or relative. A
