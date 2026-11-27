@@ -102,7 +102,9 @@ check_static() {
 # <expected>, under the releases URL, and that no cache may keep it.
 check_redirect() {
   local url="$1" expected="$2" headers status location cache
-  headers="$(curl -sS --proto '=https' -o /dev/null -D - "$url" | tr -d '\r')" || {
+  # A time limit, so a request that hangs fails the check rather than holding
+  # the site job, as vercel-api.sh limits its requests.
+  headers="$(curl -sS --proto '=https' --max-time 30 -o /dev/null -D - "$url" | tr -d '\r')" || {
     problem "could not reach $url"
     return
   }
@@ -126,8 +128,12 @@ check_redirect() {
 # vercel.json's headers say. A positive s-maxage fails, because a shared
 # cache uses it in place of max-age.
 cache_revalidates() {
-  local directive directives max_age="" s_maxage="" must=""
-  IFS=, read -ra directives <<<"$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -d ' \t')"
+  local value directive directives max_age="" s_maxage="" must=""
+  value="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -d ' \t')"
+  # An empty value has no directives, and bash 3.2 treats the empty array
+  # as unbound under set -u, so it is refused here rather than by a crash.
+  [ -n "$value" ] || return 1
+  IFS=, read -ra directives <<<"$value"
   for directive in "${directives[@]}"; do
     case "$directive" in
       no-store | no-cache) return 0 ;;

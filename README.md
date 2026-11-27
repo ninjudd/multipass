@@ -4,7 +4,11 @@ multipass is a minimal password manager with no dependencies and no sharing. It 
 
 Use it beside a full password manager, not instead of one. Keep shared and everyday logins in something like 1Password. Keep the few secrets you never want on someone else's server in multipass, such as recovery codes, seed phrases, and the master password itself.
 
-Every line of multipass is in this repository, cryptography included: about 1,500 lines of cryptography and 6,600 of everything else, small enough to read in a day. It uses no third-party crates, so the only code you trust beyond this repository is the Rust toolchain, its standard library, and two of macOS's own frameworks, each loaded only when it is needed: AppKit when you pass `--clip`, and LocalAuthentication when a session agent starts, for Touch ID.
+Every line of multipass is in this repository, cryptography included: about 1,500 lines of cryptography and 6,600 of everything else, small enough to read in a day. It uses no third-party crates, so the only code a build from source trusts beyond this repository is the Rust toolchain, its standard library, and two of macOS's own frameworks, each loaded only when it is needed: AppKit when you pass `--clip`, and LocalAuthentication when a session agent starts, for Touch ID. How you [install](#install) it adds to that:
+
+- **A build from source**, by the installer or from a checkout, also trusts GitHub to serve the tagged source.
+- **The prebuilt binary** also trusts GitHub's hosted macOS runner that built it, with its Xcode linker and `lipo`, the pinned Rust toolchain, and GitHub's and Sigstore's signing of its attestation, which `gh attestation verify` checks. `install.sh verify` lets you replace that trust with your own build.
+- **The one-line install** also trusts whoever controls `getmultipass.dev`, its registrar account, and its Vercel team. GitHub's own URL and the check-first install avoid them.
 
 > [!WARNING]
 > multipass is new and has not been audited. Its cryptography is written by hand and checked against the official test vectors and against files from the reference age implementation, but no one outside the project has reviewed it.
@@ -20,7 +24,35 @@ Every line of multipass is in this repository, cryptography included: about 1,50
 
 ## Install
 
-Install from a checkout with `install.sh`. It needs [Rust](https://rustup.rs), builds the checkout with `cargo build --release --locked --offline`, which takes a few seconds because multipass has no dependencies, and installs the binary as `~/.local/bin/multipass`:
+```sh
+curl -fsSL https://getmultipass.dev/install.sh | bash
+```
+
+The installer installs the newest release as `~/.local/bin/multipass`, and it installs only code it can show came from the release's tag. With [Rust](https://rustup.rs) installed, it builds the tagged source with `cargo build --release --locked --offline`, which takes a few seconds because multipass has no dependencies. Without Rust, on a Mac, it installs the prebuilt universal binary only after [`gh`](https://cli.github.com)'s `gh attestation verify` proves that the release workflow built it from that tag. With neither, it stops and says how to get one, unless you set `MULTIPASS_UNVERIFIED=1`.
+
+`getmultipass.dev` only redirects to releases on GitHub. To skip it, use GitHub's URL:
+
+```sh
+curl -fsSL https://github.com/ninjudd/multipass/releases/latest/download/install.sh | bash
+```
+
+To pin a release, so a later one cannot change what you run, name its tag in the URL and its version for the installer:
+
+```sh
+curl -fsSL https://github.com/ninjudd/multipass/releases/download/v0.1.0/install.sh | MULTIPASS_VERSION=0.1.0 bash
+```
+
+To check the installer before you run it, download it with its attestation bundle and verify it. The bundle makes the check work without a `gh` login:
+
+```sh
+curl -fsSLO https://github.com/ninjudd/multipass/releases/latest/download/install.sh
+curl -fsSLO https://github.com/ninjudd/multipass/releases/latest/download/multipass.sigstore.json
+gh attestation verify install.sh --bundle multipass.sigstore.json --repo ninjudd/multipass \
+  --signer-workflow ninjudd/multipass/.github/workflows/release.yml --source-ref refs/heads/main
+bash install.sh
+```
+
+To install from a checkout instead, run `install.sh` there. It needs Rust, builds the checkout itself, and downloads nothing:
 
 ```sh
 git clone https://github.com/ninjudd/multipass
@@ -28,14 +60,20 @@ cd multipass
 ./install.sh
 ```
 
-The installer prints one row for each step. When `~/.local/bin` is not on your `PATH`, it prints the line to add to your shell's startup file rather than editing the file itself, and when another `multipass` comes first on your `PATH`, such as Canonical's Multipass for Ubuntu virtual machines, it says so. It records what it installed in `~/.local/share/multipass-install/receipt`, and it never touches your stores or `~/.multipass`.
+The installer prints one row for each step. When `~/.local/bin` is not on your `PATH`, it prints the line to add to your shell's startup file rather than editing the file itself, and when another `multipass` comes first on your `PATH`, such as Canonical's Multipass for Ubuntu virtual machines, it says so. It records what it installed in `~/.local/share/multipass-install/receipt`, and it never touches your stores or `~/.multipass`. Pass it a command after `-s --` from `curl`, or after `./install.sh` in a checkout:
 
 ```sh
-./install.sh status      # what is installed, and whether it matches the checkout
-./install.sh uninstall   # remove the binary the installer wrote, keeping your stores
+curl -fsSL https://getmultipass.dev/install.sh | bash -s -- status      # what is installed, and whether it is current
+curl -fsSL https://getmultipass.dev/install.sh | bash -s -- uninstall   # remove the binary the installer wrote, keeping your stores
 ```
 
-To upgrade, pull the checkout and run `./install.sh` again. A rerun that would install the same bytes leaves the file alone. For a copy the installer installed from a release, `multipass upgrade` downloads the newest release's installer with `/usr/bin/curl`, checks its attestation with `gh` when `gh` is installed, and runs it; `multipass upgrade 0.2.0` installs a given release, and `multipass upgrade --check` only says whether a newer release is out. `upgrade` is the only command that reaches the network, and only when you type it. `uninstall` removes only a file that still matches the receipt, so it never deletes a `multipass` you replaced by hand. Set `MULTIPASS_BIN_DIR` to install somewhere other than `~/.local/bin`; a later rerun installs to the same place without it.
+A release is reproducible, so you can check one by building it yourself. `install.sh verify 0.1.0` rebuilds your Mac's slice of that release with the Rust toolchain its build info names, and compares the bytes with the release's binary. It needs [rustup](https://rustup.rs), and the bytes match only with the macOS SDK the release used; when they differ, it names each build-info field that differs on your Mac:
+
+```sh
+curl -fsSL https://github.com/ninjudd/multipass/releases/latest/download/install.sh | bash -s -- verify 0.1.0
+```
+
+To upgrade a checkout install, pull the checkout and run `./install.sh` again. A rerun that would install the same bytes leaves the file alone. For a copy the installer installed from a release, `multipass upgrade` downloads the newest release's installer with `/usr/bin/curl`, checks its attestation with `gh` when `gh` is installed, and runs it; `multipass upgrade 0.2.0` installs a given release, and `multipass upgrade --check` only says whether a newer release is out. `upgrade` is the only command that reaches the network, and only when you type it. `uninstall` removes only a file that still matches the receipt, so it never deletes a `multipass` you replaced by hand. Set `MULTIPASS_BIN_DIR` to install somewhere other than `~/.local/bin`; a later rerun installs to the same place without it.
 
 > [!WARNING]
 > Once this multipass has moved your store into a package, do not go back to a multipass from before the package, with `multipass upgrade <version>` or an older checkout. That includes the published 0.1.0, which reads only a single-file store in formats 1 and 2. For up to 30 days an older multipass still reads and saves the old `store.age` beside the package, and the package merges its changes. After the old file is retired, an older multipass finds no store at `~/.multipass/store.age`, so every command fails, and its `init` would create a new, empty store beside the package.

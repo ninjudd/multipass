@@ -12,6 +12,7 @@ on:
       - .github/vercel/**
       - .github/scripts/check-site.sh
       - .github/scripts/vercel-api.sh
+      - .github/scripts/serving-deployment.sh
   workflow_dispatch:
 
 permissions:
@@ -53,20 +54,7 @@ jobs:
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
         run: |
-          set +e
-          alias="$(.github/scripts/vercel-api.sh GET "/v4/aliases/$DOMAIN")"
-          status=$?
-          set -e
-          case "$status" in
-            0) deployment="$(printf '%s\n' "$alias" | jq -r '.deploymentId // empty')" ;;
-            # Before the first promotion, the domain has no alias to roll
-            # back to.
-            4) deployment="" ;;
-            *)
-              echo "::error::could not read which deployment $DOMAIN serves"
-              exit 1
-              ;;
-          esac
+          deployment="$(.github/scripts/serving-deployment.sh "$DOMAIN")"
           echo "deployment=$deployment" >>"$GITHUB_OUTPUT"
       # A rollback turns off the automatic assignment of production domains
       # until a deployment is promoted, so a plain deploy --prod after one
@@ -94,8 +82,8 @@ jobs:
           URL: ${{ steps.deploy.outputs.url }}
         run: |
           id="$(.github/scripts/vercel-api.sh GET "/v13/deployments/${URL#https://}" | jq -r '.id // empty')"
-          if [ -z "$id" ]; then
-            echo "::error::Vercel has no deployment at $URL"
+          if ! [[ "$id" =~ ^dpl_[A-Za-z0-9]+$ ]]; then
+            echo "::error::Vercel named ${id:-no deployment} for $URL, not a deployment ID"
             exit 1
           fi
           echo "id=$id" >>"$GITHUB_OUTPUT"
