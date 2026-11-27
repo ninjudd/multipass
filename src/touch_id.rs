@@ -60,6 +60,14 @@ unsafe fn new_context() -> Id {
 static REPLY: Mutex<Option<mpsc::Sender<(bool, isize)>>> = Mutex::new(None);
 static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
 
+/// The reply block, built once and kept for the life of the process, as a
+/// global block must be. Its address is kept as a number, which any thread
+/// may share.
+fn reply_block() -> *const Block {
+    static BLOCK: OnceLock<usize> = OnceLock::new();
+    *BLOCK.get_or_init(|| objc::global_block(on_reply) as usize) as *const Block
+}
+
 /// The reply block's body. LocalAuthentication calls it once, on a queue of
 /// its own, with the block, a `BOOL`, and a null or valid `NSError`.
 unsafe extern "C" fn on_reply(_block: *const Block, success: u8, error: Id) {
@@ -128,7 +136,7 @@ impl TouchId {
                     c"evaluatePolicy:localizedReason:reply:",
                     POLICY,
                     text,
-                    objc::global_block(on_reply),
+                    reply_block(),
                 );
                 release(text);
             });
@@ -186,7 +194,7 @@ mod tests {
     #[test]
     fn the_reply_block_carries_success_and_failure() {
         let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|p| p.into_inner());
-        let block = objc::global_block(on_reply);
+        let block = reply_block();
         for (success, expected) in [(0u8, (false, 0)), (1u8, (true, 0))] {
             let (sender, receiver) = mpsc::channel();
             *REPLY.lock().unwrap() = Some(sender);

@@ -49,8 +49,9 @@ pub const APPROVAL_WAIT: Duration = Duration::from_secs(60);
 const REPLY_WAIT: Duration = Duration::from_secs(75);
 /// The largest counted body either side accepts, far beyond any store.
 const MAX_BODY: usize = 64 << 20;
-/// How long the agent's accept loop sleeps between checks that it should end.
-const POLL: Duration = Duration::from_millis(50);
+/// How long the agent's accept loop sleeps between checks that it should
+/// end. An idle agent runs for up to 21 days, so it wakes only once a second.
+const POLL: Duration = Duration::from_secs(1);
 /// The longest entry name a sheet shows.
 const REASON_NAME_CHARS: usize = 60;
 
@@ -378,11 +379,11 @@ pub fn run_agent(vault: Vault, paths: Paths) -> Result<(), String> {
         Some((exe, id)),
     ));
     let listener = agent.bind()?;
+    // The command that started the agent stops waiting for `ready` after 2
+    // seconds, so a failed write means only that nobody is listening; the
+    // agent serves either way.
     let mut stdout = io::stdout().lock();
-    stdout
-        .write_all(b"ready\n")
-        .and_then(|()| stdout.flush())
-        .map_err(|e| e.to_string())?;
+    let _ = stdout.write_all(b"ready\n").and_then(|()| stdout.flush());
     drop(stdout);
     agent.serve(listener);
     Ok(())
@@ -1028,7 +1029,7 @@ mod tests {
             std::thread::spawn(move || agent.serve(listener))
         };
         agent.end(Ended::Locked);
-        std::thread::sleep(POLL * 4);
+        std::thread::sleep(POLL * 2);
         assert!(!serving.is_finished(), "serve returned before any reply");
         agent.stopped.store(true, Ordering::SeqCst);
         serving.join().unwrap();
@@ -1265,10 +1266,17 @@ mod tests {
 
     #[test]
     fn the_deadline_is_the_keys_creation_plus_21_days() {
-        let s = setup("deadline");
-        let created = s.deadline - vault::SESSION_DAYS * 24 * 60 * 60;
-        assert!(created <= now_ms() / 1000 && now_ms() / 1000 - created < 60);
-        fs::remove_dir_all(&s.root).unwrap();
+        // A key made five days before the session opens, so a deadline
+        // counted from the session's start would land five days late.
+        const DAY: u64 = 24 * 60 * 60;
+        let root = temp("deadline");
+        let vault = Vault::new(root.join("store.multipass"), FAST);
+        let made = now_ms() / 1000 - 5 * DAY;
+        vault.init("pw", made * 1000).unwrap();
+        let mut ask = |_: vault::Ask| Ok(Some("pw".to_string()));
+        let session = vault.open(&mut ask, now_ms()).unwrap();
+        assert_eq!(session.session_deadline(), made + vault::SESSION_DAYS * DAY);
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
