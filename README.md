@@ -4,7 +4,7 @@ multipass is a minimal password manager with no dependencies and no sharing. It 
 
 Use it beside a full password manager, not instead of one. Keep shared and everyday logins in something like 1Password. Keep the few secrets you never want on someone else's server in multipass, such as recovery codes, seed phrases, and the master password itself.
 
-Every line of multipass is in this repository, cryptography included: about 1,000 lines of cryptography and 5,800 of everything else, small enough to read in a day. It uses no third-party crates, so the only code you trust beyond this repository is the Rust toolchain, its standard library, and two of macOS's own frameworks, each loaded only when it is needed: AppKit when you pass `--clip`, and LocalAuthentication when a session agent starts, for Touch ID.
+Every line of multipass is in this repository, cryptography included: about 1,500 lines of cryptography and 6,200 of everything else, small enough to read in a day. It uses no third-party crates, so the only code you trust beyond this repository is the Rust toolchain, its standard library, and two of macOS's own frameworks, each loaded only when it is needed: AppKit when you pass `--clip`, and LocalAuthentication when a session agent starts, for Touch ID.
 
 > [!WARNING]
 > multipass is new and has not been audited. Its cryptography is written by hand and checked against the official test vectors and against files from the reference age implementation, but no one outside the project has reviewed it.
