@@ -128,7 +128,7 @@ passphrase-set 1763000000
 key mXHnHUSvp+wCWtqvVrFcsN82rLveCB+L/s0F/V5yi9E
 ```
 
-Normally the folder holds one key file and one store file. With several key files, decrypt each and use the one with the largest `created`. The middle part of a store file's name is its key's generation, so `store.3f9a….age` opens with the `key` line, or a `retired` line, whose generation is `3f9a…`. With several store files, each holds a whole store, and for each entry the version with the largest `modified` is the current one.
+Normally the folder holds one key file and one store file. With several key files, decrypt each and use the one with the largest `created`. The middle part of a store file's name is its key's generation, so `store.3f9a….age` opens with the `key` line, or a `retired` line, whose generation is `3f9a…`. With several store files, each holds a whole store, and for each entry the version with the largest `modified` is the current one. A `store.age` beside the folder is the single-file store from before the move: it holds the store as it was then, plus whatever an older multipass saved to it since, so recover from the folder, not from it.
 
 age prints the store as text: each entry's name on its own line, then its fields indented by a tab. `modified` is when the entry last changed, in milliseconds since 1970. Each `previous-secret` and `previous-otp` line holds an earlier value after the time it was replaced. A removed entry is marked `deleted`, and its fields follow, with its secrets as history, until multipass writes the store 30 or more days after the removal.
 
