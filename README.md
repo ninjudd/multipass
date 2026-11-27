@@ -1,10 +1,10 @@
 # multipass
 
-multipass is a minimal password manager with no dependencies and no sharing. It keeps your secrets in one file, encrypted with [age](https://age-encryption.org) under a passphrase you choose, and it does nothing else: no accounts and no server.
+multipass is a minimal password manager with no dependencies and no sharing. It keeps your secrets, and the setup keys for your one-time passwords, in one file, encrypted with [age](https://age-encryption.org) under a passphrase you choose, and it does nothing else: no accounts and no server.
 
 Use it beside a full password manager, not instead of one. Keep shared and everyday logins in something like 1Password. Keep the few secrets you never want on someone else's server in multipass, such as recovery codes, seed phrases, and the master password itself.
 
-Every line of multipass is in this repository, cryptography included: about 600 lines of cryptography and 600 of everything else, small enough to read in an afternoon. It uses no third-party crates, so the only code you trust beyond this repository is the Rust toolchain and its standard library.
+Every line of multipass is in this repository, cryptography included: about 1,000 lines of cryptography and 900 of everything else, small enough to read in a day. It uses no third-party crates, so the only code you trust beyond this repository is the Rust toolchain and its standard library.
 
 > [!WARNING]
 > multipass is new and has not been audited. Its cryptography is written by hand and checked against the official test vectors and against files from the reference age implementation, but no one outside the project has reviewed it.
@@ -12,7 +12,7 @@ Every line of multipass is in this repository, cryptography included: about 600 
 ## Why it is built this way
 
 - **One passphrase, no public keys.** age's passphrase mode derives a key with scrypt and encrypts with ChaCha20-Poly1305. Both are symmetric, so there is no public-key step for a future quantum computer to break.
-- **No dependencies.** SHA-256, HMAC, HKDF, PBKDF2, scrypt, ChaCha20-Poly1305, and base64 are each implemented in `src/crypto` and tested against the official vectors from their specifications. `cargo tree` lists multipass and nothing else, and CI fails if that changes.
+- **No dependencies.** SHA-1, SHA-256, SHA-512, HMAC, HKDF, PBKDF2, scrypt, ChaCha20-Poly1305, HOTP, TOTP, base32, and base64 are each implemented in `src/crypto` and tested against the official vectors from their specifications. `cargo tree` lists multipass and nothing else, and CI fails if that changes.
 - **A standard file format.** The store is an ordinary age file, compatible with the reference implementation in both directions. If multipass breaks or disappears, `age -d ~/.multipass/store.age` still prints everything as plain text.
 - **Nothing readable on disk.** Entry names live inside the encrypted file, so the file does not reveal which accounts you have.
 - **Secrets never touch argv.** Passphrases come from a hidden terminal prompt, and secrets come from a prompt or stdin, so neither shows up in `ps` or your shell history.
@@ -36,6 +36,21 @@ multipass passwd                                 # change the passphrase
 ```
 
 Every command asks for the passphrase. To use a different file, set `MULTIPASS_STORE` or pass `--store`.
+
+## Keep one-time passwords
+
+An entry can hold a one-time password setup key beside its secret, username, and notes, and `otp` prints the entry's current code. When a site shows a QR code for an authenticator app, it usually offers the setup key as text too: either a base32 key such as `JBSW Y3DP EHPK 3PXP`, or an `otpauth://totp/` URI.
+
+```sh
+printf 'JBSW Y3DP EHPK 3PXP' | multipass otp github.com --set   # or paste it at the prompt
+multipass otp github.com | pbcopy                             # copies exactly the code
+multipass get github.com --field otp                          # the stored otpauth:// URI
+multipass otp github.com --clear                              # remove the one-time password
+```
+
+`--set` creates the entry when none exists, so an entry can hold only a one-time password. It keeps an `otpauth://` URI exactly as you give it, and turns a bare key into one. Codes use SHA-1, SHA-256, or SHA-512, 6 to 8 digits, and a period of up to 300 seconds, as the URI says. Counter-based (`hotp`) one-time passwords are not supported. `add --force` replaces an entry's secret, username, and notes, and keeps its one-time password.
+
+A setup key stored next to its password means that anyone with your passphrase holds both factors for that account. multipass suits best the setup keys of accounts whose password lives elsewhere, such as in 1Password, so that no single vault holds both.
 
 ## Move a secret out of 1Password
 
@@ -63,10 +78,11 @@ age -d ~/.multipass/store.age
 age prints the store as text: each entry's name on its own line, then its fields indented by a tab.
 
 ```text
-multipass 1
+multipass 2
 github.com
 	secret hunter2
 	username octocat
+	otp otpauth://totp/GitHub:octocat?secret=JBSWY3DPEHPK3PXP&issuer=GitHub
 ```
 
 If you lose the passphrase, no one can recover the store. That is the point.

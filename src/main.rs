@@ -1,12 +1,15 @@
 mod age;
 mod crypto;
+mod otp;
 mod store;
 mod tty;
 
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::{SystemTime, UNIX_EPOCH};
 
+use otp::Otp;
 use store::{Entry, Store};
 
 const USAGE: &str = "\
@@ -20,9 +23,15 @@ Commands:
                         is piped, and from a hidden prompt otherwise
     --username <value>
     --notes <value>
-    --force             Replace the entry if it already exists
+    --force             Replace the entry's secret, username and notes if it
+                        already exists, keeping its one-time password
   get <name>            Print one field of an entry, by default its secret
-    --field <field>     secret, username or notes
+    --field <field>     secret, username, notes or otp
+  otp <name>            Print the entry's current one-time password code
+    --set               Store a setup key, an otpauth:// URI or a base32 key,
+                        read from stdin when it is piped and from a hidden
+                        prompt otherwise. Creates the entry if needed
+    --clear             Remove the entry's one-time password
   list                  List entry names, one per line
   rm <name>             Remove an entry
   passwd                Change the store's passphrase
@@ -51,7 +60,18 @@ enum Command {
     Rm {
         name: String,
     },
+    Otp {
+        name: String,
+        action: OtpAction,
+    },
     Passwd,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum OtpAction {
+    Show,
+    Set,
+    Clear,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -59,6 +79,7 @@ enum Field {
     Secret,
     Username,
     Notes,
+    Otp,
 }
 
 #[derive(Debug, PartialEq)]
@@ -118,6 +139,7 @@ fn parse(args: Vec<String>) -> Result<Parsed> {
     let mut notes = None;
     let mut field = None;
     let mut force = false;
+    let mut otp_action = None;
     let mut positional = Vec::new();
 
     let mut args = args.into_iter();
@@ -147,14 +169,31 @@ fn parse(args: Vec<String>) -> Result<Parsed> {
                     "secret" => Field::Secret,
                     "username" => Field::Username,
                     "notes" => Field::Notes,
+                    "otp" => Field::Otp,
                     other => {
                         return Err(format!(
-                            "unknown field {other}; use secret, username or notes"
+                            "unknown field {other}; use secret, username, notes or otp"
                         ));
                     }
                 })
             }
             "--force" if inline.is_none() => force = true,
+            "--set" | "--clear" if inline.is_some() => {
+                return Err(format!("{flag} takes no value"));
+            }
+            "--set" | "--clear" => {
+                let action = if flag == "--set" {
+                    OtpAction::Set
+                } else {
+                    OtpAction::Clear
+                };
+                if otp_action
+                    .replace(action)
+                    .is_some_and(|other| other != action)
+                {
+                    return Err("--set and --clear cannot be used together".into());
+                }
+            }
             "--force" => return Err("--force takes no value".into()),
             _ => return Err(format!("unknown option {flag}; see multipass --help")),
         }
@@ -188,6 +227,10 @@ fn parse(args: Vec<String>) -> Result<Parsed> {
             field: field.take().unwrap_or(Field::Secret),
         },
         "rm" => Command::Rm { name: name()? },
+        "otp" => Command::Otp {
+            name: name()?,
+            action: otp_action.take().unwrap_or(OtpAction::Show),
+        },
         other => return Err(format!("unknown command {other}; see multipass --help")),
     };
     if let Some(extra) = positional.next() {
@@ -198,6 +241,9 @@ fn parse(args: Vec<String>) -> Result<Parsed> {
     }
     if field.is_some() {
         return Err("--field only applies to get".into());
+    }
+    if otp_action.is_some() {
+        return Err("--set and --clear only apply to otp".into());
     }
     Ok(Parsed::Run { store, command })
 }
@@ -228,16 +274,19 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
             force,
         } => {
             let (mut store, passphrase) = open(&path)?;
-            if store.get(&name).is_some() && !force {
+            let existing = store.get(&name);
+            if existing.is_some() && !force {
                 return Err(format!("{name} already exists; pass --force to replace it"));
             }
-            let secret = read_secret(&name)?;
+            let otp = existing.and_then(|entry| entry.otp.clone());
+            let secret = read_hidden(&format!("Secret for {name}: "), "secret")?;
             store.insert(
                 name,
                 Entry {
-                    secret,
+                    secret: Some(secret),
                     username,
                     notes,
+                    otp,
                 },
             );
             save(&store, &passphrase)?;
@@ -248,9 +297,10 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
                 .get(&name)
                 .ok_or_else(|| format!("no entry named {name}"))?;
             let value = match field {
-                Field::Secret => Some(&entry.secret),
+                Field::Secret => entry.secret.as_ref(),
                 Field::Username => entry.username.as_ref(),
                 Field::Notes => entry.notes.as_ref(),
+                Field::Otp => entry.otp.as_ref(),
             }
             .ok_or_else(|| format!("{name} has no value for that field"))?;
             print_value(value)?;
@@ -267,6 +317,62 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
                 .remove(&name)
                 .ok_or_else(|| format!("no entry named {name}"))?;
             save(&store, &passphrase)?;
+        }
+        Command::Otp { name, action } => {
+            let (mut store, passphrase) = open(&path)?;
+            match action {
+                OtpAction::Show => {
+                    let uri = store
+                        .get(&name)
+                        .ok_or_else(|| format!("no entry named {name}"))?
+                        .otp
+                        .as_ref()
+                        .ok_or_else(|| format!("{name} has no one-time password"))?;
+                    let otp = Otp::parse(uri).map_err(|e| e.to_string())?;
+                    let now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .map_err(|_| "the system clock is set before 1970")?
+                        .as_secs();
+                    print_value(&otp.code(now))?;
+                    if io::stderr().is_terminal() {
+                        eprintln!("expires in {}s", otp.seconds_left(now));
+                    }
+                }
+                OtpAction::Set => {
+                    let key = read_hidden(&format!("Setup key for {name}: "), "setup key")?;
+                    let uri = otp::setup_uri(&key, &name).map_err(|e| e.to_string())?;
+                    match store.get_mut(&name) {
+                        Some(entry) => entry.otp = Some(uri),
+                        None => {
+                            store.insert(
+                                name,
+                                Entry {
+                                    secret: None,
+                                    username: None,
+                                    notes: None,
+                                    otp: Some(uri),
+                                },
+                            );
+                        }
+                    }
+                    save(&store, &passphrase)?;
+                }
+                OtpAction::Clear => {
+                    let entry = store
+                        .get_mut(&name)
+                        .ok_or_else(|| format!("no entry named {name}"))?;
+                    if entry.otp.is_none() {
+                        return Err(format!("{name} has no one-time password"));
+                    }
+                    if entry.secret.is_none() {
+                        return Err(format!(
+                            "{name} holds only a one-time password; use rm to remove the entry"
+                        ));
+                    }
+                    entry.otp = None;
+                    save(&store, &passphrase)?;
+                }
+            }
         }
         Command::Passwd => {
             let (store, _) = open(&path)?;
@@ -304,24 +410,26 @@ fn new_passphrase() -> Result<String> {
     Ok(first)
 }
 
-fn read_secret(name: &str) -> Result<String> {
-    let secret = if io::stdin().is_terminal() {
-        let first = prompt(&format!("Secret for {name}: "))?;
+/// Reads a value that must never reach argv: from stdin when it is piped, and
+/// otherwise from a hidden prompt typed twice. `what` names it in errors.
+fn read_hidden(prompt_text: &str, what: &str) -> Result<String> {
+    let value = if io::stdin().is_terminal() {
+        let first = prompt(prompt_text)?;
         if prompt("Repeat it: ")? != first {
-            return Err("the secrets did not match".into());
+            return Err(format!("the {what}s did not match"));
         }
         first
     } else {
         let mut input = String::new();
         io::stdin()
             .read_to_string(&mut input)
-            .map_err(|e| format!("could not read the secret from stdin: {e}"))?;
+            .map_err(|e| format!("could not read the {what} from stdin: {e}"))?;
         strip_newline(input)
     };
-    if secret.is_empty() {
-        return Err("the secret cannot be empty".into());
+    if value.is_empty() {
+        return Err(format!("the {what} cannot be empty"));
     }
-    Ok(secret)
+    Ok(value)
 }
 
 /// Drops the one trailing newline that `echo` or `op read` adds.
@@ -412,6 +520,32 @@ mod tests {
     }
 
     #[test]
+    fn parses_the_otp_command() {
+        for (argv, action) in [
+            ("otp github.com", OtpAction::Show),
+            ("otp github.com --set", OtpAction::Set),
+            ("otp --clear github.com", OtpAction::Clear),
+            ("otp github.com --set --set", OtpAction::Set),
+        ] {
+            assert_eq!(
+                run_of(argv),
+                Command::Otp {
+                    name: "github.com".into(),
+                    action
+                },
+                "{argv}"
+            );
+        }
+        assert_eq!(
+            run_of("get github.com --field otp"),
+            Command::Get {
+                name: "github.com".into(),
+                field: Field::Otp,
+            }
+        );
+    }
+
+    #[test]
     fn rejects_bad_arguments() {
         for bad in [
             "",
@@ -425,11 +559,19 @@ mod tests {
             "add x --force=yes",
             "list --verbose",
             "list --store",
+            "otp",
+            "otp x --set --clear",
+            "otp x --clear --set",
+            "otp x --set=yes",
+            "add x --set",
+            "get x --clear",
+            "otp x --field otp",
+            "get x --field code",
         ] {
             assert!(parse(args(bad)).is_err(), "{bad:?} parsed");
         }
         // The store text cannot hold an entry with no name.
-        for command in ["add", "get", "rm"] {
+        for command in ["add", "get", "rm", "otp"] {
             let argv = vec![command.to_string(), String::new()];
             assert!(parse(argv).is_err(), "{command} with an empty name parsed");
         }

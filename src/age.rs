@@ -12,7 +12,9 @@
 use std::fmt;
 use std::io;
 
-use crate::crypto::{base64, chacha20poly1305 as aead, ct_eq, random, scrypt::scrypt, sha256};
+use crate::crypto::hmac::hmac;
+use crate::crypto::sha256::{self, Sha256};
+use crate::crypto::{base64, chacha20poly1305 as aead, ct_eq, random, scrypt::scrypt};
 
 const INTRO: &[u8] = b"age-encryption.org/v1\n";
 const SCRYPT_LABEL: &[u8] = b"age-encryption.org/v1/scrypt";
@@ -93,7 +95,7 @@ pub fn encrypt(passphrase: &[u8], plaintext: &[u8], log_n: u8) -> io::Result<Vec
         )
         .as_bytes(),
     );
-    let mac = sha256::hmac(&sha256::hkdf(&[], &file_key, b"header"), &[&out]);
+    let mac = hmac::<Sha256>(&sha256::hkdf(&[], &file_key, b"header"), &[&out]);
     out.extend_from_slice(format!(" {}\n", base64::encode(&mac)).as_bytes());
 
     out.extend_from_slice(&nonce);
@@ -161,7 +163,7 @@ pub fn decrypt(passphrase: &[u8], data: &[u8]) -> Result<Vec<u8>, Error> {
 
     let file_key = aead::open(&scrypt_key(passphrase, &salt, log_n), &[0; 12], &wrapped)
         .ok_or(Error::WrongPassphrase)?;
-    let expected = sha256::hmac(
+    let expected = hmac::<Sha256>(
         &sha256::hkdf(&[], &file_key, b"header"),
         &[&data[..header_len]],
     );

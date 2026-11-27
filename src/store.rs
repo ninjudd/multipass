@@ -4,10 +4,11 @@
 //! `age -d`:
 //!
 //! ```text
-//! multipass 1
+//! multipass 2
 //! github.com
 //!     secret hunter2
 //!     username octocat
+//!     otp otpauth://totp/GitHub:octocat?secret=JBSWY3DPEHPK3PXP
 //! bank.example
 //!     secret correct horse battery staple
 //!     notes recovery codes\nare in the safe
@@ -16,7 +17,8 @@
 //! An unindented line names an entry. Each line under it is indented with
 //! one tab (shown as spaces above) and holds a field name, one space, and the
 //! value. Names and values escape backslash, newline, tab and carriage return
-//! as `\\`, `\n`, `\t` and `\r`.
+//! as `\\`, `\n`, `\t` and `\r`. Every entry has a `secret`, an `otp`, or
+//! both. Format 1, which multipass still reads, has no `otp` field.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -25,15 +27,20 @@ use std::io::{self, Write};
 use std::path::Path;
 
 use crate::age;
+use crate::otp::Otp;
 
-const HEADER: &str = "multipass 1";
+const HEADER: &str = "multipass 2";
+const FORMAT_1: &str = "multipass 1";
 
-/// One secret and what goes with it.
+/// One account: its secret, its one-time password, or both, and what goes
+/// with them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entry {
-    pub secret: String,
+    pub secret: Option<String>,
     pub username: Option<String>,
     pub notes: Option<String>,
+    /// An `otpauth://totp/` URI, kept exactly as it was entered.
+    pub otp: Option<String>,
 }
 
 /// Every entry, keyed by name. Names live inside the encrypted file, so the
@@ -50,6 +57,10 @@ impl Store {
 
     pub fn get(&self, name: &str) -> Option<&Entry> {
         self.entries.get(name)
+    }
+
+    pub fn get_mut(&mut self, name: &str) -> Option<&mut Entry> {
+        self.entries.get_mut(name)
     }
 
     /// Adds or replaces an entry, returning the one it replaced.
@@ -72,8 +83,9 @@ impl Store {
             out.push_str(&escape(name));
             out.push('\n');
             let fields = [
-                ("secret", Some(&entry.secret)),
+                ("secret", entry.secret.as_ref()),
                 ("username", entry.username.as_ref()),
+                ("otp", entry.otp.as_ref()),
                 ("notes", entry.notes.as_ref()),
             ];
             for (field, value) in fields {
@@ -93,13 +105,14 @@ impl Store {
         let body = text.strip_suffix('\n').ok_or(Error::Format { line: 1 })?;
         let mut lines = body.split('\n').zip(1..);
 
-        match lines.next() {
-            Some((HEADER, _)) => {}
+        let format_1 = match lines.next() {
+            Some((HEADER, _)) => false,
+            Some((FORMAT_1, _)) => true,
             Some((first, _)) if first.starts_with("multipass ") => {
                 return Err(Error::UnsupportedFormat(first["multipass ".len()..].into()));
             }
             _ => return Err(Error::Format { line: 1 }),
-        }
+        };
 
         let mut store = Store::new();
         let mut pending: Option<Pending> = None;
@@ -111,12 +124,17 @@ impl Store {
                     "secret" => &mut entry.secret,
                     "username" => &mut entry.username,
                     "notes" => &mut entry.notes,
+                    "otp" if !format_1 => &mut entry.otp,
                     _ => return Err(Error::Format { line: n }),
                 };
                 if slot.is_some() {
                     return Err(Error::Format { line: n });
                 }
-                *slot = Some(unescape(value).ok_or(Error::Format { line: n })?);
+                let value = unescape(value).ok_or(Error::Format { line: n })?;
+                if key == "otp" && Otp::parse(&value).is_err() {
+                    return Err(Error::Format { line: n });
+                }
+                *slot = Some(value);
             } else {
                 if let Some(done) = pending.take() {
                     done.finish(&mut store)?;
@@ -130,6 +148,7 @@ impl Store {
                     secret: None,
                     username: None,
                     notes: None,
+                    otp: None,
                 });
             }
         }
@@ -182,15 +201,19 @@ struct Pending {
     secret: Option<String>,
     username: Option<String>,
     notes: Option<String>,
+    otp: Option<String>,
 }
 
 impl Pending {
     fn finish(self, store: &mut Store) -> Result<(), Error> {
-        let secret = self.secret.ok_or(Error::Format { line: self.line })?;
+        if self.secret.is_none() && self.otp.is_none() {
+            return Err(Error::Format { line: self.line });
+        }
         let entry = Entry {
-            secret,
+            secret: self.secret,
             username: self.username,
             notes: self.notes,
+            otp: self.otp,
         };
         match store.insert(self.name, entry) {
             None => Ok(()),
@@ -284,7 +307,7 @@ impl fmt::Display for Error {
             Error::NotText => write!(f, "the decrypted store is not UTF-8 text"),
             Error::UnsupportedFormat(v) => write!(
                 f,
-                "the store uses format {v}, but this multipass reads format 1"
+                "the store uses format {v}, but this multipass reads formats 1 and 2"
             ),
             Error::JsonFormat => write!(
                 f,
@@ -310,21 +333,34 @@ mod tests {
         store.insert(
             "github.com",
             Entry {
-                secret: "hunter2".into(),
+                secret: Some("hunter2".into()),
                 username: None,
                 notes: None,
+                otp: Some(OTP.into()),
             },
         );
         store.insert(
             "bank.example",
             Entry {
-                secret: "correct horse battery staple".into(),
+                secret: Some("correct horse battery staple".into()),
                 username: Some("me@example.com".into()),
                 notes: Some("recovery codes\nare in the safe".into()),
+                otp: None,
+            },
+        );
+        store.insert(
+            "aws-root",
+            Entry {
+                secret: None,
+                username: None,
+                notes: None,
+                otp: Some("otpauth://totp/AWS?secret=KRSXG5CTMVRXEZLU&digits=8".into()),
             },
         );
         store
     }
+
+    const OTP: &str = "otpauth://totp/GitHub:octocat?secret=JBSWY3DPEHPK3PXP&issuer=GitHub";
 
     fn temp_dir() -> PathBuf {
         static NEXT: AtomicUsize = AtomicUsize::new(0);
@@ -342,13 +378,16 @@ mod tests {
     fn writes_readable_text() {
         assert_eq!(
             sample().to_text(),
-            "multipass 1\n\
+            "multipass 2\n\
+             aws-root\n\
+             \totp otpauth://totp/AWS?secret=KRSXG5CTMVRXEZLU&digits=8\n\
              bank.example\n\
              \tsecret correct horse battery staple\n\
              \tusername me@example.com\n\
              \tnotes recovery codes\\nare in the safe\n\
              github.com\n\
-             \tsecret hunter2\n"
+             \tsecret hunter2\n\
+             \totp otpauth://totp/GitHub:octocat?secret=JBSWY3DPEHPK3PXP&issuer=GitHub\n"
         );
     }
 
@@ -362,9 +401,10 @@ mod tests {
             store.insert(
                 format!("name{s}{i}"),
                 Entry {
-                    secret: format!("secret{s}"),
+                    secret: Some(format!("secret{s}")),
                     username: Some(s.to_string()),
                     notes: Some(format!("{s}{s}")),
+                    otp: Some(format!("otpauth://totp/{s}?secret=JBSWY3DPEHPK3PXP&x={s}")),
                 },
             );
         }
@@ -384,7 +424,7 @@ mod tests {
     #[test]
     fn hides_names_and_secrets() {
         let file = sample().encrypt("pass", FAST).unwrap();
-        for needle in ["github.com", "hunter2", "bank.example", "me@example.com"] {
+        for needle in ["github.com", "hunter2", "bank.example", "JBSWY3DPEHPK3PXP"] {
             assert!(
                 !file.windows(needle.len()).any(|w| w == needle.as_bytes()),
                 "ciphertext contains {needle}"
@@ -406,6 +446,13 @@ mod tests {
             ("multipass 1\nbad\\q\n\tsecret x\n", 2),
             ("multipass 1\n\n", 2),
             ("multipass 1\na\n\tsecret x\na\n\tsecret y\n", 4),
+            ("multipass 2\nname\n\tusername u\n", 2),
+            ("multipass 2\nname\n\totp otpauth://totp/x?secret=0\n", 3),
+            ("multipass 2\nname\n\totp https://example.com\n", 3),
+            (
+                "multipass 1\nname\n\totp otpauth://totp/x?secret=JBSWY3DPEHPK3PXP\n",
+                3,
+            ),
         ];
         for (text, line) in cases {
             match Store::from_text(text) {
@@ -414,13 +461,28 @@ mod tests {
             }
         }
         assert!(matches!(
-            Store::from_text("multipass 2\n"),
-            Err(Error::UnsupportedFormat(v)) if v == "2"
+            Store::from_text("multipass 3\n"),
+            Err(Error::UnsupportedFormat(v)) if v == "3"
         ));
         assert!(matches!(
             Store::from_text(r#"{"format":1,"entries":{"a":{"secret":"x"}}}"#),
             Err(Error::JsonFormat)
         ));
+    }
+
+    #[test]
+    fn reads_a_store_that_format_1_wrote() {
+        let store = Store::from_text("multipass 1\nbank.example\n\tsecret s\n\tnotes n\n").unwrap();
+        let entry = store.get("bank.example").unwrap();
+        assert_eq!(
+            (
+                entry.secret.as_deref(),
+                entry.notes.as_deref(),
+                entry.otp.as_deref()
+            ),
+            (Some("s"), Some("n"), None)
+        );
+        assert!(store.to_text().starts_with("multipass 2\n"));
     }
 
     #[test]
