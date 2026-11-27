@@ -33,4 +33,7 @@ jobs:
           fi
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
-      - run: cargo test
+      # --locked fails a version bump that forgets Cargo.lock here, in its
+      # pull request, rather than in the release workflow.
+      - run: cargo test --locked
+      - run: tests/install.sh

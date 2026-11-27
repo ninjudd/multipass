@@ -27,7 +27,7 @@ multipass has no dependencies, not even dev-dependencies, and that is a feature 
 
 ## Tests
 
-Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` before handing work over; CI runs the same three plus the dependency check. Tests use scrypt work factor 10 so they stay fast. The CLI always uses `age::DEFAULT_WORK_FACTOR` (18), about a third of a second in a release build.
+Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` and, when you change `install.sh`, `tests/install.sh` before handing work over; CI runs all four plus the dependency check. `tests/install.sh` installs this checkout, and a release made from it through a `file://` mirror, with `HOME` in a temporary directory, so it needs no network. Tests use scrypt work factor 10 so they stay fast. The CLI always uses `age::DEFAULT_WORK_FACTOR` (18), about a third of a second in a release build.
 
 The CLI reads passphrases from `/dev/tty`, so it cannot be driven from a plain pipe. To exercise it without a terminal, use `expect` against a release build, and point `--store` at a temporary file.
 
