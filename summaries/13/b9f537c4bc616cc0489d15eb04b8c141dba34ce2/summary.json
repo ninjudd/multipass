@@ -1,0 +1,79 @@
+{
+ "version": 1,
+ "name": "Shared vaults plan",
+ "project": "shared-vaults",
+ "pr": {
+  "repo": "ninjudd/multipass",
+  "number": 13,
+  "title": "Plan shared vaults",
+  "head": "b9f537c4bc616cc0489d15eb04b8c141dba34ce2",
+  "headRef": "shared-vaults-spec",
+  "base": "094573e38328bd5448687043d41ff8653c77454c",
+  "baseRef": "main"
+ },
+ "overview": {
+  "summary": [
+   "multipass is a password manager for one person. Today it keeps one age file encrypted under one passphrase. Once the plans now merged to <code>main</code> ship, it keeps a <b>package</b> instead: a folder of files that are written once and never changed, which a random <b>vault key</b> encrypts. This pull request adds a plan, and no code, for letting several people share one package, such as a household's recovery codes.",
+   "The plan keeps every entry under the symmetric vault key, and uses public-key cryptography only to deliver each new vault key and to sign who may receive it:",
+   "<ol><li><b>Each member has an identity of two key pairs.</b> An age hybrid post-quantum key pair, ML-KEM-768 with X25519 (age's <code>mlkem768x25519</code> type), receives vault keys. An ML-DSA-65 key pair signs membership. Both live in the package in the member's identity file, under their own passphrase, with the newest generation they have verified.</li><li><b>Each rotation writes a signed membership record and grants.</b> The record, <code>members.&lt;gen&gt;.age</code>, lists every member's public keys, names the generations it follows, commits to the new vault key, and carries the rotating member's signature. Each grant delivers the vault key to one member.</li><li><b>Members accept a generation only by five rules.</b> The grant's key must match the record's commitment, and the record must follow a generation the member trusts. It must also be signed by someone listed there, with a key no accepted generation revokes. A removal or a <code>passwd</code> revokes keys, and a sibling generation that still lists a revoked member or key is treated as ended.</li><li><b>Fingerprints are read aloud both ways</b> when someone joins, so each side knows whose keys they hold.</li><li><b>The store text does not change.</b> Membership lives in its own files, so a shared vault's store files use the same format as a solo store's.</li></ol>",
+   "The plan is a <code>draft</code> at priority <code>later</code>, and nothing in it is scheduled. It says how <code>AGENTS.md</code> and <code>README.md</code> would change. Its nine open questions are deferred on purpose. They start with whether to lift the passphrase-only rule at all, and include whether to adopt the model of MLS (RFC 9420), the IETF standard for group keys, instead of this protocol."
+  ],
+  "cards": [
+   {
+    "id": "terms",
+    "title": "Terms on this page",
+    "html": "<ul class=\"tight\"><li><b>Vault key</b>: the random 256-bit key that encrypts the store files, from the vault-key plan. It rotates at least every 21 days.</li><li><b>Generation</b>: one vault key and the files written under it, named by a random id.</li><li><b>Identity</b> and <b>recipient</b>: a member's private and public key in age's terms.</li><li><b>Grant</b>: one generation's key file text, encrypted to one member's recipient.</li><li><b>Retired key</b>: an earlier generation's key, carried forward for 90 days so late store files still merge.</li><li><b>Sibling generations</b>: two rotations that follow the same generation because two members rotated before hearing of each other.</li></ul>"
+   },
+   {
+    "id": "review",
+    "title": "Review history so far",
+    "html": "<p>The first review, of <code>492d0bc</code>, opened four threads: forged and replayed grants, the rule documents, <code>passwd</code>, and a format 4 ambiguity. All four were fixed at <code>dd21dea</code>.</p><p>The review of <code>dd21dea</code> opened two more: a sibling generation that still granted its key to a removed member, and an old signing key still valid after <code>passwd</code>. Both were fixed at <code>496082d</code> by revocations that bind every generation not leading to them.</p><p>The reviews of <code>ef72363</code> and <code>a09a413</code> are clean, with all six threads resolved, and the head carries the <code>clean</code> label. Since <code>ef72363</code>, the plan has been rebased onto the base pull request's new head. It also checks rule 5 again on generations already accepted when a revocation arrives, and gives the MLS bullet its reason, which takes the last two suggestions. None remain.</p><p>After the base pull request merged, <code>b9f537c</code> rebased the plan onto <code>main</code> unchanged, and its review is clean too.</p>"
+   }
+  ]
+ },
+ "groups": [
+  {
+   "id": "plan",
+   "title": "The shared-vaults plan",
+   "kicker": "One new plan document, read against the plans and rule documents it builds on",
+   "intro": [
+    "The whole change is one plan, <code>docs/projects/shared-vaults/readme.md</code>. Sections 2.1 to 2.5 lay out the package's new files, the identity file, the signed membership record, its revocations, and its acceptance rules, how a member opens the vault, and joining, admitting, removing, and <code>passwd</code>. Section 2.6 lists what sharing does not protect. Section 2.7 weighs about 2,300 lines of new constant-time cryptography in <code>src/crypto</code> against calling CryptoKit. Section 2.8 says how each file changes, <code>AGENTS.md</code> and <code>README.md</code> included.",
+    "Read it beside the plans it depends on, all now on <code>main</code>, where the pull request that held them merged. The mergeable store gives store format 3 and <code>Store::merge</code>, where the newest <code>modified</code> stamp wins. The vault key gives the package, key files, rotation, and retired keys. Session unlock gives an agent that holds the vault key."
+   ],
+   "checks": [
+    {
+     "kind": "verify",
+     "text": "<code>project check</code> prints <code>Project plans are valid.</code> at this head, and <code>git diff --check</code> against the merge base prints nothing. Both ran in a scratch worktree of the head."
+    },
+    {
+     "kind": "context",
+     "text": "Store format numbers: the mergeable-store plan's § 2.1 now defines each number once. 3 is <code>modified</code> and tombstones, and 4 is the passkeys plan's <code>passkey</code> field. This plan adds no format, and its § 7 points at that table."
+    }
+   ],
+   "files": [
+    {
+     "path": "docs/projects/shared-vaults/readme.md",
+     "note": "The new plan: package layout, identity file, signed membership and its acceptance rules, opening, membership commands, risks, implementation choices, and open questions.",
+     "collapsed": false,
+     "checks": [
+      {
+       "kind": "context",
+       "line": 77,
+       "text": "§ 2.3's revocation paragraph and five rules are what stop a planted grant, a replayed grant, a removed member's fork, a fork signed with a key <code>passwd</code> replaced, and a sibling generation that still lists a removed member. Check each attack against them, in both arrival orders."
+      },
+      {
+       "kind": "context",
+       "line": 85,
+       "text": "Rule 5 is checked again for every generation already accepted when a new revocation arrives (the paragraph above the rules). That is what lets § 4's \"whichever arrived first\" hold for a sibling signed with a key revoked later."
+      },
+      {
+       "kind": "context",
+       "line": 217,
+       "text": "§ 6 defers every question on purpose: the user owns 1 to 7, MLS included, and the implementer owns 8 and 9. A <code>draft</code> plan claims no readiness, so these do not block review."
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}
