@@ -54,7 +54,7 @@ multipass passwd                                 # change the passphrase
 multipass rekey                                  # replace the vault key now
 ```
 
-The first command asks for the passphrase, and on a Mac with Touch ID or an Apple Watch, later commands ask for a touch instead, as [Stay unlocked between commands](#stay-unlocked-between-commands) describes. To use a different store, set `MULTIPASS_STORE` or pass `--store` with the path of its folder.
+The first command asks for the passphrase, and on a Mac with Touch ID or an Apple Watch, later commands ask for a touch instead, as [Stay unlocked between commands](#stay-unlocked-between-commands) describes. `generate` and `upgrade` open no store, so they ask for neither. To use a different store, set `MULTIPASS_STORE` or pass `--store` with the path of its folder.
 
 The store is a folder, `~/.multipass/store.multipass`, that holds a key file, `key.<generation>.age`, encrypted under your passphrase, and a store file, `store.<generation>.<id>.age`, encrypted under the vault key in the key file. Finder shows it as an ordinary folder. Move or copy the whole folder, never one file out of it, because a store file opens only with the key file of its generation.
 
