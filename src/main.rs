@@ -339,7 +339,7 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
             notes,
             force,
         } => {
-            let (mut store, passphrase) = open(&path)?;
+            let (mut store, passphrase) = open(&path, now)?;
             let existing = store.get(&name);
             if existing.is_some() && !force {
                 return Err(format!("{name} already exists; pass --force to replace it"));
@@ -365,7 +365,7 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
             clip,
             previous,
         } => {
-            let (store, _) = open(&path)?;
+            let (store, _) = open(&path, now)?;
             let value = match previous {
                 Some(n) => previous_value(&store, &name, field, n)?,
                 None => {
@@ -384,20 +384,20 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
             deliver(value, clip)?;
         }
         Command::History { name } => {
-            let (store, _) = open(&path)?;
+            let (store, _) = open(&path, now)?;
             let version = store
                 .version(&name)
                 .ok_or_else(|| format!("no entry named {name}"))?;
             print!("{}", history_text(version));
         }
         Command::List => {
-            let (store, _) = open(&path)?;
+            let (store, _) = open(&path, now)?;
             for name in store.names() {
                 println!("{name}");
             }
         }
         Command::Rm { name } => {
-            let (mut store, passphrase) = open(&path)?;
+            let (mut store, passphrase) = open(&path, now)?;
             let stamp = stamp(&store, now);
             store
                 .remove(&name, stamp)
@@ -405,7 +405,7 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
             save(&store, &passphrase)?;
         }
         Command::Otp { name, action } => {
-            let (mut store, passphrase) = open(&path)?;
+            let (mut store, passphrase) = open(&path, now)?;
             match action {
                 OtpAction::Show { clip } => {
                     let uri = store
@@ -464,7 +464,7 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
             }
         }
         Command::Passwd => {
-            let (store, _) = open(&path)?;
+            let (store, _) = open(&path, now)?;
             save(&store, &new_passphrase()?)?;
             eprintln!("Passphrase changed");
         }
@@ -592,9 +592,12 @@ fn refuse_otp_replacement(store: &Store, name: &str, force: bool) -> Result<()> 
     Ok(())
 }
 
-fn open(path: &Path) -> Result<(Store, String)> {
+/// Opens the store as of `now`, without what the next write would drop, so a
+/// removed secret past its 30 days is gone even before that write.
+fn open(path: &Path, now: u64) -> Result<(Store, String)> {
     let passphrase = prompt("Passphrase: ")?;
-    let store = Store::load(path, &passphrase).map_err(|e| e.to_string())?;
+    let mut store = Store::load(path, &passphrase).map_err(|e| e.to_string())?;
+    store.expire(Cutoffs::at(now));
     Ok((store, passphrase))
 }
 

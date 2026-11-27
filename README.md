@@ -59,7 +59,7 @@ An entry keeps its last 10 earlier secrets, or every one it replaced in the past
 multipass get github.com --previous 1 | multipass add github.com
 ```
 
-After 30 days the removed secrets are gone for good. History lives inside the encrypted store, like everything else.
+Adding the name again within the 30 days keeps the removed secrets as the new entry's history. After 30 days multipass no longer finds them, and an entry added under the name starts with no history. The store file itself drops them the next time multipass writes it, so until any command saves, `age -d` still shows them. History lives inside the encrypted store, like everything else.
 
 ## Keep one-time passwords
 
@@ -99,7 +99,7 @@ brew install age
 age -d ~/.multipass/store.age
 ```
 
-age prints the store as text: each entry's name on its own line, then its fields indented by a tab. `modified` is when the entry last changed, in milliseconds since 1970. Each `previous-secret` and `previous-otp` line holds an earlier value after the time it was replaced. A removed entry is marked `deleted`, and its secrets stay for 30 days.
+age prints the store as text: each entry's name on its own line, then its fields indented by a tab. `modified` is when the entry last changed, in milliseconds since 1970. Each `previous-secret` and `previous-otp` line holds an earlier value after the time it was replaced. A removed entry is marked `deleted`, and keeps its secrets as history until multipass writes the store 30 or more days after the removal.
 
 ```text
 multipass 3

@@ -194,6 +194,12 @@ impl Version {
         joined
     }
 
+    /// True when this is a tombstone whose removed secrets `cutoffs` has
+    /// expired.
+    fn removed_secrets_expired(&self, cutoffs: Cutoffs) -> bool {
+        self.entry.is_none() && self.modified < cutoffs.removed_secrets
+    }
+
     /// Adds the entry's current secret and setup key to `history`, dated
     /// `replaced`.
     fn held_as_history(&self, replaced: u64, history: &mut History) {
@@ -262,7 +268,13 @@ impl Store {
             assert!(stamp >= old.modified, "a change must not predate {name}'s");
         }
         let mut history = History::default();
-        let old = self.versions.remove(&name).and_then(|old| {
+        let old = self.versions.remove(&name).and_then(|mut old| {
+            // A store not written since the removal expired can still hold the
+            // removed secrets, and a new entry under the name must not take
+            // them back.
+            if old.removed_secrets_expired(Cutoffs::at(stamp)) {
+                old.history = History::default();
+            }
             old.held_as_history(stamp, &mut history);
             history.secrets.extend(old.history.secrets);
             history.otps.extend(old.history.otps);
@@ -323,29 +335,44 @@ impl Store {
         merged
     }
 
+    /// Drops what `cutoffs` has expired: tombstones past
+    /// `cutoffs.tombstones`, the history of tombstones past
+    /// `cutoffs.removed_secrets`, and history past what an entry keeps. The
+    /// file keeps whatever it held until the next write, so the CLI expires a
+    /// store as it opens it, and no command shows a value the next write
+    /// would drop.
+    pub fn expire(&mut self, cutoffs: Cutoffs) {
+        self.versions
+            .retain(|_, version| version.entry.is_some() || version.modified >= cutoffs.tombstones);
+        for version in self.versions.values_mut() {
+            if version.removed_secrets_expired(cutoffs) {
+                version.history = History::default();
+            }
+            for list in [&mut version.history.secrets, &mut version.history.otps] {
+                let kept = list
+                    .iter()
+                    .enumerate()
+                    .take_while(|(i, p)| *i < HISTORY_KEPT || p.replaced >= cutoffs.history)
+                    .count();
+                list.truncate(kept);
+            }
+        }
+    }
+
     /// Writes format 3, leaving out what `cutoffs` has expired.
     pub fn to_text(&self, cutoffs: Cutoffs) -> String {
+        let mut store = self.clone();
+        store.expire(cutoffs);
         let mut out = format!("{HEADER}\n");
-        for (name, version) in &self.versions {
-            let removed = version.entry.is_none();
-            if removed && version.modified < cutoffs.tombstones {
-                continue;
-            }
+        for (name, version) in &store.versions {
             out.push_str(&escape(name));
             out.push('\n');
             out.push_str(&version.current_text());
-            if removed && version.modified < cutoffs.removed_secrets {
-                continue;
-            }
             for (field, list) in [
                 ("previous-secret", &version.history.secrets),
                 ("previous-otp", &version.history.otps),
             ] {
-                let kept = list
-                    .iter()
-                    .enumerate()
-                    .take_while(|(i, p)| *i < HISTORY_KEPT || p.replaced >= cutoffs.history);
-                for (_, previous) in kept {
+                for previous in list {
                     out.push_str(&format!(
                         "\t{field} {} {}\n",
                         previous.replaced,
@@ -1003,6 +1030,49 @@ mod tests {
         assert_eq!(secrets(&store, "x"), [(20, "a".to_string())]);
         store.insert("x", secret("b"), 30);
         assert_eq!(secrets(&store, "x"), [(20, "a".to_string())]);
+    }
+
+    #[test]
+    fn re_adding_after_30_days_leaves_the_removed_secrets_behind() {
+        // No write runs between the removal and the new entry, so the store
+        // still holds the removed secret when the name is added again.
+        let re_added_at = |at: u64| {
+            let mut store = Store::new();
+            store.insert("x", secret("removed"), DAY);
+            store.remove("x", 2 * DAY);
+            store.insert("x", secret("new"), at);
+            let text = store.to_text(Cutoffs::at(at));
+            (secrets(&store, "x"), text.contains("removed"))
+        };
+        assert_eq!(
+            re_added_at(32 * DAY),
+            (vec![(2 * DAY, "removed".to_string())], true)
+        );
+        assert_eq!(re_added_at(32 * DAY + 1), (vec![], false));
+        assert_eq!(re_added_at(42 * DAY), (vec![], false));
+    }
+
+    #[test]
+    fn expiring_leaves_what_a_write_and_a_read_leave() {
+        let now = 400 * DAY;
+        let mut store = Store::new();
+        store.insert("recent", secret("a"), 1);
+        store.remove("recent", now - 30 * DAY);
+        store.insert("expired", secret("b"), 1);
+        store.remove("expired", now - 30 * DAY - 1);
+        store.insert("forgotten", secret("c"), 1);
+        store.remove("forgotten", now - 120 * DAY - 1);
+        for i in 0..12 {
+            store.insert("live", secret(&i.to_string()), 2 + i);
+        }
+        let written = Store::from_text(&store.to_text(Cutoffs::at(now))).unwrap();
+        store.expire(Cutoffs::at(now));
+        assert_eq!(store, written);
+        assert_eq!(secrets(&store, "recent").len(), 1);
+        assert!(secrets(&store, "expired").is_empty());
+        assert!(store.version("expired").is_some());
+        assert!(store.version("forgotten").is_none());
+        assert_eq!(secrets(&store, "live").len(), 10);
     }
 
     /// A small generator, so the merge laws run over many stores without a
