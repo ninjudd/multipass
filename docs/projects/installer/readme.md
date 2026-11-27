@@ -70,7 +70,21 @@ The receipt lives under `XDG_DATA_HOME`, so `status` and `uninstall` follow it t
 
 ### 2.3 Upgrading
 
-You upgrade by running the installer again. multipass itself gains no `upgrade` command and never reaches the network, and nothing tells you a new release is out except `install.sh status` (pending § 7.2). A password manager that never makes a network connection is easy to reason about, and a command that fetches and runs a script would make the binary that holds your secrets able to replace itself.
+You upgrade with `multipass upgrade`, which runs the installer for you, or by running the installer again yourself (pending § 7.2). multipass contains no network code, and it reaches the network only when you type `upgrade`: there are no background checks and no new-version notices.
+
+`multipass upgrade [<version>]` runs these steps:
+
+1. It reads the receipt (§ 2.4). When the receipt is missing, or names a file other than the running executable, it stops with status 69: `multipass: this multipass was not installed by the installer (it is <path>); upgrade it the way you installed it, or run the installer`. When the receipt's `method` is `checkout`, it stops with status 69 and says to pull the checkout and run `./install.sh` there. So `upgrade` never writes a second copy that the first one then shadows.
+2. In a new 0700 temporary directory, it runs `/usr/bin/curl -fsSL -o install.sh https://getmultipass.dev/install.sh`, or `https://getmultipass.dev/v<version>/install.sh` when you name a version. `curl` is an external program at a fixed path, as `/bin/stty` is for the passphrase prompt, so multipass gains no dependency and no network code of its own.
+3. With `gh` on PATH, it runs `gh attestation verify install.sh --repo ninjudd/multipass --signer-workflow ninjudd/multipass/.github/workflows/release.yml` and stops with status 65, running nothing, when that fails. Without `gh`, it says `multipass: running the installer unchecked, as curl | bash would`. Downloading to a file first is what makes this check possible, which piping into `bash` would not allow.
+4. It runs `/bin/bash install.sh`, with `MULTIPASS_VERSION` set when you named a version, and `MULTIPASS_BIN_DIR` set to the receipt's directory, and passes the installer's rows and exit status through. The installer then builds from source or checks the binary's attestation, exactly as § 2.1 describes.
+5. It removes the temporary directory.
+
+The version is an argument rather than an option, because `--version` already prints multipass's own version.
+
+`multipass upgrade --check` runs `/usr/bin/curl -fsSI https://github.com/ninjudd/multipass/releases/latest`, reads the newest release's tag from the redirect, compares it with its own version, and changes nothing. It prints `multipass 0.2.0 is the newest release` and exits 0, or `multipass 0.3.0 is out, and this is 0.2.0 -- run multipass upgrade` and exits 1, so a script can test it.
+
+`upgrade` never asks for the passphrase, opens no store, and sends nothing to the installer but the two variables above. A running session-unlock agent ends on its own after an upgrade (§ 2.7).
 
 ### 2.4 The receipt
 
@@ -144,7 +158,7 @@ curl -fsSL https://github.com/ninjudd/multipass/releases/download/v0.2.0/install
 
 ### 2.7 Other plans
 
-- **Session unlock** starts an agent, `multipass __agent`, from the same binary, and the client checks that the agent runs the same executable by its path. After an upgrade, the path names the new file while an agent started earlier still runs the old one, so a path check passes for a different program. The session-unlock plan must end such a session: the agent records its executable's device and inode when it starts, compares them on each request, and ends the session when the file has changed, so the next command asks for the passphrase and starts an agent from the new binary. That also covers an upgrade by `cargo install` or by hand. The installer adds nothing for this.
+- **Session unlock** starts an agent, `multipass __agent`, from the same binary, and the client checks that the agent runs the same executable by its path. After an upgrade, the path names the new file while an agent started earlier still runs the old one, so a path check passes for a different program. The session-unlock plan covers this in its § 2.5, in the "Same binary" row: the agent records its executable's device, inode, size, and change time when it starts, checks them again on each request, and ends the session with `multipass was updated` when any of them changes, and the client refuses an agent whose executable differs from its own on the same values. So the next command after an upgrade asks for the passphrase and starts an agent from the new binary. That covers `multipass upgrade`, a rerun of the installer, `cargo install`, and a copy by hand alike, so neither the installer nor `upgrade` adds anything for it.
 - **Vault key and the mergeable store** change the store format. An older multipass refuses a newer store with its existing message, `the store uses format 3, but this multipass reads formats 1 and 2`, so installing an older release with `MULTIPASS_VERSION` is safe, and the installer never opens a store.
 - **Passkeys** adds `Multipass.app`, distributed through TestFlight, and session unlock's § 8 moves the agent into the app as a signed helper. If the app later ships the CLI too, it becomes a second way to install it, and `status` lists it as an `other` copy on PATH. Whether the installer should then defer to the app's copy is the passkeys plan's decision.
 
@@ -157,19 +171,20 @@ curl -fsSL https://github.com/ninjudd/multipass/releases/download/v0.2.0/install
 | `.github/workflows/ci.yml` | Adds `--locked` to `cargo test`, and a step that runs `tests/install.sh`. |
 | `tests/install.sh` | New. Runs the installer from the checkout with `HOME` and `MULTIPASS_BIN_DIR` in a temporary directory, and checks the rows, the receipt, a rerun, `status`, `uninstall`, and that nothing else under `HOME` changed. It also runs the binary path against a `file://` mirror through `MULTIPASS_DOWNLOAD_URL`, once the first release exists to mirror. |
 | `README.md` | The Install section shows the one-line install, the three-line check-first install and the pinned installs from § 2.6, the checkout install with `./install.sh`, how to upgrade and uninstall, and how to check a release with `install.sh verify`. |
-| `AGENTS.md` | A Releases section: how to cut a release, that `RUST_VERSION` in `release.yml` changes only in a pull request of its own, and that the release workflow uses only GitHub's actions, pinned by commit SHA. A Domain section: that `site/` serves redirects and one static page, never a copy of `install.sh`. |
+| `AGENTS.md` | A Releases section: how to cut a release, that `RUST_VERSION` in `release.yml` changes only in a pull request of its own, and that the release workflow uses only GitHub's actions, pinned by commit SHA. A Domain section: that `site/` serves only redirects, never a copy of `install.sh`. |
 | `site/vercel.json` | New. The redirects and headers in § 2.9, with no build command and no framework. |
-| `site/index.html` | New. The landing page in § 2.9, one static HTML file with no scripts or outside resources. |
+| `src/upgrade.rs` | New. `upgrade` and `upgrade --check` as § 2.3 describes. It takes the paths of `curl`, `bash`, and `gh` and the base URL as parameters, so tests run it against fake programs in a temporary directory; `main.rs` passes the fixed paths and `https://getmultipass.dev`. |
+| `src/main.rs` | Adds the `upgrade` command, its optional version, and `--check`, and updates `USAGE`. |
 
 ### 2.9 The domain
 
-`getmultipass.dev` uses Vercel's DNS, under a Vercel team, and a static Vercel project on that team serves it from `site/`. The project has no build step and serves no copy of `install.sh`. It only redirects to GitHub, so the file that runs is always the immutable, attested release asset.
+`getmultipass.dev` uses Vercel's DNS, under a Vercel team, and a minimal Vercel project on that team serves it. The project holds only `site/vercel.json`, has no build step, runs no code, holds no secret, and serves no copy of `install.sh`. It only redirects to GitHub, so the file that runs is always the immutable, attested release asset.
 
 | Request | Response |
 | --- | --- |
 | `https://getmultipass.dev/install.sh` | A temporary redirect (307) to `https://github.com/ninjudd/multipass/releases/latest/download/install.sh`, which GitHub in turn redirects to the newest release's file |
 | `https://getmultipass.dev/<tag>/install.sh`, such as `/v0.2.0/install.sh` | A temporary redirect to `https://github.com/ninjudd/multipass/releases/download/<tag>/install.sh` |
-| `https://getmultipass.dev/` | `site/index.html`: what multipass is, the install commands from § 2.6, and links to the repository and the README |
+| `https://getmultipass.dev/` | A temporary redirect to `https://github.com/ninjudd/multipass`, until the project wants a landing page of its own |
 | `https://www.getmultipass.dev/…` | A permanent redirect to the same path on `getmultipass.dev` |
 
 Each redirect carries `Cache-Control: no-store`, so no cache serves an old target. GitHub resolves the newest release and sends `Cache-Control: no-cache` on its own redirect, so a release is live through the domain as soon as it is published. `.dev` is on browsers' HTTPS preload list, so browsers only ever load the domain over HTTPS, and Vercel issues and renews its certificate.
@@ -200,7 +215,8 @@ Without DNSSEC, someone who can forge DNS answers to a certificate authority cou
 - **Reuse.** The installer follows Projector's: the checkout-or-release split, the environment overrides, aligned rows with warning markers, the `status` command, idempotent reruns, and never replacing your configuration. It replaces nothing in multipass, which has no installer today.
 - **The domain redirects to GitHub, and Vercel serves it.** A domain is easier to type and to remember than a release URL, but every host that serves the installer can change it. Redirecting keeps the file of record on GitHub, immutable and attested, so the domain adds only a hop. Vercel already holds the domain's DNS, and whoever holds DNS can point the domain anywhere, so serving from Vercel adds no party you trust. GitHub Pages, the other choice, would add a second one: the repository's Pages site, which the Projector site workflow deploys from `main` through Projector's site action at a moving tag. Pages also cannot send an HTTP redirect, which `curl` needs (Pages offers only an HTML page that a browser follows), cannot set headers (it sends `Cache-Control: max-age=600` on every file), and publishes only Markdown and HTML through that action, so it would need a change to Projector and would serve `main`'s unreleased installer. Moving the Pages site to the domain would also put the plans and review summaries on the product's front page.
 - **Rejected: a Homebrew tap.** Homebrew's `multipass` name belongs to Canonical's cask, which installs `/usr/local/bin/multipass`. A tap formula named `multipass` would need its full name, `ninjudd/tap/multipass`, everywhere, would put a second `multipass` command on PATH for anyone with the cask, and would be another repository and another release step to keep in sync. The installer covers the same users without those costs. Revisit if multipass is renamed.
-- **Rejected: an `upgrade` command and update notices in multipass.** § 2.3 gives the reason, and § 7.2 asks you to confirm it.
+- **`upgrade` runs the installer, through `curl`, only when you ask.** It gives an upgrade exactly the installer's checks, and adds none of its own to keep in step, as Projector's `project upgrade` reruns Projector's installer. It adds nothing an attacker lacks, because any program running as you can already run `curl` and `bash`. What it must not do is reach the network on its own, so it never checks in the background: a password manager that phones home on every use tells the server when you use it.
+- **Rejected: new-version notices.** A notice needs a check that runs without being asked. `upgrade --check` answers the same question when you ask it.
 - **Rejected for now: Linux binaries.** CI runs only on macOS, and the clipboard support in progress is macOS only. The source build works wherever the tagged source builds, so Linux users with Rust can already install, and the binary step says so.
 
 ## 4. Acceptance criteria
@@ -221,6 +237,10 @@ Without DNSSEC, someone who can forge DNS answers to a certificate authority cou
 | Merge a pull request that raises the version | A published, immutable release `v<version>` with the five assets, and `gh attestation verify` on the binary passes with `--signer-workflow` and `--source-ref` |
 | Raise the version in `Cargo.toml` but not in `Cargo.lock` | CI fails on `cargo test --locked` in the pull request |
 | `install.sh verify <version>` with rustup's toolchain from the build info | `reproduced` |
+| `multipass upgrade` on an install that is one release behind | The installer's rows, ending in `installed` with the new version, and `multipass --version` prints it |
+| `multipass upgrade` on a binary from `cargo install` | Exit 69 naming that path, and nothing downloaded |
+| `multipass upgrade --check` when current, and when a release behind | Exit 0 and exit 1, with the messages in § 2.3 |
+| `multipass upgrade` with `gh` on PATH, against an `install.sh` changed by one byte | Exit 65, and the installer never runs |
 | `curl -sI https://getmultipass.dev/install.sh` | `HTTP/2 307`, `location: https://github.com/ninjudd/multipass/releases/latest/download/install.sh`, and `cache-control: no-store` |
 | `curl -sI https://getmultipass.dev/v0.1.0/install.sh` | A 307 to `https://github.com/ninjudd/multipass/releases/download/v0.1.0/install.sh` |
 | `curl -sI http://getmultipass.dev/install.sh` and `curl -sI https://www.getmultipass.dev/install.sh` | Each redirects to `https://getmultipass.dev/install.sh`, never serving a file over plain HTTP |
@@ -230,6 +250,8 @@ Without DNSSEC, someone who can forge DNS answers to a certificate authority cou
 Tests that must fail before the change and pass after it:
 
 - **`tests/install.sh`**, run by CI on the checkout. It checks each row from a checkout install, the receipt's fields, that a rerun prints `current` and leaves the file alone, that `status` reports `current`, that `uninstall` refuses a file whose SHA-256 differs from the receipt, and that nothing under `HOME` changes except the binary and the receipt. Catches an installer that edits a startup file or the store directory, a rerun that reinstalls, and an uninstall that deletes someone else's `multipass`.
+- **`upgrade` against fake programs**, in `src/upgrade.rs`. A fake `curl` writes a script and a fake `gh` passes or fails. Checks that a failing `gh` stops `upgrade` before `bash` runs, that a named version reaches both the URL and `MULTIPASS_VERSION`, that a missing receipt or one naming another path stops it, and that `--check` parses the tag from the redirect and exits 1 for a newer release. Catches an upgrade that runs an installer whose check failed, and one that installs a second copy beside the first.
+- **Argument parsing** for `upgrade`, `upgrade <version>`, and `upgrade --check`, and rejecting `--check` with a version.
 - **The tampered mirror**, in `tests/install.sh` once a release exists. Catches an installer that trusts `SHA256SUMS`, or that ignores `gh`'s exit status.
 - **The release build's second build**, in `release.yml`. Catches a change that makes the binary depend on the build path or the time.
 
@@ -260,21 +282,19 @@ Undecided; the owner's to answer. The domain is `getmultipass.dev` on Vercel's D
 
 ### 7.2 Whether multipass itself may reach the network
 
-Undecided; the owner's to answer. The plan assumes it never does.
+Undecided; the owner's to answer. The owner leans toward `multipass upgrade`, and the plan assumes it, as § 2.3 describes.
 
-- **Never (recommended):** no `upgrade` command and no notices. You upgrade by running the installer again, and `install.sh status` says whether a newer release is out.
-- **An `upgrade` command only:** `multipass upgrade` runs `curl` and the installer, which is shorter to type, but the binary that holds your secrets could then download and run code.
-- **An `upgrade` command and an opt-in notice:** with `MULTIPASS_CHECK_UPDATES=1`, a command checks for a newer release at most once a day. It is a network request from your password manager that reveals when you use it.
+- **`multipass upgrade` when you type it, and never otherwise (recommended):** it downloads the installer with `curl`, checks its attestation when `gh` is installed, and runs it, so an upgrade gets the installer's checks. `upgrade --check` says whether a newer release is out. multipass contains no network code, and nothing runs in the background or shows a notice.
+- **Never:** no `upgrade` command. You upgrade by running the installer again, and `install.sh status` says whether a newer release is out. multipass then never starts a program that reaches the network.
 
 ### 7.3 Deferred
 
-- **An agent running across an upgrade.** Deferred to the session-unlock plan, which must end a session whose binary changed, as § 2.7 describes.
 - **A CLI shipped inside `Multipass.app`.** Deferred to the passkeys plan, as § 2.7 describes.
 - **Linux binaries.** Deferred until Linux support is planned. The release workflow would gain an Ubuntu build job, and the binary step would pick the asset for `uname`.
 
 ### 7.4 Decided
 
-- **The domain.** The owner registered `getmultipass.dev` and moved its DNS to a Vercel team. The redirect-only design and the protections in § 2.9 follow from that.
+- **Where the installer is served.** The owner chose a domain of its own: `getmultipass.dev`, with its DNS on a Vercel team. The install URL is `https://getmultipass.dev/install.sh`, which redirects to the release asset, and the redirect-only design and the protections in § 2.9 follow from that.
 
 ## 8. Background
 
