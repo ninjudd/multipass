@@ -8,6 +8,7 @@
 pub mod base32;
 pub mod base64;
 pub mod chacha20poly1305;
+pub mod generate;
 pub mod hmac;
 pub mod hotp;
 pub mod random;
