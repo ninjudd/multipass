@@ -31,6 +31,13 @@ Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo tes
 
 The CLI reads passphrases from `/dev/tty`, so it cannot be driven from a plain pipe. To exercise it without a terminal, use `expect` against a release build, and point `--store` at a temporary file.
 
+## Releases
+
+- **Release by merging a pull request that raises `version` in `Cargo.toml` and `Cargo.lock`.** `.github/workflows/release.yml` then tags `v<version>` at the merge commit, builds and attests the universal binary, and publishes an immutable release. Never push a tag or create a release by hand. Run the workflow by hand from `main` only for the first release or to finish a run that failed; it skips a version that is already published.
+- **Change `RUST_VERSION` in `release.yml` only in a pull request of its own.** The toolchain is part of what `install.sh verify` must match, so a toolchain change and a code change in one release would leave no way to tell which one changed the bytes.
+- **The release workflow uses only GitHub's own actions, pinned by full commit SHA**, with a comment naming the version. Its `publish` job holds the write and signing permissions, so it never checks out the repository or runs its code; keep any new step that runs repository code in `build`.
+- **Keep the build reproducible.** `.github/scripts/build-release.sh` builds each target twice, at two paths, and fails when any byte differs. Build only inside the unpacked source with `CARGO_TARGET_DIR` beneath it, because `-oso_prefix .` makes the linker's recorded object paths, which feed the binary's UUID, relative to that directory.
+
 <!-- projector:begin 33 -->
 ## Projector conventions
 

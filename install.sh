@@ -85,7 +85,10 @@ fetch() {
 }
 
 make_work() {
-  WORK="$(mktemp -d "${TMPDIR:-/tmp}/multipass-install.XXXXXX")"
+  # The physical path, because the linker records object paths relative to
+  # the directory as getcwd reports it, and TMPDIR on macOS sits under the
+  # /var symlink.
+  WORK="$(cd "$(mktemp -d "${TMPDIR:-/tmp}/multipass-install.XXXXXX")" && pwd -P)"
   trap 'rm -rf "$WORK"' EXIT
 }
 
@@ -399,12 +402,87 @@ cmd_uninstall() {
   row "kept" "your stores, such as ~/.multipass/store.age"
 }
 
+buildinfo_field() {
+  awk -v key="$1" '$1 == key { sub(/^[^ ]+ /, ""); print; exit }' "$2"
+}
+
+# Rebuilds this Mac's slice of a release with the toolchain its build info
+# names, and compares it byte for byte with the slice in the release's
+# universal binary. Installs nothing.
+cmd_verify() {
+  local version arch triple info rust binary src ours theirs field
+  [ "$(uname -s)" = Darwin ] || die "$EX_UNAVAILABLE" "verify rebuilds a macOS release, so it runs only on macOS"
+  # A toolchain from Homebrew embeds its own install path in the binary, so
+  # only rustup's toolchains reproduce a release.
+  command -v rustup >/dev/null 2>&1 ||
+    die "$EX_UNAVAILABLE" "verify needs rustup (https://rustup.rs) to build with the toolchain the release names"
+  if [ -n "${1:-}" ]; then
+    version="$(check_version "$1")"
+  elif [ -n "${MULTIPASS_VERSION:-}" ]; then
+    version="$(check_version "$MULTIPASS_VERSION")"
+  else
+    version="$(latest_version)"
+  fi
+  row "release" "$RELEASE_REPO v$version"
+  case "$(uname -m)" in
+    arm64) arch=arm64 triple=aarch64-apple-darwin ;;
+    x86_64) arch=x86_64 triple=x86_64-apple-darwin ;;
+    *) die "$EX_UNAVAILABLE" "releases have no slice for $(uname -m)" ;;
+  esac
+  make_work
+  binary="multipass-$version-macos"
+  info="$WORK/multipass-$version.buildinfo"
+  fetch "$DOWNLOAD_URL/v$version/$binary" "$WORK/$binary"
+  fetch "$DOWNLOAD_URL/v$version/multipass-$version.buildinfo" "$info"
+  fetch "$ARCHIVE_URL/v$version.tar.gz" "$WORK/source.tar.gz"
+  rust="$(buildinfo_field rustc-release "$info")"
+  [[ "$rust" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+    die "$EX_DATAERR" "the v$version build info names no Rust release"
+  rustup run "$rust" rustc --version >/dev/null 2>&1 ||
+    die "$EX_UNAVAILABLE" "v$version was built with Rust $rust; install it with rustup toolchain install $rust --profile minimal, and run verify again"
+  src="$WORK/source"
+  mkdir "$src"
+  tar -xzf "$WORK/source.tar.gz" -C "$src" --strip-components 1 ||
+    die "$EX_DATAERR" "could not unpack the v$version source archive"
+  # The release's build info names the flags it built with. The target
+  # directory sits inside the source, as in the release build, because the
+  # linker records object paths relative to the directory cargo runs in.
+  (cd "$src" && unset CARGO_ENCODED_RUSTFLAGS CARGO_BUILD_RUSTFLAGS &&
+    MACOSX_DEPLOYMENT_TARGET="$(buildinfo_field macosx_deployment_target "$info")" \
+      RUSTFLAGS="$(buildinfo_field rustflags "$info")" CARGO_TARGET_DIR="$src/target" \
+      rustup run "$rust" cargo build --release --locked --offline --quiet --target "$triple") ||
+    die 1 "rustup run $rust cargo build --release --locked --offline --target $triple failed"
+  lipo -thin "$arch" "$WORK/$binary" -output "$WORK/release-slice" ||
+    die "$EX_DATAERR" "$binary has no $arch slice"
+  ours="$(sha256 "$src/target/$triple/release/multipass")"
+  theirs="$(sha256 "$WORK/release-slice")"
+  if [ "$ours" = "$theirs" ]; then
+    row "reproduced" "v$version $arch slice matches the release"
+    return
+  fi
+  warn_row "differs" "v$version $arch slice does not match the release: sha256 $ours here, $theirs in the release"
+  # Name what differs between the release's build and this Mac's, which
+  # usually explains the bytes.
+  local here
+  for field in rustc-commit-hash xcode sdk; do
+    case "$field" in
+      rustc-commit-hash) here="$(rustup run "$rust" rustc -vV | awk -F ': ' '$1 == "commit-hash" { print $2 }')" ;;
+      xcode) here="$(xcodebuild -version 2>/dev/null | paste -s -d ' ' -)" ;;
+      sdk) here="$(xcrun --sdk macosx --show-sdk-version 2>/dev/null)" ;;
+    esac
+    [ "$here" = "$(buildinfo_field "$field" "$info")" ] ||
+      row "$field" "the release used $(buildinfo_field "$field" "$info"), this Mac has ${here:-none}"
+  done
+  exit "$EX_DATAERR"
+}
+
 usage() {
   cat <<'EOF_USAGE'
-Usage: install.sh [install|status|uninstall]
+Usage: install.sh [install|status|verify [<version>]|uninstall]
 
   install     Install or upgrade multipass (the default)
   status      Say what is installed, and whether it is current
+  verify      Rebuild a release on this Mac and compare it with the binary
   uninstall   Remove the multipass the installer wrote, keeping your stores
 
 From curl, pass a command after -s --:
@@ -419,8 +497,9 @@ main() {
     install) cmd_install ;;
     status) cmd_status ;;
     uninstall) cmd_uninstall ;;
+    verify) cmd_verify "${2:-}" ;;
     -h | --help | help) usage ;;
-    *) die "$EX_USAGE" "unknown command $1; use install, status, or uninstall" ;;
+    *) die "$EX_USAGE" "unknown command $1; use install, status, verify, or uninstall" ;;
   esac
 }
 
