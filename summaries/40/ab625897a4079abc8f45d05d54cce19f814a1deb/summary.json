@@ -1,0 +1,89 @@
+{
+ "version": 1,
+ "name": "Review suggestion follow-ups",
+ "project": "",
+ "pr": {
+  "repo": "ninjudd/multipass",
+  "number": 40,
+  "title": "Name 0.1.0 in the downgrade warning, and fix session unlock's outcome sentence",
+  "head": "ab625897a4079abc8f45d05d54cce19f814a1deb",
+  "headRef": "stack-39-followups",
+  "base": "11ae65f11969de9836dda7e5b3d4641598705237",
+  "baseRef": "main"
+ },
+ "overview": {
+  "summary": [
+   "multipass keeps your passwords in one encrypted store. Recent work moved that store from a single file, <code>~/.multipass/store.age</code>, into a <b>package</b>: a folder, <code>~/.multipass/store.multipass</code>, of files that are written once and never changed. A multipass from before the package cannot open the folder, so the README warns you not to go back to one after the move.",
+   "This pull request changes two sentences and no code. Each sentence carries out a suggestion an earlier review left on the work that merged in #39:",
+   "<ol><li><b>The README's warning names the published 0.1.0.</b> 0.1.0 is the only release so far, and it predates the package. It reads only a single-file store in formats 1 and 2, the first two versions of the store's text, so <code>multipass upgrade 0.1.0</code> is one of the ways back the warning means.</li><li><b>The session-unlock plan's outcome describes itself correctly.</b> The outcome said each departure from the design was recorded in § 2.11, the plan's table of changes by file. Four of them appear only in the outcome, so the sentence now says the outcome records them.</li></ol>",
+   "The review of this head found nothing to change and signed it off."
+  ],
+  "cards": [
+   {
+    "id": "terms",
+    "title": "Terms on this page",
+    "html": "<ul class=\"tight\"><li><b>Package</b>: the folder of write-once files the store lives in now.</li><li><b>Old file</b>: the single-file store, <code>store.age</code>, that the move leaves beside the package.</li><li><b>Format</b>: the version line at the top of the store's text, such as <code>multipass 2</code>. This build writes format 3 and reads 1 to 3.</li><li><b>Retired</b>: deleted by multipass once the old file has gone 30 days unchanged after the move.</li></ul>"
+   },
+   {
+    "id": "origin",
+    "title": "Where the two changes come from",
+    "html": "<ul class=\"tight\"><li><a href=\"https://github.com/ninjudd/multipass/pull/22#pullrequestreview-6084648104\">#22's review</a> asked the README to say that a release from before format 3, such as 0.1.0, cannot open a store this release saved.</li><li><a href=\"https://github.com/ninjudd/multipass/pull/37#pullrequestreview-6090872559\">#37's review</a> asked the plan's outcome to stop saying § 2.11 records every departure.</li></ul>"
+   }
+  ]
+ },
+ "groups": [
+  {
+   "id": "readme",
+   "title": "The downgrade warning",
+   "kicker": "Names 0.1.0 as a release that cannot follow the move into a package",
+   "intro": [
+    "The warning already told you not to go back to a multipass from before the package, but not which releases those are. It now names the published 0.1.0 and says what that release reads: a single-file store in formats 1 and 2.",
+    "#22's review had suggested giving format 3 as the reason. The author put the reason in the package instead, because this build never rewrites the old file. An old file that 0.1.0 wrote stays in format 2, so 0.1.0 can still read it during the 30 days the warning describes. What 0.1.0 cannot open is the package it finds once the old file is retired."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": "README.md",
+     "note": "One sentence added to the warning below the install and upgrade instructions.",
+     "collapsed": false,
+     "checks": [
+      {
+       "kind": "verify",
+       "line": 41,
+       "text": "At the <code>v0.1.0</code> tag, <code>Store::from_text</code> accepts only <code>multipass 1</code> and <code>multipass 2</code>, refuses any other header with <code>this multipass reads formats 1 and 2</code>, and the release has no package code. Format 3 arrived after the tag."
+      },
+      {
+       "kind": "verify",
+       "line": 41,
+       "text": "At this head nothing writes the old file: saves and the move write only inside the package, a store that could not be moved opens read-only, and settling the old file only merges it or deletes it after 30 days unchanged (<code>OLD_FILE_DAYS</code>), as the vault-key plan's § 2.6 says."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "plan",
+   "title": "The session-unlock plan's outcome",
+   "kicker": "Corrects where the completed plan says its departures are recorded",
+   "intro": [
+    "The session-unlock plan is the record of the feature that keeps the store unlocked behind Touch ID. Its § 9, the outcome, lists eight ways the build departed from the design. The sentence that introduces the list said each was recorded in § 2.11, the table of changes by file, but the <code>failed &lt;n&gt;</code> reply, <code>status</code> in UTC, reads that never compact, and <code>status</code> and <code>lock</code> checking only the user appear only in § 9.",
+    "The plan stays <code>status: completed</code>. The edit changes how the record describes itself, not any decision in it."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": "docs/projects/session-unlock/readme.md",
+     "note": "§ 9, Outcome: the sentence that introduces the list of departures.",
+     "collapsed": false,
+     "checks": [
+      {
+       "kind": "verify",
+       "line": 345,
+       "text": "Read § 2.11 against the eight departures listed under this sentence: its rows mention only some of them, so \"which this section records\" is accurate and \"each recorded in § 2.11\" was not. <code>project check</code> reports the plans valid."
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}
