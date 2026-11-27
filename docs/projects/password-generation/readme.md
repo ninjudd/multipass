@@ -63,7 +63,7 @@ The loops in steps 4.1 and 4.3 decide whether to draw again from a value that is
 | `--words <n>` | memorable | `5`, or `6` with `--syllables` | Words, from 3 to 15, as in 1Password. The default clears 64 bits either way: 5 words are 64.6 bits, but 5 syllables would be only 54.8, so 6 syllables, 65.8 bits, is the default with `--syllables`. |
 | `--separator <sep>` | memorable | `hyphen` | What goes between words: `hyphen`, `space`, `period`, `comma`, `underscore`, `digit`, or `digit-or-symbol`. The last two draw a new random character for each gap. |
 | `--capitalize <which>` | memorable | `none` | `none`, `first` (the first letter of every word), or `one` (the first letter of one randomly chosen word). |
-| `--syllables` | memorable | off | Uses short pronounceable syllables instead of full words (§ 2.4). Awaits the owner (§ 6). |
+| `--syllables` | memorable | off | Uses short pronounceable syllables instead of full words (§ 2.4). |
 | `--pin <n>` | PIN | `6` when given alone | Digits, from 4 to 64. |
 
 With no kind option, `generate` and `add --generate` make random characters. An option for another kind is an error, such as `--separator` with `--length`. 1Password's random type has three toggles, letters, numbers, and symbols. Splitting letters into uppercase and lowercase gives sites that require both a way to say so, and each set that is on must appear at least once, as sites that list required characters expect. The strength line counts only the passwords that meet those requirements.
@@ -166,10 +166,10 @@ A random password takes a few dozen two-byte reads and a scan of a 94-byte alpha
 
 ## 6. Open questions
 
-Question 1 is decided. Questions 2 and 3 wait on the owner. The plan describes the recommended answer to each, and becomes `ready` once both are answered.
+Questions 1 and 2 are decided. Question 3 waits on the owner. The plan describes the recommended answer to it, and becomes `ready` once it is answered.
 
 1. **The default with no options.** Decided: random characters, 20 long, from all four sets. Memorable words stay one option away, with `--words`.
-2. **Syllables.** Recommended: include `--syllables`, so the plan covers 1Password's "Use full words" switch when it is off. The alternative is full words only, which keeps one list.
+2. **Syllables.** Decided: include `--syllables`, so the plan covers 1Password's "Use full words" switch when it is off. With no count it makes 6 syllables, as § 2.2 describes.
 3. **Per-site rules.** Recommended: both the simple options and `--rules`. The alternative is the simple options only, with `--rules` deferred.
 
 ## 7. Background
