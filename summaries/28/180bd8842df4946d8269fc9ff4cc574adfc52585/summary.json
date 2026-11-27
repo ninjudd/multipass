@@ -1,0 +1,155 @@
+{
+ "version": 1,
+ "name": "Installer and releases",
+ "project": "installer",
+ "pr": {
+  "repo": "ninjudd/multipass",
+  "number": 28,
+  "title": "Publish attested, reproducible releases, and check them with install.sh verify",
+  "head": "180bd8842df4946d8269fc9ff4cc574adfc52585",
+  "headRef": "installer-release",
+  "base": "c6ea61d3049616da1b5bdfe50d92107c6dd64a43",
+  "baseRef": "installer",
+  "basePr": 27
+ },
+ "overview": {
+  "summary": [
+   "multipass is a password manager with no third-party crates, and its installer (the layer below, #27) installs a prebuilt binary only after <code>gh attestation verify</code> proves that the repository's release workflow built it from the tag. That layer assumes releases exist. This layer makes them: a GitHub Actions workflow that publishes each version merged to <code>main</code>, a build script that proves the binary does not depend on where or when it was built, and an <code>install.sh verify</code> command that lets anyone rebuild a release on their own Mac and compare the bytes.",
+   "<ol><li><b>Releasing.</b> A merge to <code>main</code> that changes <code>Cargo.toml</code> starts <code>release.yml</code>. Its read-only <code>build</code> job builds the universal binary on a macOS runner. Its <code>publish</code> job, which never checks out the repository, signs a build attestation (a Sigstore-signed statement of which workflow, ref, and commit produced each file) and publishes an immutable release.</li><li><b>Reproducing.</b> <code>.github/scripts/build-release.sh</code> builds each target twice at two paths of different lengths and fails when any byte differs. It writes a build info file that records the toolchain, SDK, and flags.</li><li><b>Checking.</b> <code>install.sh verify &lt;version&gt;</code> downloads the tag's source, the release binary, and the build info, rebuilds this Mac's slice with the named rustup toolchain, and compares it with the release's slice.</li></ol>",
+   "The README's install section is unchanged on purpose: the plan adds the release installs to it only at rollout step 7, once the first release and the domain exist."
+  ],
+  "cards": [
+   {
+    "id": "review",
+    "title": "Where the review stands",
+    "html": "<ul class=\"tight\"><li>The first Projector review, of <code>ec5f3c0</code>, requested changes with three findings and three suggestions.</li><li>This head rebases that commit, unchanged, onto the moved <code>installer</code> branch and adds four commits that fix all three findings and take all three suggestions.</li><li>The review of <code>180bd88</code> is clean, and no finding thread is open.</li></ul>"
+   },
+   {
+    "id": "terms",
+    "title": "Terms",
+    "html": "<ul class=\"tight\"><li><b>Build info</b>: <code>multipass-&lt;version&gt;.buildinfo</code>, a release asset of <code>key value</code> lines that says what the build ran on.</li><li><b>Slice</b>: one architecture's binary inside the universal file, which <code>lipo</code> joins and splits.</li><li><b><code>-oso_prefix .</code></b>: a linker flag that records object file paths relative to the build directory, so the binary's UUID does not depend on the path.</li><li><b>Bundle</b>: <code>multipass.sigstore.json</code>, the signed attestation, which lets <code>gh attestation verify</code> run without a GitHub login.</li></ul>"
+   }
+  ]
+ },
+ "groups": [
+  {
+   "id": "workflow",
+   "title": "The release workflow",
+   "kicker": "Two jobs: a read-only build, and a publish job that runs no repository code",
+   "intro": [
+    "<code>release.yml</code> derives the release from the version in <code>Cargo.toml</code> on <code>main</code>, so a branch or tag name cannot choose what gets published. It runs on a push to <code>main</code> that changes <code>Cargo.toml</code>, and by hand for the first release or after a failed run. Its first step fails on any other ref, because the attestation records the ref the run started from and the installer accepts only <code>refs/heads/main</code>. The <code>build</code> job sets <code>DEVELOPER_DIR</code> to one Xcode on the image, because GitHub moves the image's default Xcode without any change to the workflow, and the SDK version is part of the binary.",
+    "The write and signing permissions sit on <code>publish</code> alone, and that job only downloads the artifact, attests two files, and creates the release. It creates the release as a draft with every asset, then publishes it, so nothing is public until all five files are there, and GitHub's immutable releases then lock the tag and assets."
+   ],
+   "checks": [
+    {
+     "kind": "verify",
+     "text": "Each action is pinned to the commit its tag names in the action's own repository, checked with the GitHub API: <code>actions/checkout</code> v4.4.0, <code>actions/upload-artifact</code> v7.0.2, <code>actions/download-artifact</code> v8.0.2, and <code>actions/attest-build-provenance</code> v4.2.2."
+    },
+    {
+     "kind": "verify",
+     "text": "<code>download-artifact</code> v8.0.2 defaults to <code>digest-mismatch: error</code>, read from its <code>action.yml</code>, so <code>publish</code> attests the bytes <code>build</code> uploaded."
+    }
+   ],
+   "files": [
+    {
+     "path": ".github/workflows/release.yml",
+     "note": "New. The trigger, the per-job permissions, the version check, and the draft-then-publish release.",
+     "checks": [
+      {
+       "kind": "verify",
+       "line": 32,
+       "text": "The runner-images README for <code>macos-15</code> lists <code>/Applications/Xcode_16.4.app</code> as today's default Xcode, so this path exists, and the job's first step fails once the image drops it."
+      },
+      {
+       "kind": "context",
+       "line": 64,
+       "text": "When this lookup fails for any reason, the job goes on to <code>publish</code>, whose <code>gh release create</code> then fails on the existing release. So a transient error cannot replace a published release."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "build",
+   "title": "The reproducible build",
+   "kicker": "Build twice at two paths, refuse any difference, record what it took",
+   "intro": [
+    "<code>build-release.sh</code> unpacks <code>git archive HEAD</code>, the same files as GitHub's source archive for the tag, at two directories whose names differ in length. It builds both targets in each with <code>--locked --offline</code> and fails when the bytes differ. Paths of different lengths matter because the linker hashes object file paths into the binary's UUID. The <code>-oso_prefix .</code> flag makes those paths relative, provided the target directory sits inside the unpacked source and the path is the physical one rather than macOS's <code>/var</code> symlink.",
+    "The script then joins the two slices with <code>lipo</code>, checks that the result prints its version, and writes <code>SHA256SUMS</code> and the build info."
+   ],
+   "checks": [
+    {
+     "kind": "verify",
+     "text": "Building this head's source archive at two paths of different lengths with the release flags gave identical aarch64 bytes, tried on a Mac with Rust 1.97.1. The script itself did not run, because that toolchain lacks the x86_64 target."
+    }
+   ],
+   "files": [
+    {
+     "path": ".github/scripts/build-release.sh",
+     "note": "New. The double build, the comparison, <code>lipo</code>, and the build info's fields."
+    }
+   ]
+  },
+  {
+   "id": "verify",
+   "title": "install.sh verify",
+   "kicker": "Rebuild a release on your own Mac and compare the bytes",
+   "intro": [
+    "<code>verify</code> replaces trust in GitHub's runner and the attestation with your own build. The build info comes from the build that <code>verify</code> distrusts, so <code>verify</code> accepts only the release build's <code>rustflags</code> and a plain version as the deployment target, and exits 65 naming the field otherwise. It stops with status 69 and the install command when the named rustup toolchain is missing, checks the tag's <code>Cargo.toml</code> and <code>Cargo.lock</code> as a source install does, and builds this Mac's slice. It prints <code>reproduced</code>, or <code>differs</code> with each recorded field that differs on this Mac and exits 65. It installs nothing.",
+    "<code>check_release_source</code> now holds the version and lock-file checks for both the source install and <code>verify</code>. <code>make_work</code> resolves the physical path of its temporary directory, so the builds see the path the linker sees. <code>tests/install.sh</code> drives <code>verify</code> against a <code>file://</code> mirror with a fake <code>rustup</code>."
+   ],
+   "checks": [
+    {
+     "kind": "verify",
+     "text": "Against a local <code>file://</code> mirror of this head, with a stand-in <code>rustup</code> over Homebrew's Rust 1.97.1, <code>verify 0.1.0</code> printed <code>reproduced</code> for an honest build info, and exit 65 for a release built with another deployment target."
+    }
+   ],
+   "files": [
+    {
+     "path": "install.sh",
+     "note": "Adds <code>cmd_verify</code>, the <code>verify</code> command, and <code>check_release_source</code>, and makes <code>make_work</code> use the physical path.",
+     "checks": [
+      {
+       "kind": "verify",
+       "line": 452,
+       "text": "A mirror whose build info named <code>-C linker=&lt;a script&gt;</code> exited 65 here, and the script never ran."
+      },
+      {
+       "kind": "verify",
+       "line": 488,
+       "text": "With a stand-in <code>xcodebuild</code> that exits 1, as on a Mac with only the Command Line Tools, a differing slice printed <code>xcode … this Mac has none</code>, went on to the <code>sdk</code> probe, and exited 65."
+      }
+     ]
+    },
+    {
+     "path": "tests/install.sh",
+     "note": "Adds <code>verify</code> cases: a linker in the build info, a deployment target that is not a version, a source that names another version, and a slice that differs where <code>xcodebuild</code> fails."
+    }
+   ]
+  },
+  {
+   "id": "docs",
+   "title": "Rules and the plan",
+   "kicker": "How to cut a release, and the plan brought up to the build as built",
+   "intro": [
+    "AGENTS.md gains a Releases section: release by merging a version bump, never tag by hand, change <code>RUST_VERSION</code> or <code>DEVELOPER_DIR</code> only in a pull request of its own, use only GitHub's actions pinned by full SHA, and keep the build reproducible. The installer plan's § 2.5 and § 2.6 now describe the script, the <code>rustflags</code> field, and <code>verify</code>'s exit statuses, and § 8 records why paths of different lengths broke reproducibility. § 2.6 now names the build info's keys as the script writes them and says what <code>verify</code> refuses."
+   ],
+   "checks": [
+    {
+     "kind": "context",
+     "text": "The plan stays at <code>status: in-progress</code> and the change adds no open question."
+    }
+   ],
+   "files": [
+    {
+     "path": "AGENTS.md",
+     "note": "The new Releases section."
+    },
+    {
+     "path": "docs/projects/installer/readme.md",
+     "note": "§ 2.5 step 1.3, the § 2.6 build info table and <code>verify</code>, the § 2.8 file table, and the § 8 reproducibility finding."
+    }
+   ]
+  }
+ ]
+}
