@@ -17,7 +17,7 @@ multipass has no dependencies, not even dev-dependencies, and that is a feature 
 
 - **Keep the store readable by stock age.** `age -d` on the store must always print the store text. `testdata/reference-*.age` were written by the reference implementation (the `age` crate, version 0.12.1) and `age::tests` must keep decrypting them. Those files hold only a fixed byte pattern under the published test passphrase in `age.rs`; they are the one exception to never committing an encrypted file.
 - **Check the other direction by hand when the format code changes.** The tests cannot run reference age without a dependency, so encrypt a file with multipass and decrypt it with `age -d` (or the `age` crate in a scratch project outside this repository) before handing the change over.
-- **Change the store text only by bumping the version in its `multipass <n>` header** and teaching `Store::from_text` to read the old version.
+- **Change the store text only by bumping the version in its `multipass <n>` header** and teaching `Store::from_text` to read the old version. multipass writes format 3, which adds `modified`, tombstones, and history, and reads formats 1 to 3; the mergeable-store plan's § 2.1 lists what each format adds. Keep `Store::merge` commutative, associative, and idempotent, history included, because two Macs that merge the same files must write the same store.
 
 ## Rules that protect secrets
 

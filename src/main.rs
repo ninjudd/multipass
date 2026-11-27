@@ -11,7 +11,7 @@ use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use otp::Otp;
-use store::{Entry, Store};
+use store::{Cutoffs, Entry, Store, Version};
 
 const USAGE: &str = "\
 multipass: a small single-user password manager
@@ -29,6 +29,11 @@ Commands:
   get <name>            Print one field of an entry, by default its secret
     --field <field>     secret, username, notes or otp
     --clip              Copy it to the clipboard instead, for 30 seconds
+    --previous <n>      An earlier secret, or with --field otp an earlier
+                        setup key: 1 is the most recently replaced
+  history <name>        List when the entry changed and when each earlier
+                        secret and setup key was replaced, without showing
+                        them; works for 30 days after rm
   otp <name>            Print the entry's current one-time password code
     --clip              Copy it to the clipboard instead, for 30 seconds
     --set               Store a setup key, an otpauth:// URI or a base32 key,
@@ -37,7 +42,8 @@ Commands:
       --force           Replace the entry's one-time password if it has one
     --clear             Remove the entry's one-time password
   list                  List entry names, one per line
-  rm <name>             Remove an entry
+  rm <name>             Remove an entry. Its secrets stay recoverable with
+                        get --previous for 30 days
   passwd                Change the store's passphrase
 
 Options:
@@ -60,6 +66,10 @@ enum Command {
         name: String,
         field: Field,
         clip: bool,
+        previous: Option<usize>,
+    },
+    History {
+        name: String,
     },
     List,
     Rm {
@@ -151,6 +161,7 @@ fn parse(args: Vec<String>) -> Result<Parsed> {
     let mut field = None;
     let mut force = false;
     let mut clip = false;
+    let mut previous = None;
     let mut otp_action = None;
     let mut positional = Vec::new();
 
@@ -188,6 +199,15 @@ fn parse(args: Vec<String>) -> Result<Parsed> {
                         ));
                     }
                 })
+            }
+            "--previous" => {
+                previous = Some(
+                    take_value(&flag, inline, &mut args)?
+                        .parse::<usize>()
+                        .ok()
+                        .filter(|&n| n > 0)
+                        .ok_or("--previous takes a number from 1, the most recently replaced")?,
+                )
             }
             "--force" if inline.is_none() => force = true,
             "--clip" if inline.is_none() => clip = true,
@@ -236,11 +256,19 @@ fn parse(args: Vec<String>) -> Result<Parsed> {
             notes: notes.take(),
             force: std::mem::take(&mut force),
         },
-        "get" => Command::Get {
-            name: name()?,
-            field: field.take().unwrap_or(Field::Secret),
-            clip: std::mem::take(&mut clip),
-        },
+        "get" => {
+            let field = field.take().unwrap_or(Field::Secret);
+            if previous.is_some() && !matches!(field, Field::Secret | Field::Otp) {
+                return Err("--previous applies only to the secret and otp fields".into());
+            }
+            Command::Get {
+                name: name()?,
+                field,
+                clip: std::mem::take(&mut clip),
+                previous: previous.take(),
+            }
+        }
+        "history" => Command::History { name: name()? },
         "rm" => Command::Rm { name: name()? },
         "otp" => Command::Otp {
             name: name()?,
@@ -274,6 +302,9 @@ fn parse(args: Vec<String>) -> Result<Parsed> {
     if otp_action.is_some() {
         return Err("--set and --clear only apply to otp".into());
     }
+    if previous.is_some() {
+        return Err("--previous only applies to get".into());
+    }
     Ok(Parsed::Run { store, command })
 }
 
@@ -282,9 +313,15 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
         Some(path) => path,
         None => default_store_path()?,
     };
+    let now = now_ms()?;
     let save = |store: &Store, passphrase: &str| {
         store
-            .save(&path, passphrase, age::DEFAULT_WORK_FACTOR)
+            .save(
+                &path,
+                passphrase,
+                age::DEFAULT_WORK_FACTOR,
+                Cutoffs::at(now),
+            )
             .map_err(|e| e.to_string())
     };
 
@@ -309,6 +346,7 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
             }
             let otp = existing.and_then(|entry| entry.otp.clone());
             let secret = read_hidden(&format!("Secret for {name}: "), "secret")?;
+            let stamp = stamp(&store, now);
             store.insert(
                 name,
                 Entry {
@@ -317,22 +355,40 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
                     notes,
                     otp,
                 },
+                stamp,
             );
             save(&store, &passphrase)?;
         }
-        Command::Get { name, field, clip } => {
+        Command::Get {
+            name,
+            field,
+            clip,
+            previous,
+        } => {
             let (store, _) = open(&path)?;
-            let entry = store
-                .get(&name)
-                .ok_or_else(|| format!("no entry named {name}"))?;
-            let value = match field {
-                Field::Secret => entry.secret.as_ref(),
-                Field::Username => entry.username.as_ref(),
-                Field::Notes => entry.notes.as_ref(),
-                Field::Otp => entry.otp.as_ref(),
-            }
-            .ok_or_else(|| format!("{name} has no value for that field"))?;
+            let value = match previous {
+                Some(n) => previous_value(&store, &name, field, n)?,
+                None => {
+                    let entry = store
+                        .get(&name)
+                        .ok_or_else(|| format!("no entry named {name}"))?;
+                    match field {
+                        Field::Secret => entry.secret.as_ref(),
+                        Field::Username => entry.username.as_ref(),
+                        Field::Notes => entry.notes.as_ref(),
+                        Field::Otp => entry.otp.as_ref(),
+                    }
+                    .ok_or_else(|| format!("{name} has no value for that field"))?
+                }
+            };
             deliver(value, clip)?;
+        }
+        Command::History { name } => {
+            let (store, _) = open(&path)?;
+            let version = store
+                .version(&name)
+                .ok_or_else(|| format!("no entry named {name}"))?;
+            print!("{}", history_text(version));
         }
         Command::List => {
             let (store, _) = open(&path)?;
@@ -342,8 +398,9 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
         }
         Command::Rm { name } => {
             let (mut store, passphrase) = open(&path)?;
+            let stamp = stamp(&store, now);
             store
-                .remove(&name)
+                .remove(&name, stamp)
                 .ok_or_else(|| format!("no entry named {name}"))?;
             save(&store, &passphrase)?;
         }
@@ -358,10 +415,7 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
                         .as_ref()
                         .ok_or_else(|| format!("{name} has no one-time password"))?;
                     let otp = Otp::parse(uri).map_err(|e| e.to_string())?;
-                    let now = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .map_err(|_| "the system clock is set before 1970")?
-                        .as_secs();
+                    let now = now / 1000;
                     deliver(&otp.code(now), clip)?;
                     if io::stderr().is_terminal() {
                         eprintln!("expires in {}s", otp.seconds_left(now));
@@ -371,25 +425,25 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
                     refuse_otp_replacement(&store, &name, force)?;
                     let key = read_hidden(&format!("Setup key for {name}: "), "setup key")?;
                     let uri = otp::setup_uri(&key, &name).map_err(|e| e.to_string())?;
-                    match store.get_mut(&name) {
-                        Some(entry) => entry.otp = Some(uri),
-                        None => {
-                            store.insert(
-                                name,
-                                Entry {
-                                    secret: None,
-                                    username: None,
-                                    notes: None,
-                                    otp: Some(uri),
-                                },
-                            );
-                        }
-                    }
+                    let entry = match store.get(&name) {
+                        Some(entry) => Entry {
+                            otp: Some(uri),
+                            ..entry.clone()
+                        },
+                        None => Entry {
+                            secret: None,
+                            username: None,
+                            notes: None,
+                            otp: Some(uri),
+                        },
+                    };
+                    let stamp = stamp(&store, now);
+                    store.insert(name, entry, stamp);
                     save(&store, &passphrase)?;
                 }
                 OtpAction::Clear => {
                     let entry = store
-                        .get_mut(&name)
+                        .get(&name)
                         .ok_or_else(|| format!("no entry named {name}"))?;
                     if entry.otp.is_none() {
                         return Err(format!("{name} has no one-time password"));
@@ -399,7 +453,12 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
                             "{name} holds only a one-time password; use rm to remove the entry"
                         ));
                     }
-                    entry.otp = None;
+                    let entry = Entry {
+                        otp: None,
+                        ..entry.clone()
+                    };
+                    let stamp = stamp(&store, now);
+                    store.insert(name, entry, stamp);
                     save(&store, &passphrase)?;
                 }
             }
@@ -411,6 +470,107 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Milliseconds since the Unix epoch, the unit of the store's stamps.
+fn now_ms() -> Result<u64> {
+    let since_epoch = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "the system clock is set before 1970")?;
+    Ok(since_epoch.as_millis() as u64)
+}
+
+/// The stamp for a change to `store` made at `now`, with a warning when it
+/// is dated more than a day ahead because a clock somewhere ran fast.
+fn stamp(store: &Store, now: u64) -> u64 {
+    let stamp = store.stamp(now);
+    if store::dated_in_future(stamp, now) {
+        eprintln!(
+            "multipass: a change in the store is dated in the future; \
+             check the clocks of the machines that sync it"
+        );
+    }
+    stamp
+}
+
+/// The `n`th most recently replaced secret, or setup key for `Field::Otp`,
+/// of the entry named `name`, live or removed.
+fn previous_value<'a>(store: &'a Store, name: &str, field: Field, n: usize) -> Result<&'a str> {
+    let history = &store
+        .version(name)
+        .ok_or_else(|| format!("no entry named {name}"))?
+        .history;
+    let (list, what) = match field {
+        Field::Otp => (&history.otps, "setup key"),
+        _ => (&history.secrets, "secret"),
+    };
+    match list.get(n - 1) {
+        Some(previous) => Ok(&previous.value),
+        None if list.is_empty() => Err(format!("{name} has no earlier {what}")),
+        None => Err(format!(
+            "{name} has only {} earlier {what}{}",
+            list.len(),
+            if list.len() == 1 { "" } else { "s" }
+        )),
+    }
+}
+
+/// Lists when the version changed and when each earlier value was replaced,
+/// numbered as `get --previous` counts them. It shows no value.
+fn history_text(version: &Version) -> String {
+    let what = if version.entry.is_some() {
+        "changed"
+    } else {
+        "removed"
+    };
+    let mut out = format!("{what:<10} {}\n", utc(version.modified));
+    for (field, list) in [
+        ("secret", &version.history.secrets),
+        ("otp", &version.history.otps),
+    ] {
+        for (i, previous) in list.iter().enumerate() {
+            let label = format!("{field} {}", i + 1);
+            out.push_str(&format!("{label:<10} {}\n", utc(previous.replaced)));
+        }
+    }
+    out
+}
+
+/// Formats a stamp as a UTC date and time. A stamp of 0 comes from a store
+/// written before format 3 recorded when entries changed.
+fn utc(ms: u64) -> String {
+    if ms == 0 {
+        return "unknown".into();
+    }
+    let seconds = ms / 1000;
+    let (year, month, day) = civil_from_days(seconds / 86_400);
+    let time = seconds % 86_400;
+    format!(
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02} UTC",
+        time / 3600,
+        time / 60 % 60,
+        time % 60
+    )
+}
+
+/// Converts days since 1970-01-01 to a Gregorian date with Howard Hinnant's
+/// `civil_from_days`, which counts in 400-year eras of years that start on
+/// 1 March, so each leap day falls at the end of its year.
+fn civil_from_days(days: u64) -> (u64, u64, u64) {
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let day_of_era = z % 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_from_march = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_from_march + 2) / 5 + 1;
+    let month = if month_from_march < 10 {
+        month_from_march + 3
+    } else {
+        month_from_march - 9
+    };
+    (era * 400 + year_of_era + u64::from(month <= 2), month, day)
 }
 
 fn default_store_path() -> Result<PathBuf> {
@@ -557,6 +717,7 @@ mod tests {
                 name: "x".into(),
                 field: Field::Username,
                 clip: false,
+                previous: None,
             }
         );
         assert_eq!(
@@ -612,6 +773,7 @@ mod tests {
                 name: "github.com".into(),
                 field: Field::Otp,
                 clip: false,
+                previous: None,
             }
         );
         assert_eq!(
@@ -620,6 +782,7 @@ mod tests {
                 name: "github.com".into(),
                 field: Field::Username,
                 clip: true,
+                previous: None,
             }
         );
     }
@@ -656,11 +819,23 @@ mod tests {
             "otp x --set --force=yes",
             "get x --force",
             "rm x --force",
+            "get x --previous",
+            "get x --previous 0",
+            "get x --previous -1",
+            "get x --previous two",
+            "get x --previous 1 --field username",
+            "get x --field notes --previous 1",
+            "add x --previous 1",
+            "history x --previous 1",
+            "otp x --previous 1",
+            "history",
+            "history x y",
+            "history x --clip",
         ] {
             assert!(parse(args(bad)).is_err(), "{bad:?} parsed");
         }
         // The store text cannot hold an entry with no name.
-        for command in ["add", "get", "rm", "otp"] {
+        for command in ["add", "get", "rm", "otp", "history"] {
             let argv = vec![command.to_string(), String::new()];
             assert!(parse(argv).is_err(), "{command} with an empty name parsed");
         }
@@ -678,8 +853,9 @@ mod tests {
         store.insert(
             "with",
             entry(Some("otpauth://totp/with?secret=JBSWY3DPEHPK3PXP")),
+            1,
         );
-        store.insert("without", entry(None));
+        store.insert("without", entry(None), 1);
 
         assert_eq!(
             refuse_otp_replacement(&store, "with", false).unwrap_err(),
@@ -688,6 +864,113 @@ mod tests {
         assert!(refuse_otp_replacement(&store, "with", true).is_ok());
         assert!(refuse_otp_replacement(&store, "without", false).is_ok());
         assert!(refuse_otp_replacement(&store, "missing", false).is_ok());
+    }
+
+    #[test]
+    fn parses_history_and_previous() {
+        assert_eq!(
+            run_of("history github.com"),
+            Command::History {
+                name: "github.com".into()
+            }
+        );
+        for (argv, field, clip) in [
+            ("get x --previous 2", Field::Secret, false),
+            ("get x --previous=2 --clip", Field::Secret, true),
+            ("get --field otp x --previous 2", Field::Otp, false),
+        ] {
+            assert_eq!(
+                run_of(argv),
+                Command::Get {
+                    name: "x".into(),
+                    field,
+                    clip,
+                    previous: Some(2),
+                },
+                "{argv}"
+            );
+        }
+    }
+
+    fn store_with_history() -> Store {
+        let entry = |secret: &str, otp: Option<&str>| Entry {
+            secret: Some(secret.into()),
+            username: None,
+            notes: None,
+            otp: otp.map(String::from),
+        };
+        let otp = "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP";
+        let mut store = Store::new();
+        store.insert("x", entry("first", Some(otp)), 1_764_160_000_123);
+        store.insert("x", entry("second", None), 1_764_160_060_000);
+        store.insert("x", entry("third", None), 1_764_246_400_000);
+        store.insert("gone", entry("kept", None), 1_000);
+        store.remove("gone", 2_000);
+        store
+    }
+
+    #[test]
+    fn previous_counts_from_the_most_recently_replaced() {
+        let store = store_with_history();
+        let get = |name: &str, field: Field, n: usize| previous_value(&store, name, field, n);
+        assert_eq!(get("x", Field::Secret, 1).unwrap(), "second");
+        assert_eq!(get("x", Field::Secret, 2).unwrap(), "first");
+        assert_eq!(
+            get("x", Field::Otp, 1).unwrap(),
+            "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP"
+        );
+        assert_eq!(get("gone", Field::Secret, 1).unwrap(), "kept");
+        // The errors count what is kept and never show a value.
+        assert_eq!(
+            get("x", Field::Secret, 3).unwrap_err(),
+            "x has only 2 earlier secrets"
+        );
+        assert_eq!(
+            get("x", Field::Otp, 2).unwrap_err(),
+            "x has only 1 earlier setup key"
+        );
+        assert_eq!(
+            get("gone", Field::Otp, 1).unwrap_err(),
+            "gone has no earlier setup key"
+        );
+        assert_eq!(
+            get("missing", Field::Secret, 1).unwrap_err(),
+            "no entry named missing"
+        );
+    }
+
+    #[test]
+    fn history_lists_dates_and_no_values() {
+        let store = store_with_history();
+        let text = history_text(store.version("x").unwrap());
+        assert_eq!(
+            text,
+            "changed    2025-11-27 12:26:40 UTC\n\
+             secret 1   2025-11-27 12:26:40 UTC\n\
+             secret 2   2025-11-26 12:27:40 UTC\n\
+             otp 1      2025-11-26 12:27:40 UTC\n"
+        );
+        for secret in ["first", "second", "third", "JBSWY3DPEHPK3PXP"] {
+            assert!(!text.contains(secret), "{text}");
+        }
+        assert_eq!(
+            history_text(store.version("gone").unwrap()),
+            "removed    1970-01-01 00:00:02 UTC\nsecret 1   1970-01-01 00:00:02 UTC\n"
+        );
+        let old = Store::from_text("multipass 2\nx\n\tsecret s\n").unwrap();
+        assert_eq!(
+            history_text(old.version("x").unwrap()),
+            "changed    unknown\n"
+        );
+    }
+
+    #[test]
+    fn formats_utc_dates() {
+        assert_eq!(utc(1_764_160_000_123), "2025-11-26 12:26:40 UTC");
+        assert_eq!(utc(1_709_164_800_000), "2024-02-29 00:00:00 UTC");
+        assert_eq!(utc(951_782_399_000), "2000-02-28 23:59:59 UTC");
+        assert_eq!(utc(951_782_400_000), "2000-02-29 00:00:00 UTC");
+        assert_eq!(utc(1), "1970-01-01 00:00:00 UTC");
     }
 
     #[test]

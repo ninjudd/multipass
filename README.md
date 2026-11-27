@@ -4,7 +4,7 @@ multipass is a minimal password manager with no dependencies and no sharing. It 
 
 Use it beside a full password manager, not instead of one. Keep shared and everyday logins in something like 1Password. Keep the few secrets you never want on someone else's server in multipass, such as recovery codes, seed phrases, and the master password itself.
 
-Every line of multipass is in this repository, cryptography included: about 1,000 lines of cryptography and 1,600 of everything else, small enough to read in a day. It uses no third-party crates, so the only code you trust beyond this repository is the Rust toolchain, its standard library, and, when you pass `--clip`, macOS's own AppKit framework, which multipass loads only then.
+Every line of multipass is in this repository, cryptography included: about 1,000 lines of cryptography and 2,200 of everything else, small enough to read in a day. It uses no third-party crates, so the only code you trust beyond this repository is the Rust toolchain, its standard library, and, when you pass `--clip`, macOS's own AppKit framework, which multipass loads only then.
 
 > [!WARNING]
 > multipass is new and has not been audited. Its cryptography is written by hand and checked against the official test vectors and against files from the reference age implementation, but no one outside the project has reviewed it.
@@ -31,13 +31,35 @@ multipass add github.com --username octocat      # prompts for the secret
 multipass get github.com --clip                  # copies the secret for 30 seconds
 multipass get github.com --field username
 multipass list
-multipass rm github.com
+multipass rm github.com                          # recoverable for 30 days
 multipass passwd                                 # change the passphrase
 ```
 
 Every command asks for the passphrase. To use a different file, set `MULTIPASS_STORE` or pass `--store`.
 
 `--clip` on `get` and `otp` copies the value instead of printing it, and clears the clipboard 30 seconds later, unless you have copied something else since. It marks the value as concealed and as this Mac only, so Universal Clipboard does not send it to your other Apple devices, and clipboard-history apps that honor the marking skip it. Until it clears, any app running on this Mac can still read it: the markings only keep it off your other devices and out of the history apps that honor them. `--clip` works only on macOS. Piping to `pbcopy` also works, but `pbcopy` cannot mark the value, so it syncs and lands in clipboard history.
+
+## Get an earlier password back
+
+Each entry keeps the secrets it used to hold, and the one-time password setup keys it used to hold, each with the time it was replaced. `history` lists those times, and never the values. `get --previous <n>` prints or copies one, counting from 1 for the most recently replaced.
+
+```sh
+$ multipass history github.com
+changed    2025-11-26 10:00:00 UTC
+secret 1   2025-11-26 10:00:00 UTC
+secret 2   2025-03-02 18:41:07 UTC
+otp 1      2025-08-14 09:12:55 UTC
+$ multipass get github.com --previous 1 --clip            # the secret replaced on 26 November
+$ multipass get github.com --previous 1 --field otp       # the setup key replaced in August
+```
+
+An entry keeps its last 10 earlier secrets, or every one it replaced in the past year, whichever is more, and the same for setup keys, including one replaced with `otp --set --force` or removed with `otp --clear`. After `rm`, the entry no longer appears in `list` or `get`, but `history` and `get --previous` still find its secrets for 30 days, so you can undo the removal:
+
+```sh
+multipass get github.com --previous 1 | multipass add github.com
+```
+
+After 30 days the removed secrets are gone for good. History lives inside the encrypted store, like everything else.
 
 ## Keep one-time passwords
 
@@ -77,14 +99,20 @@ brew install age
 age -d ~/.multipass/store.age
 ```
 
-age prints the store as text: each entry's name on its own line, then its fields indented by a tab.
+age prints the store as text: each entry's name on its own line, then its fields indented by a tab. `modified` is when the entry last changed, in milliseconds since 1970. Each `previous-secret` and `previous-otp` line holds an earlier value after the time it was replaced. A removed entry is marked `deleted`, and its secrets stay for 30 days.
 
 ```text
-multipass 2
+multipass 3
 github.com
+	modified 1764151200000
 	secret hunter2
 	username octocat
 	otp otpauth://totp/GitHub:octocat?secret=JBSWY3DPEHPK3PXP&issuer=GitHub
+	previous-secret 1764151200000 hunter1
+old-bank
+	modified 1764160000456
+	deleted
+	previous-secret 1764160000456 correct horse battery staple
 ```
 
 If you lose the passphrase, no one can recover the store. That is the point.
