@@ -1,5 +1,7 @@
-//! SHA-256 (FIPS 180-4), HMAC-SHA-256 (RFC 2104), HKDF-SHA-256 (RFC 5869)
-//! and PBKDF2-HMAC-SHA-256 (RFC 8018).
+//! SHA-256 (FIPS 180-4), and HKDF-SHA-256 (RFC 5869) and
+//! PBKDF2-HMAC-SHA-256 (RFC 8018) on top of it.
+
+use super::hmac::{BlockBuffer, Digest, hmac};
 
 const K: [u32; 64] = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
@@ -18,51 +20,28 @@ const INITIAL: [u32; 8] = [
 
 pub struct Sha256 {
     state: [u32; 8],
-    buffer: [u8; 64],
-    buffered: usize,
-    length: u64,
+    blocks: BlockBuffer<64>,
 }
 
-impl Sha256 {
-    pub fn new() -> Self {
+impl Digest for Sha256 {
+    const BLOCK_LEN: usize = 64;
+    type Output = [u8; 32];
+
+    fn new() -> Self {
         Self {
             state: INITIAL,
-            buffer: [0; 64],
-            buffered: 0,
-            length: 0,
+            blocks: BlockBuffer::new(),
         }
     }
 
-    pub fn update(&mut self, mut data: &[u8]) {
-        self.length = self.length.wrapping_add(data.len() as u64);
-        if self.buffered > 0 {
-            let take = (64 - self.buffered).min(data.len());
-            self.buffer[self.buffered..self.buffered + take].copy_from_slice(&data[..take]);
-            self.buffered += take;
-            data = &data[take..];
-            if self.buffered < 64 {
-                return;
-            }
-            let block = self.buffer;
-            compress(&mut self.state, &block);
-            self.buffered = 0;
-        }
-        let mut blocks = data.chunks_exact(64);
-        for block in &mut blocks {
-            compress(&mut self.state, block);
-        }
-        let rest = blocks.remainder();
-        self.buffer[..rest.len()].copy_from_slice(rest);
-        self.buffered = rest.len();
+    fn update(&mut self, data: &[u8]) {
+        self.blocks
+            .update(data, |block| compress(&mut self.state, block));
     }
 
-    pub fn finalize(mut self) -> [u8; 32] {
-        let bits = self.length.wrapping_mul(8);
-        self.update(&[0x80]);
-        while self.buffered != 56 {
-            self.update(&[0]);
-        }
-        self.update(&bits.to_be_bytes());
+    fn finalize(mut self) -> [u8; 32] {
+        let state = &mut self.state;
+        self.blocks.finish(8, |block| compress(state, block));
         let mut out = [0u8; 32];
         for (chunk, word) in out.chunks_exact_mut(4).zip(self.state) {
             chunk.copy_from_slice(&word.to_be_bytes());
@@ -71,7 +50,7 @@ impl Sha256 {
     }
 }
 
-fn compress(state: &mut [u32; 8], block: &[u8]) {
+fn compress(state: &mut [u32; 8], block: &[u8; 64]) {
     let mut w = [0u32; 64];
     for (i, word) in block.chunks_exact(4).enumerate() {
         w[i] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
@@ -111,47 +90,21 @@ fn compress(state: &mut [u32; 8], block: &[u8]) {
     }
 }
 
-pub fn sha256(data: &[u8]) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    hasher.finalize()
-}
-
-/// HMAC-SHA-256 over the concatenation of `parts`.
-pub fn hmac(key: &[u8], parts: &[&[u8]]) -> [u8; 32] {
-    let mut block = [0u8; 64];
-    if key.len() > 64 {
-        block[..32].copy_from_slice(&sha256(key));
-    } else {
-        block[..key.len()].copy_from_slice(key);
-    }
-    let mut inner = Sha256::new();
-    inner.update(&block.map(|b| b ^ 0x36));
-    for part in parts {
-        inner.update(part);
-    }
-    let inner = inner.finalize();
-    let mut outer = Sha256::new();
-    outer.update(&block.map(|b| b ^ 0x5c));
-    outer.update(&inner);
-    outer.finalize()
-}
-
 /// HKDF-SHA-256 with a 32-byte output, the only length age uses.
 pub fn hkdf(salt: &[u8], ikm: &[u8], info: &[u8]) -> [u8; 32] {
-    let prk = hmac(salt, &[ikm]);
+    let prk = hmac::<Sha256>(salt, &[ikm]);
     let counter: &[u8] = &[1];
-    hmac(&prk, &[info, counter])
+    hmac::<Sha256>(&prk, &[info, counter])
 }
 
 /// PBKDF2-HMAC-SHA-256, filling `out`.
 pub fn pbkdf2(password: &[u8], salt: &[u8], iterations: u32, out: &mut [u8]) {
     for (i, chunk) in out.chunks_mut(32).enumerate() {
         let index = (i as u32 + 1).to_be_bytes();
-        let mut u = hmac(password, &[salt, &index]);
+        let mut u = hmac::<Sha256>(password, &[salt, &index]);
         let mut t = u;
         for _ in 1..iterations {
-            u = hmac(password, &[&u]);
+            u = hmac::<Sha256>(password, &[&u]);
             for (t, u) in t.iter_mut().zip(u) {
                 *t ^= u;
             }
@@ -182,7 +135,7 @@ mod tests {
             ),
         ];
         for (input, expected) in cases {
-            assert_eq!(sha256(input).to_vec(), hex(expected));
+            assert_eq!(Sha256::digest(input).to_vec(), hex(expected));
         }
     }
 
@@ -196,27 +149,6 @@ mod tests {
         assert_eq!(
             hasher.finalize().to_vec(),
             hex("cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0")
-        );
-    }
-
-    #[test]
-    fn hmac_matches_rfc_4231() {
-        // Test case 1.
-        assert_eq!(
-            hmac(&[0x0b; 20], &[b"Hi There"]).to_vec(),
-            hex("b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7")
-        );
-        // Test case 6: a key longer than the block size is hashed first.
-        assert_eq!(
-            hmac(
-                &[0xaa; 131],
-                &[
-                    b"Test Using Larger Than Block-",
-                    b"Size Key - Hash Key First"
-                ]
-            )
-            .to_vec(),
-            hex("60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54")
         );
     }
 

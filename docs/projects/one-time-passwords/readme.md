@@ -1,5 +1,5 @@
 ---
-status: ready
+status: completed
 priority: now
 ---
 
@@ -139,3 +139,20 @@ Computing a code takes a few hash compressions, two for SHA-1 or SHA-256 and two
 - RFC 4226 defines HOTP, and RFC 6238 defines TOTP as HOTP with `counter = floor(unix_time / period)`. Google's "Key Uri Format" defines the `otpauth://` URI that QR codes encode. That format is a de facto standard, not an RFC, and it is where the defaults of SHA-1, 6 digits, and 30 seconds come from.
 - Some authenticator apps ignore the `algorithm`, `digits`, and `period` parameters and always use the defaults. multipass honors them, so it can disagree with such an app on a site that changes them. The site is right in that case.
 - `oathtool`, from the oath-toolkit Homebrew formula, computes TOTP codes from a base32 key. The manual acceptance check in § 4 uses it as an independent implementation. Nothing in the repository depends on it.
+
+## 8. Outcome
+
+Shipped. Entries hold an `otp` field beside `secret`, `username`, and `notes`, `multipass otp <name>` prints the current code, and the store is format 2, as § 2 describes. Every file in § 2.5 changed as listed.
+
+Evidence for § 4:
+
+- **Tests.** All the tests § 4 lists exist and pass: SHA-1, SHA-512, HMAC-SHA-256 and HMAC-SHA-512, HOTP, TOTP for all three hashes with their own Appendix A seeds, base32, URI parsing, store format 2, and argument parsing. Each was watched failing against a deliberate break of the code it covers, such as truncating at the MAC's first byte, padding SHA-512's length in 8 bytes, writing a base32 byte one position late, and allowing `otp` in a format 1 store.
+- **The command table.** Each row was run against a release build through `expect`. A format 1 store written by the reference `age` crate opened, and the next save wrote `multipass 2`, which that crate decrypted to the expected text. `Chase Bank #2` stored `otpauth://totp/Chase%20Bank%20%232?secret=JBSWY3DPEHPK3PXP`, `otp --clear` on an entry with only a one-time password failed and kept it, and `add --force` kept an existing `otp`.
+- **Codes from an independent implementation.** `oathtool` was not installed, so Python's standard library (`hmac` and `hashlib`) computed the codes instead. The SHA-1 code for `JBSW Y3DP EHPK 3PXP` and the SHA-512 code for an `algorithm=SHA512` URI both matched Python's in the same 30-second window. Running the two `oathtool` rows by hand remains a check anyone can repeat.
+
+Choices made while building it:
+
+- **The setup key prompt asks twice**, like the secret prompt, because a typo in a base32 key still decodes to a valid key and yields wrong codes.
+- **A URI that repeats `secret`, `algorithm`, `digits`, or `period` is rejected**, because which copy an authenticator app honors differs between apps.
+- **The `secret` parameter is not percent-decoded**, because decoding would branch on its characters. Base32 never needs escaping, so a key written as `%3D` padding is rejected rather than read.
+- **Hashing shares one block buffer.** SHA-1, SHA-256, and SHA-512 use `hmac::BlockBuffer` for buffering and padding, instead of each repeating it.
