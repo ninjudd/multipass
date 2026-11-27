@@ -1,0 +1,74 @@
+{
+ "version": 1,
+ "name": "CLI finds the container store",
+ "project": "passkeys",
+ "pr": {
+  "repo": "ninjudd/multipass",
+  "number": 32,
+  "title": "Have the CLI find a moved store in the app's iCloud container",
+  "head": "ccefa4563bc2f45b8a5407f402c5d09458e17244",
+  "headRef": "passkeys-cli-container-store",
+  "base": "d491604a5668ff717ba6e51ec51533c272028445",
+  "baseRef": "main"
+ },
+ "overview": {
+  "summary": [
+   "multipass is a command-line password manager whose store is a package: a folder of encrypted files, by default <code>~/.multipass/store.multipass</code>. The passkeys plan adds a Mac and iPhone app that keeps that package in the app's iCloud container, the app's own folder in iCloud Drive, so every device shares one store. On a Mac, the app moves an existing package out of <code>~/.multipass</code> and into the container.",
+   "After that move, <code>~/.multipass</code> holds no store. At the base, the CLI reached the container only through <code>MULTIPASS_STORE</code>, set from an <code>export</code> line the app shows. Without it, every command found no store, and <code>multipass init</code> would create a second, empty store that no other device sees.",
+   "This pull request changes only the plan. It proposes, as § 6 question 10, that when neither <code>--store</code> nor <code>MULTIPASS_STORE</code> is set and <code>~/.multipass</code> holds neither <code>store.multipass</code> nor <code>store.age</code>, the CLI's default becomes the container's package when it exists. <code>init</code> then finds that package and refuses, and the <code>export</code> line becomes optional. The answer is proposed, not decided, and the question records an alternative: keep <code>~/.multipass</code> as the default, and have <code>init</code> warn when the container holds a store."
+  ],
+  "cards": [
+   {
+    "id": "order",
+    "title": "Where the CLI looks for the store",
+    "html": "<ol><li><code>--store</code>, when passed.</li><li><code>MULTIPASS_STORE</code>, when set.</li><li><code>~/.multipass/store.multipass</code>, or <code>~/.multipass/store.age</code>, which the vault-key plan moves into a package.</li><li><b>New:</b> the container's <code>Documents/store.multipass</code>, when it exists.</li><li>Otherwise <code>~/.multipass/store.multipass</code>, where <code>init</code> creates one.</li></ol>"
+   },
+   {
+    "id": "review",
+    "title": "Review so far",
+    "html": "<ul class=\"tight\"><li>One open finding: a store that later appears in <code>~/.multipass</code> silently takes the CLI off the container.</li><li>Four suggestions: the container folder's name, a prototype check for a package iCloud has not downloaded, the case where <code>MULTIPASS_STORE</code> still names the old location, and saying question 10 must be answered before the plan is <code>ready</code>.</li><li>The plan stays <code>draft</code>, so it makes no readiness claim.</li></ul>"
+   }
+  ]
+ },
+ "groups": [
+  {
+   "id": "plan",
+   "title": "The CLI's fallback to the container",
+   "kicker": "Question 10 and the rows of the passkeys plan that follow from it",
+   "intro": [
+    "Every edit is in the passkeys plan. Question 10 in § 6 states the problem and the proposed answer, and the other edits make the rest of the plan agree with that answer.",
+    "<ul><li><b>§ 2.4's table</b> says the CLI finds the container by itself, and that the <code>export</code> line is then optional.</li><li><b>§ 2.5's <code>src/main.rs</code> row</b> gives the rule and the path, <code>~/Library/Mobile Documents/&lt;container&gt;/Documents/store.multipass</code>, with the container's identifier as a constant.</li><li><b>§ 2.5's <code>README.md</code> row</b> says the README documents the fallback.</li><li><b>§ 4's move row</b> expects <code>multipass list</code> to open the moved package and <code>multipass init</code> to fail with <code>a store already exists at &lt;path&gt;</code>.</li></ul>"
+   ],
+   "checks": [
+    {
+     "kind": "context",
+     "text": "The container is the app's folder in iCloud Drive. On a Mac it sits under <code>~/Library/Mobile Documents/</code>. A package there may be listed before its files have downloaded."
+    }
+   ],
+   "files": [
+    {
+     "path": "docs/projects/passkeys/readme.md",
+     "collapsed": false,
+     "note": "The passkeys plan: question 10 proposes the CLI's fallback to the container, and § 2.4, § 2.5 and § 4 follow it.",
+     "checks": [
+      {
+       "kind": "verify",
+       "text": "§ 4's expected error matches the one <code>init</code> gives today in <code>run</code> in <code>src/main.rs</code>, <code>a store already exists at &lt;path&gt;</code>, read at the head.",
+       "line": 118
+      },
+      {
+       "kind": "flag",
+       "text": "Open finding: the CLI uses the container only while <code>~/.multipass</code> holds no store, and the <code>export</code> line is now optional. A store that appears there later, such as from <code>init</code> on a second Mac before iCloud Drive lists the package, silently takes over, and its saves reach no other device. The review asks that commands fail naming both paths when both hold a store.",
+       "line": 143
+      },
+      {
+       "kind": "context",
+       "text": "The folder under <code>Mobile Documents</code> is named after the container identifier with each <code>.</code> replaced by <code>~</code>. The row does not say so yet.",
+       "line": 89
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}
