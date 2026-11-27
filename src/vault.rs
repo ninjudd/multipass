@@ -27,6 +27,7 @@ use std::fmt;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::age;
 use crate::crypto::{self, random};
@@ -807,6 +808,39 @@ fn open_old(path: &Path, bytes: &[u8], passphrases: &[String]) -> Result<Option<
     Ok(None)
 }
 
+/// What an older multipass changed in the old file since `snapshot`, as a
+/// store to merge into the package. Every Mac, and every retry after a
+/// crash, computes the same stamps, so merging the changes again changes
+/// nothing, and an edit made after them still wins. A format 3 file carries
+/// the stamp of each change, so the whole file merges as it is. Formats 1
+/// and 2 carry none, so each entry that differs from the snapshot is stamped
+/// with the file's modification time, `saved`, when the older multipass
+/// wrote it.
+fn old_file_changes(changed: &Store, text: &str, snapshot: &Store, saved: SystemTime) -> Store {
+    if !text.starts_with("multipass 1\n") && !text.starts_with("multipass 2\n") {
+        return changed.clone();
+    }
+    let stamp = saved
+        .duration_since(UNIX_EPOCH)
+        .map_or(1, |d| d.as_millis() as u64)
+        .max(1);
+    let mut changes = Store::new();
+    for name in snapshot.names() {
+        if changed.get(name).is_none() {
+            let then = snapshot.get(name).expect("a live name").clone();
+            changes.insert(name, then, 0);
+            changes.remove(name, stamp);
+        }
+    }
+    for name in changed.names() {
+        let entry = changed.get(name).expect("a live name");
+        if snapshot.get(name) != Some(entry) {
+            changes.insert(name, entry.clone(), stamp);
+        }
+    }
+    changes
+}
+
 /// Decrypts a key file with `passphrase`, or returns `None` when the
 /// passphrase does not open it.
 fn read_key_file(path: &Path, passphrase: &str) -> Result<Option<KeyFile>> {
@@ -903,13 +937,13 @@ impl Session {
         Ok(settled)
     }
 
-    /// Compares the old single-file store beside the package with what the
-    /// move record last saw. When it changed, because a Mac on an older
+    /// Compares the old single-file store beside the package with what its
+    /// move records last saw. When it changed, because a Mac on an older
     /// multipass saved to it after the move, its changes join the store,
-    /// stamped now. When it has gone 30 days unchanged, it is deleted, and
-    /// then the record. An old file with no record, such as one a sync
-    /// service brought back after it was retired, adds only what the store
-    /// lacks.
+    /// stamped as `old_file_changes` says. When it has gone 30 days
+    /// unchanged, it is deleted, and then its records. An old file with no
+    /// record, such as one a sync service brought back after it was retired,
+    /// adds only what the store lacks.
     fn check_old_file(&mut self, vault: &Vault, now_ms: u64) -> Result<()> {
         let now = seconds(now_ms);
         if self.moves.is_empty() {
@@ -945,24 +979,50 @@ impl Session {
             return Ok(());
         }
 
+        // Two Macs that moved at once, or a record whose deletion has not
+        // synced yet, leave more than one record of the same old file.
+        let mut by_file: BTreeMap<String, Vec<(PathBuf, MoveRecord)>> = BTreeMap::new();
         for (path, record) in std::mem::take(&mut self.moves) {
-            let old = vault.parent().join(&record.file);
+            by_file
+                .entry(record.file.clone())
+                .or_default()
+                .push((path, record));
+        }
+        for (file, records) in by_file {
+            let old = vault.parent().join(&file);
             let bytes = match fs::read(&old) {
                 Ok(bytes) => bytes,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                    // Another Mac retired the old file; the record is done.
-                    vault.remove(&path)?;
+                    // Another Mac retired the old file; its records are done.
+                    for (path, _) in &records {
+                        vault.remove(path)?;
+                    }
                     continue;
                 }
                 Err(e) => return Err(Error::Io(e)),
             };
             let hash = crypto::sha256::hex_digest(&bytes);
-            if hash == record.sha256 {
-                if now >= record.since + OLD_FILE_DAYS * DAY {
+            // A record that holds the file's hash already merged the file as
+            // it is, so the others are older or duplicates. Keep the one
+            // that has seen it longest, which every Mac picks alike.
+            let seen = records
+                .iter()
+                .enumerate()
+                .filter(|(_, (_, r))| r.sha256 == hash)
+                .min_by_key(|(_, (path, r))| (r.since, file_name(path)))
+                .map(|(i, _)| i);
+            if let Some(keep) = seen {
+                let since = records[keep].1.since;
+                let retire = now >= since + OLD_FILE_DAYS * DAY;
+                if retire {
                     vault.remove(&old)?;
-                    vault.remove(&path)?;
-                } else {
-                    self.moves.push((path, record));
+                }
+                for (i, (path, record)) in records.into_iter().enumerate() {
+                    if i == keep && !retire {
+                        self.moves.push((path, record));
+                    } else {
+                        vault.remove(&path)?;
+                    }
                 }
                 continue;
             }
@@ -971,38 +1031,29 @@ impl Session {
                     "{} changed after the move, but this passphrase does not open it",
                     old.display()
                 ));
-                self.moves.push((path, record));
+                self.moves.extend(records);
                 continue;
             };
-            let snapshot = Store::from_text(&record.snapshot)
-                .map_err(|e| Error::OldStore(file_name(&path), e))?;
-            let mut names: Vec<&str> = changed.names().chain(snapshot.names()).collect();
-            names.sort_unstable();
-            names.dedup();
-            for name in names {
-                let (now_entry, then) = (changed.get(name), snapshot.get(name));
-                if now_entry == then {
-                    continue;
-                }
-                let stamp = self.store.stamp(now_ms);
-                match now_entry {
-                    Some(entry) => {
-                        self.store.insert(name, entry.clone(), stamp);
-                    }
-                    None => {
-                        self.store.remove(name, stamp);
-                    }
-                }
-            }
+            let (last_path, last) = records
+                .iter()
+                .max_by_key(|(path, r)| (r.since, file_name(path)))
+                .expect("a file has a record");
+            let snapshot = Store::from_text(&last.snapshot)
+                .map_err(|e| Error::OldStore(file_name(last_path), e))?;
+            let saved = fs::metadata(&old).and_then(|m| m.modified())?;
+            let changes = old_file_changes(&changed, &text, &snapshot, saved);
+            self.store = Store::merge(&[self.store.clone(), changes]);
             self.save(vault, now_ms)?;
             let updated = MoveRecord {
-                file: record.file.clone(),
+                file,
                 sha256: hash,
                 since: now,
                 snapshot: text,
             };
             let written = vault.write_move_record(&vault.dir, &self.current, &updated)?;
-            vault.remove(&path)?;
+            for (path, _) in &records {
+                vault.remove(path)?;
+            }
             self.moves.push((written, updated));
             self.warnings.push(format!(
                 "{} changed after the move; merged its changes",
@@ -1885,6 +1936,23 @@ mod tests {
         .unwrap();
     }
 
+    /// Writes `text` as a single-file store saved at `saved_ms`, as an older
+    /// multipass on another Mac does after the move.
+    fn save_old(path: &Path, pass: &str, text: &str, saved_ms: u64) {
+        write_old(path, pass, text);
+        let saved = std::time::UNIX_EPOCH + std::time::Duration::from_millis(saved_ms);
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(saved)
+            .unwrap();
+    }
+
+    fn secret_of(session: &Session, name: &str) -> Option<String> {
+        session.store.get(name)?.secret.clone()
+    }
+
     fn old_text(path: &Path, pass: &str) -> String {
         String::from_utf8(age::decrypt(pass.as_bytes(), &fs::read(path).unwrap()).unwrap()).unwrap()
     }
@@ -1988,6 +2056,155 @@ mod tests {
         assert!(!old.exists());
         assert_eq!(count(vault.dir(), "moved."), 0);
         assert_eq!(session.store.names().collect::<Vec<_>>(), ["x", "z"]);
+    }
+
+    /// Mac A merges an older multipass's save to the old file, and you then
+    /// edit the same entry on A. Mac B gets A's new move record before A's
+    /// deletion of the old one, and prompts. B must not apply the old file's
+    /// save a second time over your edit.
+    #[test]
+    fn a_stale_move_record_does_not_reapply_an_old_file_save() {
+        let root = temp_dir();
+        let old = root.join("store.age");
+        write_old(&old, "pass", "multipass 2\nbank\n\tsecret 0\n");
+        let a = Vault::new(root.join("a.multipass"), FAST).with_old(Some(old.clone()));
+        open_or_move(&a, "pass", T0);
+        let b = Vault::new(root.join("b.multipass"), FAST).with_old(Some(old.clone()));
+        fs::create_dir(b.dir()).unwrap();
+        let bring_new_files = |from: &Vault, to: &Vault| {
+            for name in files(from.dir()).difference(&files(to.dir())) {
+                fs::copy(from.dir().join(name), to.dir().join(name)).unwrap();
+            }
+        };
+        bring_new_files(&a, &b);
+
+        save_old(&old, "pass", "multipass 2\nbank\n\tsecret 1\n", T0 + DAY_MS);
+        open_or_move(&a, "pass", T0 + 2 * DAY_MS);
+        add(&a, "pass", "bank", "2", T0 + 2 * DAY_MS + S);
+        bring_new_files(&a, &b);
+        assert_eq!(count(b.dir(), "moved."), 2, "B holds both records");
+
+        let (on_b, _) = open_or_move(&b, "pass", T0 + 3 * DAY_MS);
+        assert_eq!(secret_of(&on_b, "bank").as_deref(), Some("2"));
+        assert!(on_b.warnings.is_empty(), "{:?}", on_b.warnings);
+        assert_eq!(count(b.dir(), "moved."), 1);
+        bring_new_files(&b, &a);
+        let (on_a, _) = open_or_move(&a, "pass", T0 + 3 * DAY_MS + S);
+        assert_eq!(secret_of(&on_a, "bank").as_deref(), Some("2"));
+    }
+
+    /// A merge of an older multipass's save to the old file, stopped before
+    /// each of its durable steps, then a save that does not settle, as on a
+    /// Mac whose prompt has not checked the old file yet. Finishing the
+    /// merge at the next prompt keeps the later save, and keeps what the old
+    /// file added.
+    #[test]
+    fn an_old_file_merge_cut_short_at_any_step_does_not_undo_a_later_save() {
+        for n in 0.. {
+            let (vault, old) = beside_old("multipass 2\nbank\n\tsecret 0\n");
+            open_or_move(&vault, "pass", T0);
+            save_old(
+                &old,
+                "pass",
+                "multipass 2\nbank\n\tsecret 1\nz\n\tsecret z\n",
+                T0 + DAY_MS,
+            );
+            let mut cut = Vault::new(vault.dir().to_path_buf(), FAST).with_old(Some(old.clone()));
+            cut.stop_after = Some(n);
+            let mut session = cut
+                .open(&mut answers("pass", None), T0 + 2 * DAY_MS)
+                .unwrap();
+            let result = session.settle(&cut, T0 + 2 * DAY_MS);
+
+            let mut session = vault
+                .open(&mut answers("pass", None), T0 + 3 * DAY_MS)
+                .unwrap();
+            let stamp = session.store.stamp(T0 + 3 * DAY_MS);
+            session.store.insert("bank", secret("2"), stamp);
+            session.save(&vault, T0 + 3 * DAY_MS).unwrap();
+
+            let (session, _) = open_or_move(&vault, "pass", T0 + 4 * DAY_MS);
+            assert_eq!(
+                secret_of(&session, "bank").as_deref(),
+                Some("2"),
+                "step {n}"
+            );
+            assert_eq!(secret_of(&session, "z").as_deref(), Some("z"), "step {n}");
+            assert_eq!(count(vault.dir(), "moved."), 1, "step {n}");
+            let (session, _) = open_or_move(&vault, "pass", T0 + 4 * DAY_MS + S);
+            assert!(
+                session.warnings.is_empty(),
+                "step {n}: {:?}",
+                session.warnings
+            );
+            match result {
+                Err(Error::Stopped) => {}
+                Ok(_) => break,
+                Err(e) => panic!("{e}"),
+            }
+        }
+    }
+
+    /// Two Macs that moved the same old file at once leave two records of
+    /// it. A later save to the old file merges once and warns once.
+    #[test]
+    fn two_records_of_one_old_file_merge_its_change_once() {
+        let (vault, old) = beside_old("multipass 2\nx\n\tsecret 1\n");
+        open_or_move(&vault, "pass", T0);
+        // A second record of the old file, as the other Mac's move wrote.
+        let duplicate = || {
+            let record = fs::read_dir(vault.dir())
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .find(|p| file_name(p).starts_with("moved."))
+                .unwrap();
+            let generation = file_name(&record).split('.').nth(1).unwrap().to_string();
+            let copy = format!("moved.{generation}.{}.age", random::id().unwrap());
+            fs::copy(&record, vault.dir().join(copy)).unwrap();
+            assert_eq!(count(vault.dir(), "moved."), 2);
+        };
+        duplicate();
+        assert!(open_or_move(&vault, "pass", T0 + S).0.warnings.is_empty());
+        assert_eq!(count(vault.dir(), "moved."), 1, "the duplicate goes");
+
+        duplicate();
+        save_old(&old, "pass", "multipass 2\nx\n\tsecret 2\n", T0 + DAY_MS);
+        let (session, _) = open_or_move(&vault, "pass", T0 + 2 * DAY_MS);
+        assert_eq!(session.warnings.len(), 1, "{:?}", session.warnings);
+        assert_eq!(secret_of(&session, "x").as_deref(), Some("2"));
+        assert_eq!(count(vault.dir(), "moved."), 1);
+    }
+
+    /// A format 3 old file stamps each change itself, so its changes merge
+    /// with those stamps: a later save in the package wins, and an earlier
+    /// one loses.
+    #[test]
+    fn a_format_3_old_file_merges_with_its_own_stamps() {
+        let (vault, old) = beside_old("multipass 3\nbank\n\tmodified 5\n\tsecret 0\n");
+        open_or_move(&vault, "pass", T0);
+        add(&vault, "pass", "card", "0", T0 + S);
+        let saved = T0 + DAY_MS;
+        save_old(
+            &old,
+            "pass",
+            &format!(
+                "multipass 3\nbank\n\tmodified {saved}\n\tsecret 1\n\
+                 card\n\tmodified {}\n\tsecret 1\n",
+                T0 + 2
+            ),
+            saved,
+        );
+        let mut session = vault
+            .open(&mut answers("pass", None), T0 + 2 * DAY_MS)
+            .unwrap();
+        let stamp = session.store.stamp(T0 + 2 * DAY_MS);
+        session.store.insert("bank", secret("2"), stamp);
+        session.save(&vault, T0 + 2 * DAY_MS).unwrap();
+
+        let (session, _) = open_or_move(&vault, "pass", T0 + 3 * DAY_MS);
+        assert_eq!(secret_of(&session, "bank").as_deref(), Some("2"));
+        assert_eq!(secret_of(&session, "card").as_deref(), Some("0"));
+        assert_eq!(session.warnings.len(), 1, "{:?}", session.warnings);
     }
 
     #[test]
