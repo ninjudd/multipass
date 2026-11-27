@@ -15,7 +15,7 @@ That blocks two things you want. A browser extension that offers the right login
 
 ## 2. Solution
 
-A new repeatable field, `website`, holds one web address per line, in any number. `multipass add <name> --website <url>` sets them when you add an entry, and `multipass website <name>` lists, adds, and removes them later without touching the secret. `multipass find <url>` prints the names of the entries whose websites match a page. A website matches a page when the page uses the same host or a subdomain of it, with the same scheme and port, and a leading `www.` is ignored on both sides. The field needs a new store format number. Websites are not secrets, but they live inside the encrypted store like everything else, so the file on disk still reveals nothing about your accounts.
+A new repeatable field, `website`, holds one web address per line, in any number. `multipass add <name> --website <url>` sets them when you add an entry, and `multipass website <name>` lists, adds, and removes them later without touching the secret. `multipass find <url>` prints the names of the entries whose websites match a page. A website matches a page when the page uses the same host or a subdomain of it, with the same port and the same scheme, except that a website saved as `http` also matches its `https` page. A leading `www.` is ignored when the two hosts are compared for equality, but never widens the subdomain test. The field needs a new store format number. Websites are not secrets, but they live inside the encrypted store like everything else, so the file on disk still reveals nothing about your accounts.
 
 ```console
 $ multipass add "example work" --username sam --website accounts.example.com --website https://portal.example.com/login
@@ -44,34 +44,46 @@ example work
 | Rule | Detail |
 | --- | --- |
 | Repeatable | An entry holds zero or more `website` lines, in the order you added them. A duplicate, after normalizing, is refused with `example work already lists https://admin.example.com`. |
-| Normalized on input | A bare host such as `github.com` becomes `https://github.com`. The scheme and host are lowercased. A default port (`:443` for `https`, `:80` for `http`) is dropped. A path, query, or fragment is kept as you typed it, because it names the login page to open. |
-| Allowed values | `https` and `http` addresses with an ASCII host. Any other scheme, a host with characters outside ASCII, or a value with a space or control character is refused, naming the value. A host in another script must be entered in its `xn--` form, because converting it needs Unicode's IDNA tables, which would be a large data file. |
-| Not a secret | The field is ordinary text. It is escaped like every field, and it may appear in error messages, which name a website but never a secret. |
+| Normalized on input | A value without `://` is a bare host, so `github.com` becomes `https://github.com`. The scheme and host are lowercased. A port loses any leading zeros, and a default port (`:443` for `https`, `:80` for `http`) is dropped. A path that is only `/`, with no query or fragment, is dropped, so `github.com` and `https://github.com/` are one value. Any other path, query, or fragment is kept as you typed it, because it names the login page to open. |
+| Allowed values | `https` and `http` addresses with an ASCII host, parsed as the list below says. Any other scheme, a host with characters outside ASCII, or a value with a space or control character is refused, naming the value. A host in another script must be entered in its `xn--` form, because converting it needs Unicode's IDNA tables, which would be a large data file. |
+| Not a secret | The field is ordinary text, escaped like every field. A command's own errors may name the website you passed, but a malformed `website` line in the decrypted store fails with its line number only, as every store error does. |
+
+A website is parsed strictly, so that `find` and a browser never disagree about which host a page is on. The value is a scheme, `://`, an authority, and an optional path, query, and fragment. The authority ends at the first `/`, `?`, or `#`, or at the end of the value. The host is the authority up to its first `:`, and the port is the rest of the authority after that `:`. multipass refuses, naming the value, each form that a browser reads in a way this split would not:
+
+- **`http:` or `https:` followed by anything but `//`**, such as `https:bank.example` or `https:/bank.example`, which a browser repairs. Such a value is refused rather than read as a bare host.
+- **An `@` in the authority.** A browser reads `https://bank.example@evil.example/` as a user name on the host `evil.example`. The error for this case does not repeat the value, because the text before the `@` may be a password: `a website cannot hold a user name or password`.
+- **A `\` anywhere in the value.** A browser reads it as `/`, so it loads `https://evil.example\@bank.example/` from `evil.example`.
+- **A `%` in the authority.** A browser decodes percent-encoding in a host, so it reads `bank%2Eexample` as `bank.example`.
+- **A host with any character but ASCII letters, digits, `-`, and `.`, or with an empty label**, such as `a..example` or a leading or trailing dot. This also refuses a bracketed IPv6 address.
+- **A host whose last label is all digits or starts with `0x`**, unless the whole host is four decimal numbers from 0 to 255 without leading zeros. A browser reads `0x7f.1`, `2130706433`, and `010.0.0.1` as IPv4 addresses.
+- **A port that is empty, has a character other than a digit, or is above 65535.**
 
 ### 2.2 Matching
 
 `find <url>` and every later caller use one function, `website::matches(stored, page)`:
 
-1. Both addresses are normalized as § 2.1 says, and a leading `www.` is removed from each host.
+1. Both addresses are parsed and normalized as § 2.1 says. `find` refuses a page address that § 2.1 refuses, naming it, as `add` does.
 2. The schemes must agree, except that a stored `http` address also matches an `https` page, since a site that moved to `https` is still that site. A stored `https` address never matches an `http` page, so a password is never offered over plain HTTP when you saved it for HTTPS.
-3. The ports must agree.
-4. The page's host must equal the stored host or end with `.` followed by it. So `example.com` matches `portal.example.com`, but `portal.example.com` does not match `example.com` or `admin.example.com`, and `example.com` never matches `notexample.com`.
+3. The ports must agree, compared as § 2.1 leaves them. A default port is dropped, so a stored `http://example.com` and the page `https://example.com` both have no port, and step 2 decides. Comparing the ports a browser connects to, 80 and 443, would stop a stored `http` address from ever matching its `https` page.
+4. The hosts match when they are equal once a leading `www.` is removed from each, provided what remains still has a dot, so `www.example.com` and `example.com` are one host. Otherwise the page's host must end with `.` followed by the stored host as written, `www.` included. So `example.com` matches `portal.example.com`, but `portal.example.com` does not match `example.com` or `admin.example.com`, `example.com` never matches `notexample.com`, and a stored `www.host.example` never matches `anyone.host.example`. An IPv4 address matches only itself.
 5. The path is ignored.
 
 `find` prints each matching entry's name once, sorted, and exits 1 when none matches, so a script can test it. It opens the store, so it asks for the passphrase like `get`.
 
-When nothing matches, `find` looks for related entries: those with a website whose root domain is the page's root domain, under the same scheme rule. It prints none of them on stdout, so stdout still holds only real matches. It names each on stderr with the website that relates it and the command that would add the page, then exits 1:
+When nothing matches, `find` looks for related entries: those with a website whose root domain is the page's root domain, under the same scheme rule. It prints none of them on stdout, so stdout still holds only real matches. It names each on stderr with the website that relates it and the command that would add the page's scheme, host, and port, then exits 1. The command leaves out the page's path, query, and fragment, because a login page's query can carry a one-time token, which belongs neither in the store nor on stderr:
 
 ```console
 $ multipass find https://admin.example.com/login
 multipass: no entry lists admin.example.com; related: example work (https://portal.example.com/login)
-multipass: to use it here, run: multipass website "example work" --add https://admin.example.com/login
+multipass: to use it here, run: multipass website "example work" --add https://admin.example.com
 ```
 
 A related entry is a hint for you to confirm, never a match, so nothing fills it in or offers it as a login. That lets the root domain come from a short rule rather than the Public Suffix List, in `website::root(host)`:
 
 1. Take the last two labels of the host, such as `example.com` for `portal.example.com`.
 2. When the last label has two letters, a country code, and the label before it is one of `co`, `com`, `net`, `org`, `gov`, `edu`, `ac`, `ne`, or `or`, take the last three instead, such as `example.co.uk`.
+
+An IPv4 address has no root domain, so it relates to no other host.
 
 The rule is wrong for some hosts, such as two sites under `github.io`, which it calls related. A wrong hint costs you only a suggestion you ignore.
 
@@ -86,11 +98,11 @@ The rule is wrong for some hosts, such as two sites under `github.io`, which it 
 | `find <url>` | Prints the names of the matching entries, or, when none matches, names the related entries on stderr with the command that adds the page (§ 2.2). |
 | `get <name> --field website` | Prints the websites, one per line, like `website <name>`. |
 
-Changing websites is a change to the entry, so it takes a stamp from `Store::stamp` and merges like any other change. Two Macs that change the same entry's websites before seeing each other's change keep the newer one, as the mergeable store does for every field.
+Changing websites is a change to the entry, so it takes a stamp from `Store::stamp` and merges like any other change. The mergeable store merges whole entries, not fields: for each name, the version with the newest `modified` wins, and the losing version's secret joins the winner's history. So two Macs that change the same entry's websites before seeing each other's change keep the newer list. And when one Mac changes an entry's secret and another, before it sees that change, changes the same entry's websites, the websites change wins the whole entry, and the newer secret survives only in the entry's history.
 
 ### 2.4 Store format
 
-Adding a field means a new `multipass <n>` header, and `Store::from_text` keeps reading every earlier format. The passkeys plan, a draft waiting on a prototype, has claimed format 4. This plan is smaller and likely ships first, so it takes format 4, and the change that builds it moves the passkeys plan to format 5. If passkeys ships first, this plan takes the next number instead. Either way, an entry in the new format may hold `website` lines, and a store from an older format reads with none.
+This plan builds on the mergeable store, which supplies format 3, the `modified` line, `Store::stamp`, and the earlier secrets § 1 counts, so it ships after that plan. Adding a field means a new `multipass <n>` header, and `Store::from_text` keeps reading every earlier format. The passkeys plan, a draft waiting on a prototype, has claimed format 4. This plan is smaller and likely ships first, so it takes format 4, and the change that builds it moves the passkeys plan to format 5. If passkeys ships first, this plan takes the next number instead. Either way, an entry in the new format may hold `website` lines, and a store from an older format reads with none.
 
 ### 2.5 Changes by file
 
@@ -99,8 +111,8 @@ Adding a field means a new `multipass <n>` header, and `Store::from_text` keeps 
 | `src/website.rs` | New. `normalize(&str) -> Result<String>`, `matches(stored, page) -> bool`, `root(host) -> &str`, and `related(stored, page) -> bool`, with no cryptography, since websites are not secrets. |
 | `src/store.rs` | `Entry::websites: Vec<String>`, the `website` field line, and the new format number. |
 | `src/main.rs` | `--website` on `add`, the `website` and `find` commands, `--field website`, and `USAGE`. |
-| `README.md` | A section on websites and `find`, and the recovery example shows a `website` line. |
-| `AGENTS.md` | The store format note names the new number. |
+| `README.md` | A section on websites and `find`, and the recovery example shows a `website` line. The opening advice to keep everyday logins in a full password manager stays, because nothing fills a login in a browser until the browser extension's plan ships, and that plan revisits it. |
+| `AGENTS.md` | The store format note names the new number and says in the note itself that format 4 adds the `website` field, and that format 5 adds the `passkey` field once passkeys ships. It points to the mergeable-store plan's § 2.1 table for formats 1 to 3 only, because that plan is `completed` and its table names format 4 as the passkey field, and a completed plan is left as it is. |
 | `docs/projects/passkeys/readme.md` | Format 4 becomes format 5, and § 2 notes that the app can register each entry's websites with the system's credential identity store for password AutoFill. |
 
 ## 3. Why this design
@@ -108,9 +120,10 @@ Adding a field means a new `multipass <n>` header, and `Store::from_text` keeps 
 - **A repeatable field, not a list in one line.** Each `website` line is one value, like every other field, so the store text stays readable with `age -d` and needs no separator that a web address could contain.
 - **Match by host and subdomain, without the Public Suffix List.** Matching every host under the same registrable domain, as some password managers do, needs the Public Suffix List to know that `example.co.uk` is one site but `co.uk` is not. That list is a data file of a few hundred kilobytes that its maintainers update often, so multipass would have to ship and refresh it. Matching the stored host and its subdomains needs no list. It also never offers a password across tenants of a shared host, such as two sites under `github.io`, because an entry stores the tenant's own host.
 - **Hints by root domain, matches by host.** The owner chose strict matching with a hint: few unrelated sites share a root domain, so a related entry is usually the right one, but only you can say so. Showing it as a hint with the command to add the page keeps matching exact, and each confirmed hint becomes an exact match from then on.
-- **`www.` ignored.** Sites serve the same login with and without `www.`, so treating them as one host saves you a second line for nearly every site.
+- **Strict parsing.** A parser that finds the host differently from a browser lets a page on one host match a website on another, so § 2.1 refuses every form that browsers repair or read in a surprising way, rather than copying the URL standard's repair rules. A refused address costs you only retyping it.
+- **`www.` ignored for equality only.** Sites serve the same login with and without `www.`, so treating them as one host saves you a second line for nearly every site. Removing it before the subdomain test would widen a stored `www.host.example` to every subdomain of `host.example`. On a platform that serves its own login at `www.host.example` and each user's site at `<user>.host.example`, that would offer the platform's password on a page another user controls.
 - **HTTPS never downgrades.** Offering a password saved for `https` to an `http` page would send it in the clear.
-- **`find` in the CLI now.** A browser extension, and the app's AutoFill registration, both need "which entries belong to this page". Building it once in Rust, with tests, gives every later caller the same answer.
+- **`find` in the CLI now.** A browser extension, and the app's AutoFill registration, both need "which entries belong to this page". Building it once in Rust, with tests, gives every later caller the same answer. Once the app registers each entry's websites with the system's credential identity store, the system's own matching picks the passwords AutoFill suggests, so `website::matches` decides there only where the app or the extension filters the list itself.
 - **Deferred: the browser extension.** It needs a way for the browser to reach multipass, such as Chrome's native messaging host, and a decision about how it unlocks the store, which the session-unlock plan's agent may answer. Its own plan comes later.
 - **Deferred: per-site password rules.** The password-generation plan's `--rules` could later look up a site's rules by an entry's website, from Apple's open `password-manager-resources` data. That needs this field first.
 
@@ -118,22 +131,29 @@ Adding a field means a new `multipass <n>` header, and `Store::from_text` keeps 
 
 | Do | Expect |
 | --- | --- |
-| `multipass add x --website github.com --website https://Gist.GitHub.com:443/` then `multipass website x` | `https://github.com` and `https://gist.github.com/` |
+| `multipass add x --website github.com --website https://Gist.GitHub.com:443/` then `multipass website x` | `https://github.com` and `https://gist.github.com` |
+| `multipass website x --add https://github.com/` | Fails: `x already lists https://github.com` |
 | `multipass website x --add github.com` | Fails: `x already lists https://github.com` |
 | `multipass find https://www.github.com/login` | Prints `x` |
 | `multipass find http://github.com` | Exits 1 with no output, because the entry stored `https` |
 | `multipass find https://notgithub.com` | Exits 1, with no related entry |
-| With `y` listing only `https://portal.example.com`, `multipass find https://admin.example.com` | Exits 1 with nothing on stdout. Stderr names `y`, its website, and `multipass website y --add https://admin.example.com`. |
+| `multipass find https://github.com@evil.example/` | Fails with `a website cannot hold a user name or password`, and names no entry |
+| `multipass find 'https://evil.example\@github.com/'` | Fails naming the address, because it holds a backslash, and names no entry |
+| `multipass find 'https://evil.example#@github.com'` | Exits 1 with nothing on stdout, because the host is `evil.example` |
+| `multipass add z --website https://sam:hunter2@bank.example` | Fails with `a website cannot hold a user name or password`, and neither output contains `hunter2` |
+| With `w` listing only `https://www.host.example`, `multipass find https://host.example` and then `multipass find https://anyone.host.example` | The first prints `w`. The second exits 1 with nothing on stdout and names `w` on stderr only as related. |
+| With `y` listing only `https://portal.example.com`, `multipass find 'https://admin.example.com/login?token=abc'` | Exits 1 with nothing on stdout. Stderr names `y`, its website, and `multipass website y --add https://admin.example.com`, without the path or query. |
 | `multipass website x --remove https://github.com`, then `age -d` on the store | The store shows only the `gist.github.com` line for `x`, and the entry's `modified` changed |
 | `multipass add y --website ftp://example.com` | Fails, naming `ftp://example.com` |
 | A store from the previous format | Opens, with no websites on any entry |
 
 Tests that must fail before the change and pass after it:
 
-- **Matching table.** Each row of § 2.2 as a pair that matches and one that does not, including `example.com` against `notexample.com`, `www.` on either side, a stored `http` against an `https` page, the reverse, and a different port. Catches a suffix test without the dot, which would offer a password to a look-alike domain.
+- **Matching table.** Each row of § 2.2 as a pair that matches and one that does not, including `example.com` against `notexample.com`, `www.` on either side, a stored `www.host.example` against `host.example`, which matches, and against `anyone.host.example`, which does not, a stored `http` against an `https` page, the reverse, a different port, and an IPv4 address against a longer host that ends with it. Catches a suffix test without the dot, which would offer a password to a look-alike domain, and a `www.` removal that widens the subdomain test.
+- **Look-alike addresses.** `https://bank.example@evil.example/`, `https://evil.example\@bank.example/`, `https://bank%2Eexample/`, `https:bank.example`, `https://bank.example:/`, `https://bank.example:99999/`, `https://[::1]/`, `https://0x7f.1/`, `https://010.0.0.1/`, `https://bank.example./`, and `https://a..example/` are each refused, and the error for the first does not contain `bank.example`. `https://evil.example#@bank.example` and `https://evil.example?@bank.example` parse with the host `evil.example`. Catches a parser that finds the host differently from a browser, which would offer a bank's password on another site.
 - **Root domains.** `root` gives `example.com` for `a.b.example.com`, `example.co.uk` for `portal.example.co.uk`, and `example.com` for `example.com`, and `related` never holds where `matches` does. Catches a rule that calls `co.uk` a root domain, which would relate every British site to every other.
-- **Normalizing.** Uppercase hosts, default ports, a bare host, a trailing slash kept, and each refused value. Catches two spellings of one site that would both be stored.
-- **Round trip.** An entry with three websites goes through `to_text` and `from_text` unchanged and in order, and a merge of two versions keeps the newer version's list whole. Catches a merge that interleaves two lists.
+- **Normalizing.** Uppercase hosts, default ports, a port with leading zeros, a bare host, a lone `/` dropped and a trailing slash after a path kept, and each refused value. Catches two spellings of one site that would both be stored.
+- **Round trip.** An entry with three websites goes through `to_text` and `from_text` unchanged and in order, and a merge of two versions keeps the newer version's list whole. A store with a malformed `website` line fails `from_text` with an error that names the line number and does not contain the line. Catches a merge that interleaves two lists, and a store error that prints a line of the decrypted store.
 
 ## 5. Cost
 
