@@ -1,6 +1,6 @@
 # multipass
 
-multipass is a minimal password manager with no dependencies and no sharing. It keeps your secrets, and the setup keys for your one-time passwords, in one file, encrypted with [age](https://age-encryption.org) under a passphrase you choose, and it does nothing else: no accounts and no server.
+multipass is a minimal password manager with no dependencies and no sharing. It keeps your secrets, and the setup keys for your one-time passwords, in a small folder of files encrypted with [age](https://age-encryption.org) and unlocked by a passphrase you choose, and it does nothing else: no accounts and no server.
 
 Use it beside a full password manager, not instead of one. Keep shared and everyday logins in something like 1Password. Keep the few secrets you never want on someone else's server in multipass, such as recovery codes, seed phrases, and the master password itself.
 
@@ -11,10 +11,11 @@ Every line of multipass is in this repository, cryptography included: about 1,00
 
 ## Why it is built this way
 
-- **One passphrase, no public keys.** age's passphrase mode derives a key with scrypt and encrypts with ChaCha20-Poly1305. Both are symmetric, so there is no public-key step for a future quantum computer to break.
+- **One passphrase, no public keys.** age's passphrase mode derives a key with scrypt and encrypts with ChaCha20-Poly1305. Both are symmetric, so there is no public-key step for a future quantum computer to break. Your passphrase unlocks a random 256-bit vault key, and the vault key encrypts the store. multipass replaces the vault key at least every 21 days and on every `passwd`, and every file is still a passphrase-mode age file.
 - **No dependencies.** SHA-1, SHA-256, SHA-512, HMAC, HKDF, PBKDF2, scrypt, ChaCha20-Poly1305, HOTP, TOTP, base32, and base64 are each implemented in `src/crypto` and tested against the official vectors from their specifications. `cargo tree` lists multipass and nothing else, and CI fails if that changes.
-- **A standard file format.** The store is an ordinary age file, compatible with the reference implementation in both directions. If multipass breaks or disappears, `age -d ~/.multipass/store.age` still prints everything as plain text.
-- **Nothing readable on disk.** Entry names live inside the encrypted file, so the file does not reveal which accounts you have.
+- **A standard file format.** Every file in the store is an ordinary age file, compatible with the reference implementation in both directions. If multipass breaks or disappears, two `age -d` commands still print everything as plain text, as [Recover the store without multipass](#recover-the-store-without-multipass) shows.
+- **Files that are never changed.** A save writes a new file and then deletes the files it read. It never rewrites a file, so a sync service has no two versions of one file to reconcile, and changes made on two Macs merge.
+- **Nothing readable on disk.** Entry names live inside the encrypted files, so the files do not reveal which accounts you have.
 - **Secrets never touch argv.** Passphrases come from a hidden terminal prompt, and secrets come from a prompt or stdin, so neither shows up in `ps` or your shell history.
 
 ## Install
@@ -26,16 +27,21 @@ cargo install --path .
 ## Use
 
 ```sh
-multipass init                                   # create ~/.multipass/store.age
+multipass init                                   # create ~/.multipass/store.multipass
 multipass add github.com --username octocat      # prompts for the secret
 multipass get github.com --clip                  # copies the secret for 30 seconds
 multipass get github.com --field username
 multipass list
 multipass rm github.com                          # recoverable for 30 days
 multipass passwd                                 # change the passphrase
+multipass rekey                                  # replace the vault key now
 ```
 
-Every command asks for the passphrase. To use a different file, set `MULTIPASS_STORE` or pass `--store`.
+Every command asks for the passphrase. To use a different store, set `MULTIPASS_STORE` or pass `--store` with the path of its folder.
+
+The store is a folder, `~/.multipass/store.multipass`, that holds a key file, `key.<generation>.age`, encrypted under your passphrase, and a store file, `store.<generation>.<id>.age`, encrypted under the vault key in the key file. Finder shows it as an ordinary folder. Move or copy the whole folder, never one file out of it, because a store file opens only with the key file of its generation.
+
+When a passphrase prompt finds the vault key 14 or more days old, multipass replaces it: it writes a new key file and a new store file, and deletes the old ones. So the key in use is always under 21 days old. `passwd` always replaces the key, so your old passphrase opens nothing written afterwards, and `rekey` replaces it at once, for example when you think someone copied it. Neither reveals or changes your passphrase.
 
 `--clip` on `get` and `otp` copies the value instead of printing it, and clears the clipboard 30 seconds later, unless you have copied something else since. It marks the value as concealed and as this Mac only, so Universal Clipboard does not send it to your other Apple devices, and clipboard-history apps that honor the marking skip it. Until it clears, any app running on this Mac can still read it: the markings only keep it off your other devices and out of the history apps that honor them. `--clip` works only on macOS. Piping to `pbcopy` also works, but `pbcopy` cannot mark the value, so it syncs and lands in clipboard history.
 
@@ -88,16 +94,36 @@ op read "op://Private/Seed phrase/password" | multipass add seed-phrase
 
 ## Sync between machines
 
-The store is ciphertext, so it is safe to sync with iCloud Drive, Dropbox, or a private git repository. Point `MULTIPASS_STORE` at the synced copy. multipass does not merge changes made on two machines, so edit the store on one machine at a time.
+The store is ciphertext, so it is safe to sync with iCloud Drive, Dropbox, or a private git repository. Sync the whole `store.multipass` folder, and point `MULTIPASS_STORE` at the synced copy.
+
+You can change the store on two Macs at once. Each save adds its own file and deletes only the files it read, and the next command on either Mac merges what it finds, entry by entry. Edits to different entries merge, and the newer edit to the same entry wins. The older edit's secret is not lost: it becomes history, so `get --previous` finds it.
+
+When one Mac replaces the vault key while another still saves under the old one, the next prompt opens the other Mac's file with the old key, which the new key file keeps for 90 days. A removal reaches every copy as long as each one syncs within 120 days, or longer while an older vault key is still kept. A copy that comes back after longer than that, by some other path such as a restored backup, can bring back an entry you removed.
+
+If you change the passphrase on one Mac while another replaces the vault key under the old one, multipass asks for the other passphrase the next time it finds both. With both, it keeps the newer passphrase. Without the other one, it opens the store read-only and saves nothing.
 
 ## Recover the store without multipass
 
-Install any age implementation and decrypt the file directly:
+Install any age implementation. Decrypt the key file with your passphrase, then the store file with the vault key it prints:
 
 ```sh
 brew install age
-age -d ~/.multipass/store.age
+cd ~/.multipass/store.multipass
+age -d key.*.age      # prints the key file; copy the text after "key "
+age -d store.*.age    # paste that text at age's passphrase prompt
 ```
+
+The key file prints as text, with the vault key on its `key` line:
+
+```text
+multipass-key 1
+generation 3f9a1c2e8b7d4f6a0c5e9b1d2f3a4c5e
+created 1764160000
+passphrase-set 1763000000
+key mXHnHUSvp+wCWtqvVrFcsN82rLveCB+L/s0F/V5yi9E
+```
+
+Normally the folder holds one key file and one store file. With several key files, decrypt each and use the one with the largest `created`. The middle part of a store file's name is its key's generation, so `store.3f9a….age` opens with the `key` line, or a `retired` line, whose generation is `3f9a…`. With several store files, each holds a whole store, and for each entry the version with the largest `modified` is the current one.
 
 age prints the store as text: each entry's name on its own line, then its fields indented by a tab. `modified` is when the entry last changed, in milliseconds since 1970. Each `previous-secret` and `previous-otp` line holds an earlier value after the time it was replaced. A removed entry is marked `deleted`, and its fields follow, with its secrets as history, until multipass writes the store 30 or more days after the removal.
 
@@ -122,7 +148,7 @@ If you lose the passphrase, no one can recover the store. That is the point.
 ## Not built yet
 
 - **Export to 1Password.** Send an entry to 1Password with `op item create`, and delete it locally once it lands.
-- **Session unlock.** Unlock once per session, the way `ssh-agent` does, instead of asking for the passphrase on every command.
+- **Session unlock.** Unlock once per session, the way `ssh-agent` does, instead of asking for the passphrase on every command. The vault key is what makes this possible: an agent could hold it without holding the passphrase.
 - **Memory wiping.** Wipe secrets from memory once a command is done.
 - **Echo after Ctrl-C.** Restore terminal echo when you press Ctrl-C at a passphrase prompt. Until then, if your terminal stops showing what you type, run `stty echo` or `reset`.
 

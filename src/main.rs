@@ -4,6 +4,7 @@ mod crypto;
 mod otp;
 mod store;
 mod tty;
+mod vault;
 
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
@@ -11,7 +12,8 @@ use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use otp::Otp;
-use store::{Cutoffs, Entry, Store, Version};
+use store::{Entry, Store, Version};
+use vault::{Ask, Session, Vault};
 
 const USAGE: &str = "\
 multipass: a small single-user password manager
@@ -46,11 +48,12 @@ Commands:
   restore <name>        Bring back an entry removed in the past 30 days,
                         with its secret, username, notes and one-time
                         password
-  passwd                Change the store's passphrase
+  passwd                Change the store's passphrase, and replace its vault key
+  rekey                 Replace the vault key now, as for a suspected leak
 
 Options:
-  --store <path>        The store file, or $MULTIPASS_STORE
-                        [default: ~/.multipass/store.age]
+  --store <path>        The store package, or $MULTIPASS_STORE
+                        [default: ~/.multipass/store.multipass]
   -h, --help            Print this help
   -V, --version         Print the version
 ";
@@ -85,6 +88,7 @@ enum Command {
         action: OtpAction,
     },
     Passwd,
+    Rekey,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -255,6 +259,7 @@ fn parse(args: Vec<String>) -> Result<Parsed> {
         "init" => Command::Init,
         "list" => Command::List,
         "passwd" => Command::Passwd,
+        "rekey" => Command::Rekey,
         "add" => Command::Add {
             name: name()?,
             username: username.take(),
@@ -315,28 +320,20 @@ fn parse(args: Vec<String>) -> Result<Parsed> {
 }
 
 fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
-    let path = match store.or_else(|| std::env::var_os("MULTIPASS_STORE").map(PathBuf::from)) {
-        Some(path) => path,
-        None => default_store_path()?,
-    };
+    let path =
+        package_path(store.or_else(|| std::env::var_os("MULTIPASS_STORE").map(PathBuf::from)))?;
+    let vault = Vault::new(&path, age::DEFAULT_WORK_FACTOR);
     let now = now_ms()?;
-    let save = |store: &Store, passphrase: &str| {
-        store
-            .save(
-                &path,
-                passphrase,
-                age::DEFAULT_WORK_FACTOR,
-                Cutoffs::at(now),
-            )
-            .map_err(|e| e.to_string())
-    };
+    let save = |session: &mut Session| session.save(&vault, now).map_err(|e| e.to_string());
 
     match command {
         Command::Init => {
             if path.exists() {
                 return Err(format!("a store already exists at {}", path.display()));
             }
-            save(&Store::new(), &new_passphrase()?)?;
+            vault
+                .init(&new_passphrase()?, now)
+                .map_err(|e| e.to_string())?;
             eprintln!("Created {}", path.display());
         }
         Command::Add {
@@ -345,14 +342,15 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
             notes,
             force,
         } => {
-            let (mut store, passphrase) = open(&path, now)?;
+            let mut session = open_writable(&vault, now)?;
+            let store = &mut session.store;
             let existing = store.get(&name);
             if existing.is_some() && !force {
                 return Err(format!("{name} already exists; pass --force to replace it"));
             }
             let otp = existing.and_then(|entry| entry.otp.clone());
             let secret = read_hidden(&format!("Secret for {name}: "), "secret")?;
-            let stamp = stamp(&store, now);
+            let stamp = stamp(store, now);
             store.insert(
                 name,
                 Entry {
@@ -363,7 +361,7 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
                 },
                 stamp,
             );
-            save(&store, &passphrase)?;
+            save(&mut session)?;
         }
         Command::Get {
             name,
@@ -371,9 +369,10 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
             clip,
             previous,
         } => {
-            let (store, _) = open(&path, now)?;
+            let session = open(&vault, now, true)?;
+            let store = &session.store;
             let value = match previous {
-                Some(n) => previous_value(&store, &name, field, n)?,
+                Some(n) => previous_value(store, &name, field, n)?,
                 None => {
                     let entry = store
                         .get(&name)
@@ -390,42 +389,49 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
             deliver(value, clip)?;
         }
         Command::History { name } => {
-            let (store, _) = open(&path, now)?;
-            let version = store
+            let session = open(&vault, now, true)?;
+            let version = session
+                .store
                 .version(&name)
                 .ok_or_else(|| format!("no entry named {name}"))?;
             print!("{}", history_text(version));
         }
         Command::List => {
-            let (store, _) = open(&path, now)?;
-            for name in store.names() {
+            let session = open(&vault, now, true)?;
+            for name in session.store.names() {
                 println!("{name}");
             }
         }
         Command::Rm { name } => {
-            let (mut store, passphrase) = open(&path, now)?;
-            let stamp = stamp(&store, now);
-            store
+            let mut session = open_writable(&vault, now)?;
+            let stamp = stamp(&session.store, now);
+            session
+                .store
                 .remove(&name, stamp)
                 .ok_or_else(|| format!("no entry named {name}"))?;
-            save(&store, &passphrase)?;
+            save(&mut session)?;
         }
         Command::Restore { name } => {
-            let (mut store, passphrase) = open(&path, now)?;
+            let mut session = open_writable(&vault, now)?;
+            let store = &mut session.store;
             let version = store
                 .version(&name)
                 .ok_or_else(|| format!("no removed entry named {name}"))?;
             if version.entry.is_some() {
                 return Err(format!("{name} is not removed"));
             }
-            let stamp = stamp(&store, now);
+            let stamp = stamp(store, now);
             store.restore(&name, stamp).ok_or_else(|| {
                 format!("{name} was removed more than 30 days ago and cannot be restored")
             })?;
-            save(&store, &passphrase)?;
+            save(&mut session)?;
         }
         Command::Otp { name, action } => {
-            let (mut store, passphrase) = open(&path, now)?;
+            let mut session = match action {
+                OtpAction::Show { .. } => open(&vault, now, true)?,
+                _ => open_writable(&vault, now)?,
+            };
+            let store = &mut session.store;
             match action {
                 OtpAction::Show { clip } => {
                     let uri = store
@@ -442,7 +448,7 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
                     }
                 }
                 OtpAction::Set { force } => {
-                    refuse_otp_replacement(&store, &name, force)?;
+                    refuse_otp_replacement(store, &name, force)?;
                     let key = read_hidden(&format!("Setup key for {name}: "), "setup key")?;
                     let uri = otp::setup_uri(&key, &name).map_err(|e| e.to_string())?;
                     let entry = match store.get(&name) {
@@ -457,9 +463,9 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
                             otp: Some(uri),
                         },
                     };
-                    let stamp = stamp(&store, now);
+                    let stamp = stamp(store, now);
                     store.insert(name, entry, stamp);
-                    save(&store, &passphrase)?;
+                    save(&mut session)?;
                 }
                 OtpAction::Clear => {
                     let entry = store
@@ -477,19 +483,76 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
                         otp: None,
                         ..entry.clone()
                     };
-                    let stamp = stamp(&store, now);
+                    let stamp = stamp(store, now);
                     store.insert(name, entry, stamp);
-                    save(&store, &passphrase)?;
+                    save(&mut session)?;
                 }
             }
         }
         Command::Passwd => {
-            let (store, _) = open(&path, now)?;
-            save(&store, &new_passphrase()?)?;
-            eprintln!("Passphrase changed");
+            let mut session = open_writable_unsettled(&vault, now)?;
+            let new = new_passphrase()?;
+            session
+                .rotate(&vault, now, Some(new))
+                .map_err(|e| e.to_string())?;
+            eprintln!("Passphrase changed, and the vault key replaced");
+        }
+        Command::Rekey => {
+            let mut session = open_writable_unsettled(&vault, now)?;
+            session
+                .rotate(&vault, now, None)
+                .map_err(|e| e.to_string())?;
+            eprintln!("Replaced the vault key");
         }
     }
     Ok(())
+}
+
+/// Opens the store package, asking for the passphrase, and, with `settle`,
+/// rotates or compacts as `Session::settle` decides. Prints what the open
+/// left alone.
+fn open(vault: &Vault, now: u64, settle: bool) -> Result<Session> {
+    let mut ask = |ask: Ask| -> io::Result<Option<String>> {
+        match ask {
+            Ask::Passphrase => tty::read_hidden("Passphrase: ").map(Some),
+            Ask::Other(files) => {
+                eprintln!(
+                    "multipass: that passphrase does not open {}, which another Mac's \
+                     passwd may have written; type its passphrase, or press return to \
+                     open the store read-only",
+                    files.join(", ")
+                );
+                let other = tty::read_hidden("Other passphrase: ")?;
+                Ok((!other.is_empty()).then_some(other))
+            }
+        }
+    };
+    let mut session = vault.open(&mut ask, now).map_err(|e| e.to_string())?;
+    for warning in &session.warnings {
+        eprintln!("multipass: {warning}");
+    }
+    if session.writable().is_err() {
+        eprintln!("multipass: opened read-only; another passphrase was set on another Mac");
+    } else if settle {
+        session.settle(vault, now).map_err(|e| e.to_string())?;
+    }
+    Ok(session)
+}
+
+/// Opens the store for a command that saves, failing before it asks for
+/// anything more when the store opened read-only.
+fn open_writable(vault: &Vault, now: u64) -> Result<Session> {
+    let session = open(vault, now, true)?;
+    session.writable().map_err(|e| e.to_string())?;
+    Ok(session)
+}
+
+/// Opens the store for `passwd` and `rekey`, which rotate anyway, so it
+/// neither rotates nor compacts first.
+fn open_writable_unsettled(vault: &Vault, now: u64) -> Result<Session> {
+    let session = open(vault, now, false)?;
+    session.writable().map_err(|e| e.to_string())?;
+    Ok(session)
 }
 
 /// Milliseconds since the Unix epoch, the unit of the store's stamps.
@@ -593,10 +656,33 @@ fn civil_from_days(days: u64) -> (u64, u64, u64) {
     (era * 400 + year_of_era + u64::from(month <= 2), month, day)
 }
 
-fn default_store_path() -> Result<PathBuf> {
+/// The store package to open: the path `--store` or `MULTIPASS_STORE`
+/// names, or `~/.multipass/store.multipass`. A single-file store from an
+/// earlier multipass, at the named path or at `~/.multipass/store.age`, is
+/// refused until it can be moved into a package.
+fn package_path(named: Option<PathBuf>) -> Result<PathBuf> {
+    let single_file = |path: &Path| {
+        format!(
+            "{} is a single-file store from an earlier multipass, which this build cannot open",
+            path.display()
+        )
+    };
+    if let Some(path) = named {
+        return if path.is_file() {
+            Err(single_file(&path))
+        } else {
+            Ok(path)
+        };
+    }
     let home =
         std::env::var_os("HOME").ok_or("HOME is not set; pass --store or set MULTIPASS_STORE")?;
-    Ok(PathBuf::from(home).join(".multipass").join("store.age"))
+    let dir = PathBuf::from(home).join(".multipass");
+    let package = dir.join("store.multipass");
+    let old = dir.join("store.age");
+    if !package.exists() && old.is_file() {
+        return Err(single_file(&old));
+    }
+    Ok(package)
 }
 
 /// Returns an error naming the entry when it already has a one-time password
@@ -610,15 +696,6 @@ fn refuse_otp_replacement(store: &Store, name: &str, force: bool) -> Result<()> 
         ));
     }
     Ok(())
-}
-
-/// Opens the store as of `now`, without what the next write would drop, so a
-/// removed secret past its 30 days is gone even before that write.
-fn open(path: &Path, now: u64) -> Result<(Store, String)> {
-    let passphrase = prompt("Passphrase: ")?;
-    let mut store = Store::load(path, &passphrase).map_err(|e| e.to_string())?;
-    store.expire(Cutoffs::at(now));
-    Ok((store, passphrase))
 }
 
 fn prompt(text: &str) -> Result<String> {
@@ -716,6 +793,7 @@ mod tests {
     fn parses_commands_and_flags() {
         assert_eq!(run_of("init"), Command::Init);
         assert_eq!(run_of("list"), Command::List);
+        assert_eq!(run_of("rekey"), Command::Rekey);
         assert_eq!(
             run_of("restore github.com"),
             Command::Restore {

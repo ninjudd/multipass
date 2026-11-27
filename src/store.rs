@@ -174,10 +174,6 @@ impl Version {
     /// either one held part of the result's history, so a merge never drops
     /// one. A value from the losing side is dated by that side's stamp, never
     /// the winner's, so the result does not depend on the order of merging.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the vault-key plan is the first caller")
-    )]
     fn join(&self, other: &Version) -> Version {
         let winner =
             if (self.modified, self.current_text()) >= (other.modified, other.current_text()) {
@@ -342,10 +338,6 @@ impl Store {
     /// Combines stores entry by entry, keeping each name's newest version.
     /// The result is the same in any order and any grouping, and merging a
     /// store with itself changes nothing.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the vault-key plan is the first caller")
-    )]
     pub fn merge(stores: &[Store]) -> Store {
         let mut merged = Store::new();
         for store in stores {
@@ -472,32 +464,39 @@ impl Store {
         let text = String::from_utf8(plaintext).map_err(|_| Error::NotText)?;
         Self::from_text(&text)
     }
+}
 
-    pub fn load(path: &Path, passphrase: &str) -> Result<Self, Error> {
-        Self::decrypt(passphrase, &fs::read(path).map_err(Error::Io)?)
+/// Writes `bytes` as the file `name` in `dir`, once and durably: first to
+/// `.<name>.tmp` with mode 0600, flushed to disk, then renamed into place,
+/// and then the directory is flushed. A reader sees the whole file or none,
+/// and the file exists only once it survives a crash. Every file in a store
+/// package is written this way and never modified afterwards.
+pub fn write_private_durable(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
+    let tmp = dir.join(format!(".{name}.tmp"));
+    let result = write_private(&tmp, bytes).and_then(|()| fs::rename(&tmp, dir.join(name)));
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
     }
+    result?;
+    sync_dir(dir)
+}
 
-    /// Encrypts the store and replaces the file at `path` atomically: the new
-    /// ciphertext goes to a temporary file beside it, which is then renamed
-    /// over the old one, so a crash never leaves a half-written store.
-    pub fn save(
-        &self,
-        path: &Path,
-        passphrase: &str,
-        work_factor: u8,
-        cutoffs: Cutoffs,
-    ) -> Result<(), Error> {
-        let file = self.encrypt(passphrase, work_factor, cutoffs)?;
-        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-            create_private_dir(dir).map_err(Error::Io)?;
-        }
-        let tmp = path.with_extension("age.tmp");
-        let result = write_private(&tmp, &file).and_then(|()| fs::rename(&tmp, path));
-        if result.is_err() {
-            let _ = fs::remove_file(&tmp);
-        }
-        result.map_err(Error::Io)
+/// Removes the file at `path`, then flushes its directory, so the removal
+/// survives a crash. A file already gone counts as removed.
+pub fn remove_durable(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+        _ => {}
     }
+    match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => sync_dir(dir),
+        _ => Ok(()),
+    }
+}
+
+/// Flushes a directory's entries, so a rename or removal in it is durable.
+pub fn sync_dir(dir: &Path) -> io::Result<()> {
+    fs::File::open(dir)?.sync_all()
 }
 
 /// An entry being read, checked field by field as its lines arrive.
@@ -650,8 +649,9 @@ fn unescape(s: &str) -> Option<String> {
     Some(out)
 }
 
+/// Creates `dir` and any missing parents, with mode 0700.
 #[cfg(unix)]
-fn create_private_dir(dir: &Path) -> io::Result<()> {
+pub fn create_private_dir(dir: &Path) -> io::Result<()> {
     use std::os::unix::fs::DirBuilderExt;
     fs::DirBuilder::new()
         .recursive(true)
@@ -660,7 +660,7 @@ fn create_private_dir(dir: &Path) -> io::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn create_private_dir(dir: &Path) -> io::Result<()> {
+pub fn create_private_dir(dir: &Path) -> io::Result<()> {
     fs::create_dir_all(dir)
 }
 
@@ -1395,21 +1395,26 @@ mod tests {
     }
 
     #[test]
-    fn saves_atomically_with_private_permissions() {
-        let dir = temp_dir();
-        let path = dir.join("nested").join("store.age");
+    fn writes_durably_with_private_permissions() {
+        let dir = temp_dir().join("nested");
+        create_private_dir(&dir).unwrap();
+        let file = sample().encrypt("pass", FAST, KEEP_ALL).unwrap();
 
-        sample().save(&path, "pass", FAST, KEEP_ALL).unwrap();
-        assert_eq!(Store::load(&path, "pass").unwrap(), sample());
-        assert!(!path.with_extension("age.tmp").exists());
+        write_private_durable(&dir, "store.age", &file).unwrap();
+        let read = fs::read(dir.join("store.age")).unwrap();
+        assert_eq!(Store::decrypt("pass", &read).unwrap(), sample());
+        assert!(!dir.join(".store.age.tmp").exists());
 
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode(&path), 0o600);
-            assert_eq!(mode(path.parent().unwrap()), 0o700);
+            assert_eq!(mode(&dir.join("store.age")), 0o600);
+            assert_eq!(mode(&dir), 0o700);
         }
-        fs::remove_dir_all(dir).unwrap();
+        remove_durable(&dir.join("store.age")).unwrap();
+        remove_durable(&dir.join("store.age")).unwrap();
+        assert!(!dir.join("store.age").exists());
+        fs::remove_dir_all(dir.parent().unwrap()).unwrap();
     }
 }
