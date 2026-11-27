@@ -301,9 +301,20 @@ mod macos {
 mod tests {
     use super::macos::Pasteboard;
     use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    /// The program touches the pasteboard from one thread only, but the test
+    /// harness runs tests on several, and Apple does not document AppKit's
+    /// pasteboard calls as safe to make from several threads at once. So each
+    /// test holds this lock while it uses a pasteboard.
+    fn one_at_a_time() -> MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     #[test]
     fn writes_the_secret_marked_concealed() {
+        let _turn = one_at_a_time();
         let pasteboard = Pasteboard::private();
         pasteboard.write_secret("hunter2 ✓").unwrap();
         assert_eq!(pasteboard.text().as_deref(), Some("hunter2 ✓"));
@@ -316,6 +327,7 @@ mod tests {
 
     #[test]
     fn clears_the_secret_when_nothing_else_was_copied() {
+        let _turn = one_at_a_time();
         let pasteboard = Pasteboard::private();
         let count = pasteboard.write_secret("hunter2").unwrap();
         assert!(clear_if_unchanged(&pasteboard, count));
@@ -324,6 +336,7 @@ mod tests {
 
     #[test]
     fn keeps_a_later_copy_of_your_own() {
+        let _turn = one_at_a_time();
         let pasteboard = Pasteboard::private();
         let count = pasteboard.write_secret("hunter2").unwrap();
         pasteboard.write_secret("copied afterwards").unwrap();
