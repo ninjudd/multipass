@@ -76,7 +76,7 @@ A website is parsed strictly, so that `find` and a browser never disagree about 
 | 1 | No entry matches. Related entries, if any, are named on stderr. |
 | 2 | Any error, such as a usage error, a refused page address, a wrong passphrase, a store that cannot be read, or a Touch ID sheet you decline (`the request was not approved`). |
 
-`main` turns every error into status 1 today, before a command can choose its own, so `find` returns its status the way `upgrade` does, and every error on its path exits 2. Every other command keeps the statuses it has today: 1 on any error, except `upgrade`, which passes the installer's status through and stops with 65 or 69 when its own checks fail, as the installer plan's § 2.3 describes. `find` opens the store, so it asks for the passphrase like `get`.
+`main` turns every error into status 1 today, before a command can choose its own, so `find` returns its status the way `upgrade` does, and every error on its path exits 2. That path starts at `parse`, which returns a usage error to `main` before any command's own route runs, so a usage error from `upgrade`, such as `multipass upgrade 0.2`, exits 1. Copying `upgrade`'s route alone would leave `find`'s usage errors at 1 too, so `main` gives a usage error for `find` status 2. Every other command keeps the statuses it has today: 1 on any error, except `upgrade`, which passes the installer's status through and stops with 65 or 69 when its own checks fail, as the installer plan's § 2.3 describes. `find` opens the store, so it asks for the passphrase like `get`.
 
 When nothing matches, `find` looks for related entries: those with a website whose root domain is the page's root domain, under the same scheme rule. It prints none of them on stdout, so stdout still holds only real matches. It names each on stderr with the website that relates it and the command that would add the page's scheme, host, and port, then exits 1. The command leaves out the page's path, query, and fragment, because a login page's query can carry a one-time token, which belongs neither in the store nor on stderr:
 
@@ -145,6 +145,7 @@ This plan builds on the mergeable store, which supplies format 3, the `modified`
 | `multipass find https://www.github.com/login` | Prints `x` and exits 0 |
 | `multipass find http://github.com` | Exits 1 with no output, because the entry stored `https` |
 | `multipass find https://notgithub.com` | Exits 1, with no related entry |
+| `multipass find` with no address | Exits 2 with a usage error, and nothing on stdout |
 | `multipass find https://github.com` with the wrong passphrase | Exits 2 with the wrong-passphrase error, and nothing on stdout |
 | `multipass find https://github.com@evil.example/` | Exits 2 with `a website cannot hold a user name or password`, and names no entry |
 | `multipass find 'https://evil.example\@github.com/'` | Exits 2 with `a website cannot hold a user name or password`, without naming the address, because the `@` check runs first, and names no entry |
