@@ -1,0 +1,171 @@
+{
+ "version": 1,
+ "name": "Password generation",
+ "project": "password-generation",
+ "pr": {
+  "repo": "ninjudd/multipass",
+  "number": 23,
+  "title": "Make new passwords with generate and add --generate",
+  "head": "387b49362fd8435fe99aa081e7e0c2876c91d30e",
+  "headRef": "pwgen-core",
+  "base": "5172740dc4376ea352258723c17a868e7a239023",
+  "baseRef": "password-generation",
+  "basePr": 20
+ },
+ "overview": {
+  "summary": [
+   "multipass is a password manager: a command-line program that keeps secrets in one file, encrypted under a passphrase. Until now it could store a password but not make one, so every new password came from another app, a shell one-liner, or someone's head. This pull request adds two ways to make one.",
+   "<ul><li><code>multipass generate</code> prints a new password and stores nothing. It opens no store, so it never asks for the passphrase.</li><li><code>multipass add &lt;name&gt; --generate</code> makes a password and stores it as the entry's secret without ever printing it. With <code>--clip</code> it also copies the password to the clipboard, so you can paste it into a site's form.</li></ul>",
+   "There are three kinds of password: random characters (20 by default, with uppercase, lowercase, digits, and symbols each present), memorable words from the EFF's large word list, and PINs. Every run prints the password's <b>strength</b> on stderr. Strength is the base-2 logarithm of how many passwords the options could have produced, each equally likely, such as <code>130.9 bits</code>. Anything below 64 bits gets a warning.",
+   "The drawing code lives in <code>src/crypto/generate.rs</code>, under the repository's constant-time rule. That rule says code there must not branch on a secret or use one as a memory index, because either can leak through timing. This pull request amends <code>AGENTS.md</code> to allow one exception: the decision to draw again, which depends only on a value that is then thrown away.",
+   "This is the bottom code layer of a stack on the password-generation plan (#20), which is now at <code>status: ready</code>. <code>--syllables</code> (#24) and <code>--rules</code> (#25) sit above it, each its own layer, and the owner has decided to include both."
+  ],
+  "cards": [
+   {
+    "id": "terms",
+    "title": "Terms used on this page",
+    "html": "<ul class=\"tight\"><li><b>Recipe</b>: the kind of password and its settings. It holds no secret, so it can be printed and compared.</li><li><b>Rejection sampling</b>: picking a number below <code>n</code> without bias by drawing again whenever the random value falls in the leftover range that would favor some numbers.</li><li><b>Lemire's method</b>: a rejection-sampling technique that multiplies a 16-bit value by <code>n</code>. The high half of the product is the index, and the low half says whether to reject.</li><li><b>Masked read</b>: reading <code>table[i]</code> by touching every entry and keeping only the match with a bit mask, so the memory accessed does not depend on <code>i</code>.</li><li><b>Acceptance</b>: the share of uniformly drawn strings that meet every requirement, which is the chance that one draw is kept.</li></ul>"
+   },
+   {
+    "id": "review",
+    "title": "Review so far",
+    "html": "<ul class=\"tight\"><li>The first review, at <code>2e4ae12</code>, asked for one README fix: the README said every command asks for the passphrase, which <code>generate</code> does not. It also suggested clearer wording for <code>--clip</code> on <code>add --generate</code>.</li><li>Two README-only commits made both changes, and the review at <code>dc32a46</code> found the head clean.</li><li>The branch was then rebased onto the plan branch, which had gained a 6-syllable default. The one conflict, in the plan's <code>--words</code> row, keeps both sides. The review at <code>663dcec</code> found the head clean, with the code unchanged.</li><li>One more commit clamps the run limit to the password's length. A second rebase brought in the plan's decision on the default with no options, which matches the code. The review at <code>9d3f680</code> found the head clean.</li><li>A third rebase brought in the decision to include syllables. Its one conflict, in the plan's options table, keeps both sides. The review at <code>52bcb88</code> found the head clean, with the code unchanged.</li><li>A fourth rebase brought in the decision on <code>--rules</code> and the plan's move to <code>ready</code>, with no change to this pull request's own diff. The review at <code>b259dda</code> found the head clean. CI's <code>test</code> job has not run on the last two heads, because GitHub reports the pull request as unmergeable even though it fast-forwards onto its base. The local checks passed on each of them.</li><li>A fifth rebase put the plan branch on <code>main</code>, bringing in the installer and its <code>upgrade</code> command. The author resolved the conflict in <code>parse</code> so that <code>upgrade</code> refuses the password options, and named <code>upgrade</code> beside <code>generate</code> in the README's passphrase line. The review at <code>387b493</code> found the head clean, and CI's <code>test</code> job ran and passed again now that GitHub reports the pull request as mergeable.</li><li>The checks, the release build, an <code>expect</code> run of <code>add --generate</code>, and a byte-for-byte comparison of the word list with the EFF's file all passed.</li></ul>"
+   }
+  ]
+ },
+ "groups": [
+  {
+   "id": "core",
+   "title": "Drawing passwords",
+   "kicker": "The one module that turns random bytes into a password and measures its strength",
+   "intro": [
+    "Every choice a password needs is \"pick one of <code>n</code>\": a character from an alphabet, a word from the list, a separator, or the word to capitalize. So one function, <code>below</code>, makes every such pick without bias, and one family of functions, <code>pick</code> and <code>pick_word</code>, reads the chosen entry by scanning the whole table with a mask.",
+    "When the options require character sets, such as \"at least one digit\", <code>draw_chars</code> draws the whole password again until every set appears. It does not force a digit into a random position, because that would make some passwords more likely than others and the strength figure would be wrong.",
+    "Strength comes from the recipe alone, so printing it reveals nothing about the password. For random characters it is <code>length × log2(alphabet)</code> plus <code>log2</code> of the acceptance, which a small dynamic program computes over which requirements are met so far, the current run of equal characters, and the set the last character came from."
+   ],
+   "checks": [
+    {
+     "kind": "context",
+     "text": "Random bytes come from <code>crypto::random::fill</code>, which calls <code>read_exact</code> on <code>/dev/urandom</code>. A short read or an error becomes an <code>Err</code> that every caller passes up with <code>?</code>, so nothing falls back to a weaker source. Tests feed a SHA-256 stream through <code>password_from</code> instead."
+    }
+   ],
+   "files": [
+    {
+     "path": "src/crypto/generate.rs",
+     "note": "The recipe types, the unbiased index draw, the masked reads, the drawing of characters and words, and the strength calculation, with their tests.",
+     "checks": [
+      {
+       "kind": "verify",
+       "text": "<code>reduce</code> rejects exactly <code>65536 mod n</code> of the 65,536 values and maps every other value evenly. <code>every_16_bit_value_maps_evenly</code> feeds each value once for <code>n</code> of 10, 94, 2,000, and 7,776, and would fail on a plain <code>v % n</code>.",
+       "line": 253
+      },
+      {
+       "kind": "context",
+       "text": "Beside the rejection in <code>below</code>, this is the one branch on secret data: a password that misses a required set is thrown away whole. <code>AGENTS.md</code> names it as the second exception to the constant-time rule.",
+       "line": 330
+      },
+      {
+       "kind": "verify",
+       "text": "<code>run_limit</code> clamps the longest allowed run to the password's length. A run never exceeds the length, so no valid limit changes which draws are kept, and <code>acceptance</code>, and with it every strength figure, is untouched. The clamp keeps <code>ct_lt_mask</code>'s operands at most 128; before it, a limit of <code>usize::MAX</code> broke that comparison and the draw looped forever. <code>draws_with_any_run_limit</code> checks limits up to <code>usize::MAX</code>, and the suite passes at this head.",
+       "line": 290
+      },
+      {
+       "kind": "context",
+       "text": "Each word sits in a 10-byte slot (9 for the longest word, 1 for the separator). This loop moves each real byte to its rank among the real bytes with masks, so the padding goes without branching on any word's length.",
+       "line": 407
+      },
+      {
+       "kind": "verify",
+       "text": "The pinned digest matches the word column of the EFF's published <code>eff_large_wordlist.txt</code>, checked by downloading it and stripping the dice numbers.",
+       "line": 542
+      }
+     ]
+    },
+    {
+     "path": "src/crypto/mod.rs",
+     "note": "Declares the new <code>generate</code> module."
+    },
+    {
+     "path": "src/crypto/wordlist/eff_large.txt",
+     "note": "The EFF's large word list, 7,776 words, one per line, with the dice numbers removed. Four words hold a hyphen: <code>drop-down</code>, <code>felt-tip</code>, <code>t-shirt</code>, and <code>yo-yo</code>.",
+     "collapsed": true
+    }
+   ]
+  },
+  {
+   "id": "cli",
+   "title": "The commands and their options",
+   "kicker": "Turning command-line options into a recipe, and wiring generate and add --generate",
+   "intro": [
+    "<code>src/generator.rs</code> sits outside <code>src/crypto</code> because it handles only public text: it checks the options, builds a recipe, and formats the strength line. It also turns a drawn buffer into a <code>String</code>, which the repository's rules allow outside <code>src/crypto</code> for secrets kept as text.",
+    "<code>main.rs</code> parses the options and builds the recipe before any store opens, so a bad option fails without asking for the passphrase. <code>generate</code> returns before it looks for a store at all. <code>add --generate</code> opens the store, draws the password, saves it through <code>Store::save</code> (a temporary file at mode 0600 renamed into place), and prints only the strength line. <code>upgrade</code>, which reaches this branch from <code>main</code>, takes only a version or <code>--check</code>, so <code>parse</code> refuses <code>--generate</code> and every password option on it."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": "src/generator.rs",
+     "note": "The options as given, their checks and error messages, the recipe they build, and the strength line.",
+     "checks": [
+      {
+       "kind": "context",
+       "text": "The options this layer offers do not come near one in a million: four characters with one character left in each of uppercase, lowercase, and digits keep about 5 draws in 10,000. The guard is there for <code>--rules</code> in #25, whose run limits can.",
+       "line": 99
+      }
+     ]
+    },
+    {
+     "path": "src/main.rs",
+     "note": "The <code>generate</code> command, <code>--generate</code> and <code>--clip</code> on <code>add</code>, the password options in <code>parse</code>, and the usage text.",
+     "checks": [
+      {
+       "kind": "verify",
+       "text": "<code>generate</code> needs no store: run with <code>HOME</code> and <code>MULTIPASS_STORE</code> unset, a release build printed a PIN and its strength.",
+       "line": 425
+      },
+      {
+       "kind": "verify",
+       "text": "<code>upgrade</code>, which the base added from <code>main</code>, refuses <code>--generate</code> and every password option. On a release build, <code>upgrade --generate</code>, <code>--words</code>, <code>--pin 6</code>, and <code>--length 12</code> each fail with <code>upgrade takes only a version or --check</code>. <code>generate --check</code> fails with <code>--check only applies to upgrade</code>.",
+       "line": 329
+      },
+      {
+       "kind": "verify",
+       "text": "An <code>expect</code> run against a temporary <code>--store</code> showed <code>add x --generate</code> printing only the strength line, and <code>get x</code> printing the 20-character password. A second <code>add</code> without <code>--force</code> was refused. A wrong passphrase stored nothing.",
+       "line": 464
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "docs",
+   "title": "Rules, README, and plan",
+   "kicker": "The constant-time exception, the user-facing docs, and the plan details the code settled",
+   "intro": [
+    "<code>AGENTS.md</code> holds the rules agents follow in this repository. It now names the redraw decision as an exception to the constant-time rule and says the word list is pinned by its SHA-256. The README gains a section on making passwords and credits the EFF's word list under CC BY 4.0 International, the license EFF's copyright policy gives its original material.",
+    "The plan records what the code settled: Lemire's method in place of a plain threshold, the optional count after <code>--words</code> and <code>--pin</code>, the four hyphenated words, floating-point shares in place of 256-bit integers (128 characters from 94 needs about 840 bits), and the exact form of each test."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": "AGENTS.md",
+     "note": "Adds the redraw exception to the constant-time rule, and the word list's pinned digest beside the test vectors."
+    },
+    {
+     "path": "README.md",
+     "note": "A new \"Make new passwords\" section, <code>--clip</code> extended to the new commands, and the EFF credit.",
+     "checks": [
+      {
+       "kind": "verify",
+       "text": "<code>generate</code> and <code>upgrade</code> are the two commands that ask for no passphrase. <code>run</code> returns from <code>Command::Generate</code> before it resolves a store path, and <code>main</code> sends <code>Parsed::Upgrade</code> to <code>run_upgrade</code> before any store work. A release build ran <code>generate</code> with <code>HOME</code> unset.",
+       "line": 52
+      }
+     ]
+    },
+    {
+     "path": "docs/projects/password-generation/readme.md",
+     "note": "§ 2.1, § 2.4, § 2.5, and § 4 updated to match the code. The § 2.2 <code>--words</code> row combines the optional count with the plan branch's default of 6 words under <code>--syllables</code>, which the layer above adds. The § 2.2 table also keeps the base's decided <code>--syllables</code> row beside this branch's <code>--pin [&lt;n&gt;]</code> row. The plan branch now marks the plan <code>status: ready</code>: the owner decided all three open questions, and the default with no options is decided as this layer's code builds it. This pull request does not change the status itself."
+    }
+   ]
+  }
+ ]
+}
