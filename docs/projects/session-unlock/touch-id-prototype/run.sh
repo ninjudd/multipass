@@ -5,8 +5,9 @@
 # each time a sheet appears.
 #
 #   run.sh            the three requests
-#   run.sh close      the closing-the-terminal test, which needs you to close
-#                     this terminal window within 15 seconds
+#   run.sh close      the closing-the-terminal test, from a setsid child as the
+#                     agent runs, which needs you to close this terminal window
+#                     within 15 seconds
 #
 # It builds the probe with rustc into the repository's target directory and
 # writes the detached results beside it. It touches nothing else.
@@ -42,7 +43,7 @@ detached() {
 if [ "${1:-}" = close ]; then
   file="$out/evaluate-close.txt"
   rm -f "$file"
-  PROBE_DELAY=15 "$probe" spawn group evaluate "$file" "test after closing the terminal"
+  PROBE_DELAY=15 "$probe" spawn setsid evaluate "$file" "test after closing the terminal"
   echo
   echo "Close this terminal window now. In 15 seconds a sheet should ask to"
   echo "\"test after closing the terminal\". Touch the sensor, then open a new"
