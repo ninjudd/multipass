@@ -77,7 +77,7 @@ Changing websites is a change to the entry, so it takes a stamp from `Store::sta
 
 ### 2.4 Store format
 
-Adding a field means a new `multipass <n>` header, and `Store::from_text` keeps reading every earlier format. The passkeys plan, a draft waiting on a prototype, has claimed format 4. This plan is smaller and likely ships first, so it takes format 4 and the passkeys plan moves to 5, edited in this plan's pull request. If passkeys ships first, this plan takes the next number instead. Either way, an entry in the new format may hold `website` lines, and a store from an older format reads with none.
+Adding a field means a new `multipass <n>` header, and `Store::from_text` keeps reading every earlier format. The passkeys plan, a draft waiting on a prototype, has claimed format 4. This plan is smaller and likely ships first, so it takes format 4, and the change that builds it moves the passkeys plan to format 5. If passkeys ships first, this plan takes the next number instead. Either way, an entry in the new format may hold `website` lines, and a store from an older format reads with none.
 
 ### 2.5 Changes by file
 
