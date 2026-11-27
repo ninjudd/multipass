@@ -1,0 +1,127 @@
+{
+ "version": 1,
+ "name": "Session unlock",
+ "project": "session-unlock",
+ "pr": {
+  "repo": "ninjudd/multipass",
+  "number": 36,
+  "title": "Move the Objective-C runtime helpers out of the clipboard module",
+  "head": "e5ce356390ae0a9670d085e70849c8701589f3bf",
+  "headRef": "session-unlock-objc",
+  "base": "b60457cdf9c5345ce632d38d87e7f01c675eb6eb",
+  "baseRef": "session-unlock-touch-id-prototype",
+  "basePr": 21
+ },
+ "overview": {
+  "summary": [
+   "multipass copies a secret to the macOS clipboard with <code>--clip</code>. To do that it talks to AppKit, Apple's user-interface framework, through the Objective-C runtime: it looks up classes such as <code>NSPasteboard</code>, sends them messages through <code>objc_msgSend</code>, and loads AppKit with <code>dlopen</code> only when <code>--clip</code> runs, so no other command has AppKit in its process. At the base, all of that lives inside <code>src/clipboard.rs</code>, the program's only <code>unsafe</code> code.",
+   "The session-unlock plan adds a background agent that asks for Touch ID through LocalAuthentication, another Apple framework reached the same way. So this pull request moves the runtime helpers into a new module, <code>src/objc.rs</code>, that the clipboard and the coming Touch ID module can share. It is meant as a pure move: the clipboard's behaviour, its error messages, and when AppKit loads stay exactly as they were.",
+   "This layer sits on #21, which adds a Touch ID prototype beside the session-unlock plan. #21 in turn sits on the vault-key layers (#34 and below). The layer above this one (#37) builds the agent itself, adding <code>src/touch_id.rs</code> and <code>src/sys.rs</code>."
+  ],
+  "cards": [
+   {
+    "id": "terms",
+    "title": "Terms on this page",
+    "html": "<ul class=\"tight\"><li><code>objc_msgSend</code>: the Objective-C runtime function that sends a message (calls a method). It must be called through a function pointer of the method's exact type, because on Apple silicon a variadic call puts arguments in different registers than the method reads.</li><li><code>send</code>, <code>send1</code>, <code>send2</code>, <code>send3</code>: typed wrappers over <code>objc_msgSend</code> for methods with zero to three arguments.</li><li><code>Id</code>: a raw pointer to an Objective-C object.</li><li>Autorelease pool: a runtime scope that frees the objects a framework hands back for the caller to drop. <code>with_pool</code> runs a closure inside one.</li><li><code>dlopen</code>: the system call that loads a library into the running process.</li></ul>"
+   },
+   {
+    "id": "review",
+    "title": "Review status at this head",
+    "html": "<ul class=\"tight\"><li>The review of <code>520f691</code> found that the module doc and <code>AGENTS.md</code> misstated which helpers are <code>unsafe</code> and where the safe interface is. The fix commit corrects both, and the thread is resolved.</li><li>Both suggestions are taken: <code>load</code> is an <code>unsafe fn</code> that requires a system framework, and <code>Sel</code> is private.</li><li>Four later merges of <code>vault-key-move</code>, which brought in the installer and <code>upgrade</code> work, a README line-count update, and a change to when an open asks for the old file's passphrase, resolved no conflict and left this pull request's diff unchanged.</li><li>The pull request now targets #21. Merging that branch brought in only its plan and Touch ID probe under <code>docs/</code>. The probe's <code>unsafe</code> code is built outside the crate, so the AGENTS.md rule still holds.</li><li>The head is clean: the moved code matches the base, AppKit still loads only for <code>--clip</code>, and every check passes.</li></ul>"
+   }
+  ]
+ },
+ "groups": [
+  {
+   "id": "objc",
+   "title": "The shared Objective-C helpers",
+   "kicker": "A new module holds the runtime calls the clipboard defined for itself",
+   "intro": [
+    "<code>src/objc.rs</code> declares the runtime functions multipass calls, from libSystem and from <code>libobjc</code>, and wraps them in a few helpers: <code>load</code> loads a framework by path, <code>send</code> through <code>send3</code> send typed messages, <code>class</code> looks up a class by name, <code>new_string</code> and <code>release</code> make and free an <code>NSString</code>, and <code>with_pool</code> runs code inside an autorelease pool.",
+    "Every helper body except <code>load</code> is the clipboard's code moved unchanged. <code>load</code> is the clipboard's AppKit loader with the path and the name used in its error message turned into arguments. <code>src/main.rs</code> compiles the module only on macOS, as the clipboard's own macOS code already is.",
+    "The module is the unsafe layer, not a safe interface. <code>send</code> through <code>send3</code>, <code>new_string</code>, <code>release</code>, and <code>load</code> are <code>unsafe fn</code>s whose callers must guarantee what the module doc names. <code>class</code> and <code>with_pool</code> are safe. Callers such as the clipboard wrap the unsafe helpers in safe interfaces."
+   ],
+   "checks": [
+    {
+     "kind": "verify",
+     "text": "The bodies of <code>send</code>, <code>send1</code>, <code>send2</code>, <code>send3</code>, <code>new_string</code>, <code>release</code>, <code>class</code>, and <code>with_pool</code> match the base line for line, apart from <code>pub</code> and new comments, checked against the lines this pull request removes from <code>src/clipboard.rs</code>."
+    }
+   ],
+   "files": [
+    {
+     "path": "src/objc.rs",
+     "note": "The new module. Compare each helper with the lines removed from <code>src/clipboard.rs</code>, and read the module doc against which functions are actually <code>unsafe</code>.",
+     "checks": [
+      {
+       "kind": "verify",
+       "line": 7,
+       "text": "The module doc matches the code: the functions it calls <code>unsafe</code> are exactly the <code>pub unsafe fn</code>s in the file, and <code>class</code> and <code>with_pool</code>, which it calls safe, are plain <code>pub fn</code>s."
+      },
+      {
+       "kind": "context",
+       "line": 48,
+       "text": "<code>load</code> passes its path to <code>dlopen</code>, which runs that library's initializers, so it is <code>unsafe</code> and its <code># Safety</code> section requires a system framework under <code>/System/Library/Frameworks</code>. Its one caller, the clipboard's <code>load_appkit</code>, passes AppKit's absolute path."
+      },
+      {
+       "kind": "verify",
+       "line": 64,
+       "text": "The error is <code>could not load {what}: {reason}</code>, and the clipboard passes <code>AppKit for the clipboard</code>, so the message is the same string as at the base. It names no value from the store."
+      }
+     ]
+    },
+    {
+     "path": "src/main.rs",
+     "note": "Declares <code>mod objc</code>, for macOS only."
+    }
+   ]
+  },
+  {
+   "id": "clipboard",
+   "title": "The clipboard as a caller",
+   "kicker": "The clipboard imports the helpers instead of defining them",
+   "intro": [
+    "<code>src/clipboard.rs</code> keeps everything that is about the clipboard: the pasteboard constants, AppKit's absolute path, and the <code>OnceLock</code> that makes AppKit load at most once per process. It drops its own copies of the runtime declarations and helpers and imports them from <code>crate::objc</code>. Its <code>Pasteboard</code> methods are unchanged apart from spelling <code>c_char</code> as <code>std::ffi::c_char</code>."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": "src/clipboard.rs",
+     "note": "Only the imports, the loader's body, and the module doc change. The loader now calls <code>load</code> in an <code>unsafe</code> block, with a comment that <code>APPKIT</code> is a system framework's absolute path. The private-pasteboard tests at the bottom are unchanged and still pass.",
+     "checks": [
+      {
+       "kind": "verify",
+       "line": 95,
+       "text": "AppKit still loads only when <code>--clip</code> needs the clipboard. Release builds of the base and this head each load 81 images for <code>--help</code>, <code>--version</code>, and <code>upgrade --help</code>, none of them AppKit, and <code>tests/startup.rs</code> still asserts that for <code>--version</code>."
+      },
+      {
+       "kind": "verify",
+       "text": "The three <code>clipboard::tests</code> tests pass against a private pasteboard, so writing, concealing, and clearing still work through the moved helpers. <code>cargo fmt --check</code>, <code>cargo clippy --all-targets -- -D warnings</code>, <code>cargo test</code>, and the <code>cargo tree</code> dependency check all pass on this head."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "rules",
+   "title": "The rule on Apple's frameworks",
+   "kicker": "AGENTS.md names both modules as the program's only unsafe code",
+   "intro": [
+    "<code>AGENTS.md</code> holds the instructions agents follow in this repository. At the base, its rule that Apple's system frameworks count like the standard library says <code>src/clipboard.rs</code> holds the program's only <code>unsafe</code> code. The rule now says the clipboard's calls go through <code>src/objc.rs</code>, which holds the unsafe runtime helpers, and that <code>src/clipboard.rs</code> wraps them in a safe interface. Those two modules hold the only <code>unsafe</code> code. Any new <code>unsafe</code> code still goes in a module like them, behind a safe interface, with a comment on what each call needs of its arguments."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": "AGENTS.md",
+     "note": "One sentence of the dependencies section changes.",
+     "checks": [
+      {
+       "kind": "verify",
+       "line": 10,
+       "text": "The sentence matches the code: <code>src/objc.rs</code> exports mostly <code>unsafe fn</code> helpers, and the clipboard's <code>Pasteboard</code> is the safe interface over them. The rule asks for nothing less than at the base. The base's <code>src/upgrade.rs</code> and installer add no <code>unsafe</code> code, so the two modules it names are still the only ones that hold any."
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}
