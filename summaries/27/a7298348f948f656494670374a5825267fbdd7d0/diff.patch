@@ -1,0 +1,729 @@
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+index ae3842b..df2138c 100644
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -33,4 +33,7 @@ jobs:
+           fi
+       - run: cargo fmt --check
+       - run: cargo clippy --all-targets -- -D warnings
+-      - run: cargo test
++      # --locked fails a version bump that forgets Cargo.lock here, in its
++      # pull request, rather than in the release workflow.
++      - run: cargo test --locked
++      - run: tests/install.sh
+diff --git a/AGENTS.md b/AGENTS.md
+index 9d0583d..a211321 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -27,7 +27,7 @@ multipass has no dependencies, not even dev-dependencies, and that is a feature
+ 
+ ## Tests
+ 
+-Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` before handing work over; CI runs the same three plus the dependency check. Tests use scrypt work factor 10 so they stay fast. The CLI always uses `age::DEFAULT_WORK_FACTOR` (18), about a third of a second in a release build.
++Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` and, when you change `install.sh`, `tests/install.sh` before handing work over; CI runs all four plus the dependency check. `tests/install.sh` installs this checkout, and a release made from it through a `file://` mirror, with `HOME` in a temporary directory, so it needs no network. Tests use scrypt work factor 10 so they stay fast. The CLI always uses `age::DEFAULT_WORK_FACTOR` (18), about a third of a second in a release build.
+ 
+ The CLI reads passphrases from `/dev/tty`, so it cannot be driven from a plain pipe. To exercise it without a terminal, use `expect` against a release build, and point `--store` at a temporary file.
+ 
+diff --git a/README.md b/README.md
+index 5f8cdb3..b3f3a8a 100644
+--- a/README.md
++++ b/README.md
+@@ -19,10 +19,23 @@ Every line of multipass is in this repository, cryptography included: about 1,00
+ 
+ ## Install
+ 
++Install from a checkout with `install.sh`. It needs [Rust](https://rustup.rs), builds the checkout with `cargo build --release --locked --offline`, which takes a few seconds because multipass has no dependencies, and installs the binary as `~/.local/bin/multipass`:
++
++```sh
++git clone https://github.com/ninjudd/multipass
++cd multipass
++./install.sh
++```
++
++The installer prints one row for each step. When `~/.local/bin` is not on your `PATH`, it prints the line to add to your shell's startup file rather than editing the file itself, and when another `multipass` comes first on your `PATH`, such as Canonical's Multipass for Ubuntu virtual machines, it says so. It records what it installed in `~/.local/share/multipass-install/receipt`, and it never touches your stores or `~/.multipass`.
++
+ ```sh
+-cargo install --path .
++./install.sh status      # what is installed, and whether it matches the checkout
++./install.sh uninstall   # remove the binary the installer wrote, keeping your stores
+ ```
+ 
++To upgrade, pull the checkout and run `./install.sh` again. A rerun that would install the same bytes leaves the file alone. `uninstall` removes only a file that still matches the receipt, so it never deletes a `multipass` you replaced by hand. Set `MULTIPASS_BIN_DIR` to install somewhere other than `~/.local/bin`.
++
+ ## Use
+ 
+ ```sh
+diff --git a/docs/projects/installer/readme.md b/docs/projects/installer/readme.md
+index 1cf1864..611cf7e 100644
+--- a/docs/projects/installer/readme.md
++++ b/docs/projects/installer/readme.md
+@@ -1,6 +1,6 @@
+ ---
+-status: ready
+-priority: next
++status: in-progress
++priority: now
+ ---
+ 
+ # Installer and releases
+@@ -25,7 +25,7 @@ curl -fsSL https://getmultipass.dev/install.sh | bash
+ 
+ ### 2.1 How an install runs
+ 
+-1. The installer finds its source. A script whose directory holds a `Cargo.toml` with `name = "multipass"` is in a checkout, and installs that checkout: it skips steps 2 to 5, builds the checkout as step 4.3 does, and stops with status 69 when `cargo` is missing. Anything else, such as a script piped from `curl`, installs a release.
++1. The installer finds its source. A script whose directory holds a `Cargo.toml` with `name = "multipass"` is in a checkout, and installs that checkout: it skips steps 2 to 5, builds the checkout as step 4.3 does, and stops with status 69 when `cargo` is missing. A checkout can change without a version bump, so instead of step 3 a rerun always builds, and prints `current` and leaves the file alone when the new binary's SHA-256 matches the receipt. The build is reproducible, so an unchanged checkout always matches. Anything else, such as a script piped from `curl`, installs a release.
+ 2. It picks the release: `MULTIPASS_VERSION` when set, or else the newest release, which it reads without the GitHub API from where `https://github.com/ninjudd/multipass/releases/latest` redirects. It prints `release        ninjudd/multipass v0.2.0`.
+ 3. When the receipt (§ 2.4) records that version, and the installed binary's SHA-256 still matches the receipt, it prints `current        ~/.local/bin/multipass 0.2.0` and exits 0 without downloading anything else.
+ 4. With `cargo` on PATH, or `MULTIPASS_BUILD=source`, it builds from source:
+@@ -37,7 +37,7 @@ curl -fsSL https://getmultipass.dev/install.sh | bash
+    2. It downloads `multipass-0.2.0-macos`, `multipass.sigstore.json`, and `SHA256SUMS` from the release.
+    3. It checks the binary against `SHA256SUMS` and prints `checksum       matches SHA256SUMS`. That catches a truncated or corrupted download, and nothing more.
+    4. With `gh` on PATH, it reads the commit the tag names from `https://api.github.com/repos/ninjudd/multipass/commits/v0.2.0`, sent with `Accept: application/vnd.github.sha`, which needs no login. It then runs `gh attestation verify multipass-0.2.0-macos --bundle multipass.sigstore.json --repo ninjudd/multipass --signer-workflow ninjudd/multipass/.github/workflows/release.yml --source-ref refs/heads/main --source-digest <commit> --deny-self-hosted-runners`. The release workflow runs on the merge to `main` and tags that same commit afterwards, so the attestation's certificate records `refs/heads/main` and the commit, never the tag (§ 8). `--source-digest` is what ties the binary to the tag, and `--source-ref` rejects a run started from any other branch. With `--bundle`, `gh` needs no login (§ 8). It prints `attested       built by release.yml on main at <short sha>, the commit v0.2.0 names`, or stops with status 65 and `gh`'s reason, installing nothing. When the API cannot answer, as when its limit of 60 requests an hour for one address is spent, it stops with status 69, says why, and installs nothing.
+-   5. Without `gh`, it stops with status 69: `install.sh: cannot prove this binary was built from v0.2.0 -- install Rust (https://rustup.rs) to build it from source, or gh (https://cli.github.com) to check its attestation; MULTIPASS_UNVERIFIED=1 installs it unchecked`. With `MULTIPASS_UNVERIFIED=1` it goes on and prints a warning row, `unverified     ⚠️  installed without checking where the binary came from`.
++   5. Without `gh`, it stops with status 69, before it downloads anything: `install.sh: cannot prove this binary was built from v0.2.0 -- install Rust (https://rustup.rs) to build it from source, or gh (https://cli.github.com) to check its attestation; MULTIPASS_UNVERIFIED=1 installs it unchecked`. With `MULTIPASS_UNVERIFIED=1` it goes on and prints a warning row, `unverified     ⚠️  installed without checking where the binary came from`.
+ 6. It runs the candidate with `--version` and stops with status 65 unless it prints `multipass 0.2.0`.
+ 7. It copies the candidate to `$BIN_DIR/.multipass.<pid>`, sets mode 0755, renames it over `$BIN_DIR/multipass`, writes the receipt, and prints `installed      ~/.local/bin/multipass 0.2.0 (built from source)`. The rename means a running `multipass` keeps its old file and never sees a half-written one.
+ 8. It checks PATH. When `$BIN_DIR` is not on it, it prints a warning row with the line to add, such as `not-on-path    ⚠️  add export PATH="$HOME/.local/bin:$PATH" to your shell's startup file`. When `command -v multipass` names another file, it prints `shadowed       ⚠️  /usr/local/bin/multipass comes first on PATH`, because Canonical's Multipass, a tool for Ubuntu virtual machines, installs a command of the same name there. It lists every other `multipass` on PATH, such as one from `cargo install`, as `other          ~/.cargo/bin/multipass`.
+@@ -50,7 +50,7 @@ Each row is a fixed-width name and a message, as in Projector's installer, and a
+ | Command | What it does |
+ | --- | --- |
+ | `install.sh` or `install.sh install` | Installs or upgrades, as § 2.1 describes. |
+-| `install.sh status` | Prints the newest release, what is installed and how, and whether it is `current`, `stale` (with the command to upgrade), or `modified` (the file no longer matches the receipt). Adds the PATH rows from step 8. Changes nothing. |
++| `install.sh status` | Prints the newest release, what is installed and how, and whether it is `current`, `stale` (with the command to upgrade), or `modified` (the file no longer matches the receipt). Run from a checkout, it compares with the checkout's version instead of the newest release, and reads nothing from the network. Adds the PATH rows from step 8. Changes nothing. |
+ | `install.sh verify [<version>]` | Rebuilds a release with the toolchain its build info names and compares the bytes, as § 2.6 describes. Installs nothing. |
+ | `install.sh uninstall` | Removes `$BIN_DIR/multipass` when its SHA-256 matches the receipt, then the receipt. A file that does not match is left in place with a `user-owned` row. Ends with `kept           your stores, such as ~/.multipass/store.age`. |
+ 
+@@ -64,6 +64,7 @@ From `curl`, pass a command after `-s --`: `curl -fsSL <url> | bash -s -- status
+ | `MULTIPASS_UNVERIFIED` | unset | `1` installs a prebuilt binary without `gh`. |
+ | `MULTIPASS_REPO` | `ninjudd/multipass` | The GitHub repository to install from, for a fork's releases. The attestation check names this repository. |
+ | `MULTIPASS_DOWNLOAD_URL` | `https://github.com/<repo>/releases/download` | Where release assets come from, such as a `file://` mirror in a test. The attestation check still names `MULTIPASS_REPO`, so a mirror cannot change what passes. |
++| `MULTIPASS_ARCHIVE_URL` | `https://github.com/<repo>/archive/refs/tags` | Where source archives come from, as `<url>/v<version>.tar.gz`, so `tests/install.sh` can install a release from source through a `file://` mirror before any release exists. A build from source trusts the archive it downloads, so a mirror is trusted as GitHub is. |
+ | `MULTIPASS_OFFLINE` | unset | `1` makes `status` skip reading the newest release. |
+ 
+ The receipt lives under `XDG_DATA_HOME`, so `status` and `uninstall` follow it there. None of these names collides with `MULTIPASS_STORE`, which the CLI reads.
+@@ -173,7 +174,7 @@ curl -fsSL https://github.com/ninjudd/multipass/releases/download/v0.2.0/install
+ | `install.sh` | New. The installer, with the commands and settings in § 2.2. Bash, using only `curl`, `tar`, `uname`, and `shasum -a 256`, or `sha256sum` where `shasum` is missing, as on minimal Linux systems without Perl, and, when present, `cargo`, `gh`, and `lipo`. |
+ | `.github/workflows/release.yml` | New. The release workflow in § 2.5. |
+ | `.github/workflows/ci.yml` | Adds `--locked` to `cargo test`, a step that runs `tests/install.sh`, and a step that runs `.github/scripts/check-site.sh static`, so a pull request that breaks the redirects fails before it can merge. |
+-| `tests/install.sh` | New. Runs the installer from the checkout with `HOME` and `MULTIPASS_BIN_DIR` in a temporary directory, and checks the rows, the receipt, a rerun, `status`, `uninstall`, and that nothing else under `HOME` changed. It also runs the binary path against a `file://` mirror through `MULTIPASS_DOWNLOAD_URL`, once the first release exists to mirror. |
++| `tests/install.sh` | New. Runs the installer from the checkout with `HOME` in a temporary directory, and checks the rows, the receipt, a rerun, `status`, `uninstall`, and that nothing else under `HOME` changed. It also installs a release made from the checkout through a `file://` mirror: from source with `git archive` through `MULTIPASS_ARCHIVE_URL`, and, with neither `cargo` nor `gh` on `PATH`, the binary path through `MULTIPASS_DOWNLOAD_URL`, which must refuse, reject a binary that does not match `SHA256SUMS`, and install with `MULTIPASS_UNVERIFIED=1`. The attested path needs a real release, as § 4 says. |
+ | `README.md` | The Install section shows the one-line install, the check-first install and the pinned installs from § 2.6, the checkout install with `./install.sh`, how to upgrade and uninstall, and how to check a release with `install.sh verify`. The paragraph that says the only code you trust beyond the repository is the Rust toolchain and its standard library becomes true of each way to install: a build from source, whether by the installer or from a checkout, trusts the Rust toolchain and GitHub to serve the tagged source; a prebuilt binary also trusts GitHub's hosted macOS runner, with its Xcode linker and `lipo`, the pinned rustup toolchain, and GitHub's and Sigstore's signing of the attestation, which `gh attestation verify` checks and `install.sh verify` lets you replace with your own build; and the one-liner also trusts whoever controls `getmultipass.dev`, its registrar account, and its Vercel team, which the GitHub URL and the check-first install avoid. The one-liner, the check-first install, and the pinned installs go into the README only at rollout step 7, once the first release and the domain exist; until then the README documents `./install.sh` from a checkout. The passkeys plan's README row changes the same paragraph for what its app adds, so whichever lands second keeps both changes. |
+ | `AGENTS.md` | A Releases section: how to cut a release, that `RUST_VERSION` in `release.yml` changes only in a pull request of its own, and that the release workflow uses only GitHub's actions, pinned by commit SHA. A Website section: that `site/` never holds a copy of `install.sh`, that `check-site.sh` guards its redirects, and that the Vercel CLI the site workflow installs is a deployment tool for the website, never a dependency of multipass, so the no-dependencies rule, which is about crates and the binary, does not cover it. |
+ | `site/index.html` | New. The landing page: what multipass is, the one-line install, the direct GitHub URL and the pinned and check-first installs from § 2.6, and links to the repository and the README. One static HTML file with inline CSS only, no scripts, and no third-party assets. |
+diff --git a/install.sh b/install.sh
+new file mode 100755
+index 0000000..e7cf64c
+--- /dev/null
++++ b/install.sh
+@@ -0,0 +1,404 @@
++#!/usr/bin/env bash
++#
++# Install multipass into ~/.local/bin from a tagged release, or from the
++# checkout this script sits in.
++#
++#   curl -fsSL https://getmultipass.dev/install.sh | bash
++#   curl -fsSL https://getmultipass.dev/install.sh | bash -s -- status
++#   ./install.sh [install|status|uninstall]          from a checkout
++#
++# A release installs only code it can show came from its tag: with cargo on
++# PATH it builds the tag's source, and otherwise it installs the prebuilt
++# binary only after `gh attestation verify` proves the release workflow built
++# it from that tag. The installer never touches your stores, ~/.multipass, or
++# your shell's startup files. docs/projects/installer/readme.md is the design.
++
++set -euo pipefail
++
++# The directory holding this script, or nothing when bash reads it from stdin.
++SCRIPT_DIR=""
++if [ -n "${BASH_SOURCE[0]:-}" ] && [ -f "${BASH_SOURCE[0]}" ]; then
++  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++fi
++# A checkout is a script with multipass's Cargo.toml beside it. A copy of the
++# script on its own, such as the one `multipass upgrade` downloads, is not.
++CHECKOUT=""
++if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/Cargo.toml" ] &&
++  grep -qx 'name = "multipass"' "$SCRIPT_DIR/Cargo.toml"; then
++  CHECKOUT="$SCRIPT_DIR"
++fi
++RELEASE_REPO="${MULTIPASS_REPO:-ninjudd/multipass}"
++DOWNLOAD_URL="${MULTIPASS_DOWNLOAD_URL:-https://github.com/$RELEASE_REPO/releases/download}"
++ARCHIVE_URL="${MULTIPASS_ARCHIVE_URL:-https://github.com/$RELEASE_REPO/archive/refs/tags}"
++BIN_DIR="${MULTIPASS_BIN_DIR:-$HOME/.local/bin}"
++RECEIPT_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/multipass-install"
++RECEIPT="$RECEIPT_DIR/receipt"
++TARGET="$BIN_DIR/multipass"
++WORK=""
++
++# Exit statuses, from sysexits.h.
++EX_USAGE=64
++EX_DATAERR=65
++EX_UNAVAILABLE=69
++
++row() {
++  printf '%-14s %s\n' "$1" "$2"
++}
++
++warn_row() {
++  if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
++    printf '\033[1;33m%-14s ⚠️  %s\033[0m\n' "$1" "$2"
++  else
++    printf '%-14s ⚠️  %s\n' "$1" "$2"
++  fi
++}
++
++die() {
++  local status="$1"
++  shift
++  printf 'install.sh: %s\n' "$*" >&2
++  exit "$status"
++}
++
++# A path with $HOME shown as ~, for rows.
++tilde() {
++  case "$1" in
++    "$HOME"/*) printf '~%s\n' "${1#"$HOME"}" ;;
++    *) printf '%s\n' "$1" ;;
++  esac
++}
++
++sha256() {
++  if command -v shasum >/dev/null 2>&1; then
++    shasum -a 256 "$1" | cut -d ' ' -f 1
++  else
++    sha256sum "$1" | cut -d ' ' -f 1
++  fi
++}
++
++# Downloads a URL to a file. Only https and file URLs are allowed, so a
++# mirror can be a local directory but nothing is fetched in plain text.
++fetch() {
++  curl -fsSL --proto '=https,file' --tlsv1.2 -o "$2" "$1" ||
++    die "$EX_UNAVAILABLE" "could not download $1"
++}
++
++make_work() {
++  WORK="$(mktemp -d "${TMPDIR:-/tmp}/multipass-install.XXXXXX")"
++  trap 'rm -rf "$WORK"' EXIT
++}
++
++check_settings() {
++  [[ "$RELEASE_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] ||
++    die "$EX_USAGE" "MULTIPASS_REPO must look like owner/name, not $RELEASE_REPO"
++  case "${MULTIPASS_BUILD:-}" in
++    "" | source | binary) ;;
++    *) die "$EX_USAGE" "MULTIPASS_BUILD must be source or binary, not $MULTIPASS_BUILD" ;;
++  esac
++}
++
++# Prints a version without a leading v, or fails when it is not one.
++check_version() {
++  local version="${1#v}"
++  [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] ||
++    die "$EX_USAGE" "$1 is not a release version such as 0.2.0"
++  printf '%s\n' "$version"
++}
++
++# The newest release's version, read from where GitHub's releases/latest page
++# redirects, which needs no API call and so no rate limit.
++latest_version() {
++  local url location
++  url="https://github.com/$RELEASE_REPO/releases/latest"
++  location="$(curl -fsS --proto '=https' -o /dev/null -w '%{redirect_url}' "$url")" ||
++    die "$EX_UNAVAILABLE" "could not read the newest release from $url"
++  case "$location" in
++    */releases/tag/v*) check_version "${location##*/releases/tag/}" ;;
++    *) die "$EX_UNAVAILABLE" "$RELEASE_REPO has no release yet ($url)" ;;
++  esac
++}
++
++# The version a checkout's Cargo.toml names.
++cargo_version() {
++  sed -n 's/^version = "\(.*\)"$/\1/p' "$1/Cargo.toml" | head -n 1
++}
++
++receipt_get() {
++  [ -f "$RECEIPT" ] || return 0
++  awk -v key="$1" '$1 == key { sub(/^[^ ]+ /, ""); print; exit }' "$RECEIPT"
++}
++
++# True when the receipt records `path` and that file still has the recorded
++# SHA-256, so the installer owns it.
++installed_intact() {
++  local path sum
++  path="$(receipt_get path)"
++  sum="$(receipt_get sha256)"
++  [ -n "$path" ] && [ -f "$path" ] && [ "$(sha256 "$path")" = "$sum" ]
++}
++
++describe_method() {
++  case "$1" in
++    source) printf 'built from source\n' ;;
++    binary) printf 'attested binary\n' ;;
++    unverified) printf 'unverified binary\n' ;;
++    checkout) printf 'built from %s\n' "$(tilde "$2")" ;;
++    *) printf '%s\n' "$1" ;;
++  esac
++}
++
++# Builds the source in $1 into $WORK/target, and sets CANDIDATE to the binary
++# and BUILT_WITH to the rustc version that built it.
++build() {
++  local src="$1" rustc
++  rustc="$(cd "$src" && rustc --version | cut -d ' ' -f 2)"
++  (cd "$src" && CARGO_TARGET_DIR="$WORK/target" cargo build --release --locked --offline --quiet) ||
++    die 1 "cargo build --release --locked --offline failed in $(tilde "$src")"
++  BUILT_WITH="$rustc"
++  CANDIDATE="$WORK/target/release/multipass"
++}
++
++build_release_source() {
++  local version="$1" archive="$WORK/source.tar.gz" src="$WORK/source"
++  fetch "$ARCHIVE_URL/v$version.tar.gz" "$archive"
++  row "fetched" "v$version source, sha256 $(sha256 "$archive")"
++  mkdir "$src"
++  tar -xzf "$archive" -C "$src" --strip-components 1 ||
++    die "$EX_DATAERR" "could not unpack the v$version source archive"
++  [ "$(cargo_version "$src")" = "$version" ] ||
++    die "$EX_DATAERR" "the v$version source's Cargo.toml says version $(cargo_version "$src")"
++  # One package in the lock file means multipass and nothing else, so the
++  # build runs no code from outside the tagged source.
++  [ "$(grep -c '^\[\[package\]\]$' "$src/Cargo.lock")" = 1 ] &&
++    grep -qx 'name = "multipass"' "$src/Cargo.lock" ||
++    die "$EX_DATAERR" "the v$version source's Cargo.lock lists packages other than multipass"
++  build "$src"
++  row "built" "v$version with rustc $BUILT_WITH"
++}
++
++install_release_binary() {
++  local version="$1" binary="multipass-$version-macos" commit
++  [ "$(uname -s)" = Darwin ] ||
++    die "$EX_UNAVAILABLE" "there is no prebuilt multipass for $(uname -s); install Rust from https://rustup.rs and run the installer again"
++  local gh=""
++  command -v gh >/dev/null 2>&1 && gh=gh
++  if [ -z "$gh" ] && [ "${MULTIPASS_UNVERIFIED:-}" != 1 ]; then
++    die "$EX_UNAVAILABLE" "cannot prove this binary was built from v$version -- install Rust (https://rustup.rs) to build it from source, or gh (https://cli.github.com) to check its attestation; MULTIPASS_UNVERIFIED=1 installs it unchecked"
++  fi
++  fetch "$DOWNLOAD_URL/v$version/$binary" "$WORK/$binary"
++  fetch "$DOWNLOAD_URL/v$version/SHA256SUMS" "$WORK/SHA256SUMS"
++  # The checksum comes from the same place as the binary, so it catches only
++  # a truncated or corrupted download. The attestation is the real check.
++  [ "$(awk -v f="$binary" '$2 == f { print $1 }' "$WORK/SHA256SUMS")" = "$(sha256 "$WORK/$binary")" ] ||
++    die "$EX_DATAERR" "$binary does not match SHA256SUMS; the download is damaged, and nothing was installed"
++  row "checksum" "matches SHA256SUMS"
++  if [ -n "$gh" ]; then
++    fetch "$DOWNLOAD_URL/v$version/multipass.sigstore.json" "$WORK/multipass.sigstore.json"
++    commit="$(curl -fsS --proto '=https' -H 'Accept: application/vnd.github.sha' \
++      "https://api.github.com/repos/$RELEASE_REPO/commits/v$version")" ||
++      die "$EX_UNAVAILABLE" "could not read the commit v$version names from api.github.com, perhaps because its limit of 60 requests an hour is spent; nothing was installed"
++    [[ "$commit" =~ ^[0-9a-f]{40}$ ]] ||
++      die "$EX_UNAVAILABLE" "api.github.com did not answer with the commit v$version names; nothing was installed"
++    # The release workflow runs on the merge to main and tags that commit
++    # afterwards, so the certificate records refs/heads/main and the commit,
++    # never the tag. --source-digest is what ties the binary to the tag.
++    "$gh" attestation verify "$WORK/$binary" \
++      --bundle "$WORK/multipass.sigstore.json" \
++      --repo "$RELEASE_REPO" \
++      --signer-workflow "$RELEASE_REPO/.github/workflows/release.yml" \
++      --source-ref refs/heads/main \
++      --source-digest "$commit" \
++      --deny-self-hosted-runners >/dev/null ||
++      die "$EX_DATAERR" "gh attestation verify rejected $binary, so it was not built from v$version by the release workflow; nothing was installed"
++    row "attested" "built by release.yml on main at ${commit:0:7}, the commit v$version names"
++    METHOD=binary
++  else
++    warn_row "unverified" "installed without checking where the binary came from"
++    METHOD=unverified
++  fi
++  chmod 0755 "$WORK/$binary"
++  CANDIDATE="$WORK/$binary"
++}
++
++# Copies the candidate into place with a rename, so a running multipass keeps
++# its old file and never sees a half-written one, then writes the receipt.
++place() {
++  local version="$1" source="$2" sum tmp
++  [ "$("$CANDIDATE" --version)" = "multipass $version" ] ||
++    die "$EX_DATAERR" "the new binary does not say it is multipass $version; nothing was installed"
++  mkdir -p "$BIN_DIR" "$RECEIPT_DIR"
++  tmp="$BIN_DIR/.multipass.$$"
++  cp "$CANDIDATE" "$tmp"
++  chmod 0755 "$tmp"
++  mv -f "$tmp" "$TARGET"
++  sum="$(sha256 "$TARGET")"
++  tmp="$RECEIPT.$$"
++  {
++    printf 'version %s\n' "$version"
++    printf 'method %s\n' "$METHOD"
++    printf 'path %s\n' "$TARGET"
++    printf 'sha256 %s\n' "$sum"
++    printf 'source %s\n' "$source"
++    printf 'installed %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
++  } >"$tmp"
++  mv -f "$tmp" "$RECEIPT"
++  row "installed" "$(tilde "$TARGET") $version ($(describe_method "$METHOD" "$source"))"
++}
++
++# Warns when BIN_DIR is not on PATH or another multipass comes first, and
++# lists every other multipass on PATH.
++path_rows() {
++  local first dir seen=":"
++  case ":$PATH:" in
++    *":$BIN_DIR:"* | *":$BIN_DIR/:"*) ;;
++    *)
++      local shown="$BIN_DIR"
++      case "$BIN_DIR" in "$HOME"/*) shown="\$HOME${BIN_DIR#"$HOME"}" ;; esac
++      warn_row "not-on-path" "add export PATH=\"$shown:\$PATH\" to your shell's startup file"
++      ;;
++  esac
++  first="$(type -P multipass || true)"
++  if [ -n "$first" ] && [ "$first" != "$TARGET" ]; then
++    # Canonical's Multipass, a tool for Ubuntu virtual machines, installs a
++    # command of the same name in /usr/local/bin.
++    warn_row "shadowed" "$(tilde "$first") comes first on PATH"
++  fi
++  local IFS=:
++  for dir in $PATH; do
++    dir="${dir%/}"
++    case "$seen" in *":$dir:"*) continue ;; esac
++    seen="$seen$dir:"
++    if [ -x "$dir/multipass" ] && [ "$dir/multipass" != "$TARGET" ] && [ "$dir/multipass" != "$first" ]; then
++      row "other" "$(tilde "$dir/multipass")"
++    fi
++  done
++}
++
++cmd_install() {
++  local version source
++  make_work
++  if [ -n "$CHECKOUT" ]; then
++    command -v cargo >/dev/null 2>&1 ||
++      die "$EX_UNAVAILABLE" "building this checkout needs cargo; install Rust from https://rustup.rs"
++    version="$(cargo_version "$CHECKOUT")"
++    build "$CHECKOUT"
++    row "built" "$(tilde "$CHECKOUT") $version with rustc $BUILT_WITH"
++    # A checkout can change without a version bump, so a rerun rebuilds and
++    # compares the bytes rather than the version.
++    if installed_intact && [ "$(receipt_get path)" = "$TARGET" ] &&
++      [ "$(sha256 "$CANDIDATE")" = "$(receipt_get sha256)" ]; then
++      row "current" "$(tilde "$TARGET") $version"
++    else
++      METHOD=checkout
++      place "$version" "$CHECKOUT"
++    fi
++    path_rows
++    return
++  fi
++
++  if [ -n "${MULTIPASS_VERSION:-}" ]; then
++    version="$(check_version "$MULTIPASS_VERSION")"
++  else
++    version="$(latest_version)"
++  fi
++  row "release" "$RELEASE_REPO v$version"
++  if [ "$(receipt_get version)" = "$version" ] && [ "$(receipt_get path)" = "$TARGET" ] && installed_intact; then
++    row "current" "$(tilde "$TARGET") $version"
++    path_rows
++    return
++  fi
++  source="$RELEASE_REPO v$version"
++  local how="${MULTIPASS_BUILD:-}"
++  if [ -z "$how" ]; then
++    if command -v cargo >/dev/null 2>&1; then how=source; else how=binary; fi
++  fi
++  if [ "$how" = source ]; then
++    command -v cargo >/dev/null 2>&1 ||
++      die "$EX_UNAVAILABLE" "MULTIPASS_BUILD=source needs cargo; install Rust from https://rustup.rs"
++    build_release_source "$version"
++    METHOD=source
++  else
++    install_release_binary "$version"
++  fi
++  place "$version" "$source"
++  path_rows
++}
++
++cmd_status() {
++  local newest="" version method path
++  if [ -n "$CHECKOUT" ]; then
++    newest="$(cargo_version "$CHECKOUT")"
++    row "checkout" "$(tilde "$CHECKOUT") $newest"
++  elif [ "${MULTIPASS_OFFLINE:-}" != 1 ]; then
++    newest="$(latest_version)"
++    row "release" "$RELEASE_REPO v$newest"
++  fi
++  version="$(receipt_get version)"
++  if [ -z "$version" ]; then
++    row "not-installed" "no receipt at $(tilde "$RECEIPT")"
++    path_rows
++    return
++  fi
++  method="$(receipt_get method)"
++  path="$(receipt_get path)"
++  row "installed" "$(tilde "$path") $version ($(describe_method "$method" "$(receipt_get source)"))"
++  if ! installed_intact; then
++    warn_row "modified" "$(tilde "$path") no longer matches what the installer wrote"
++  elif [ -z "$newest" ]; then
++    :
++  elif [ "$newest" = "$version" ] && [ -n "$CHECKOUT" ]; then
++    row "current" "$version matches the checkout"
++  elif [ "$newest" = "$version" ]; then
++    row "current" "$version is the newest release"
++  elif [ -n "$CHECKOUT" ]; then
++    warn_row "stale" "the checkout is at $newest -- run ./install.sh"
++  else
++    warn_row "stale" "$newest is out -- run multipass upgrade"
++  fi
++  path_rows
++}
++
++cmd_uninstall() {
++  local path
++  path="$(receipt_get path)"
++  if [ -z "$path" ]; then
++    row "not-installed" "no receipt at $(tilde "$RECEIPT")"
++  elif [ ! -e "$path" ]; then
++    row "missing" "$(tilde "$path") is already gone"
++    rm -f "$RECEIPT"
++  elif installed_intact; then
++    rm -f "$path"
++    rm -f "$RECEIPT"
++    row "removed" "$(tilde "$path")"
++  else
++    warn_row "user-owned" "$(tilde "$path") no longer matches what the installer wrote, so it stays"
++  fi
++  [ -f "$RECEIPT" ] || rmdir "$RECEIPT_DIR" 2>/dev/null || true
++  row "kept" "your stores, such as ~/.multipass/store.age"
++}
++
++usage() {
++  cat <<'EOF_USAGE'
++Usage: install.sh [install|status|uninstall]
++
++  install     Install or upgrade multipass (the default)
++  status      Say what is installed, and whether it is current
++  uninstall   Remove the multipass the installer wrote, keeping your stores
++
++From curl, pass a command after -s --:
++  curl -fsSL https://getmultipass.dev/install.sh | bash -s -- status
++EOF_USAGE
++}
++
++main() {
++  check_settings
++  case "${1:-install}" in
++    install) cmd_install ;;
++    status) cmd_status ;;
++    uninstall) cmd_uninstall ;;
++    -h | --help | help) usage ;;
++    *) die "$EX_USAGE" "unknown command $1; use install, status, or uninstall" ;;
++  esac
++}
++
++main "$@"
+diff --git a/tests/install.sh b/tests/install.sh
+new file mode 100755
+index 0000000..ce2dc34
+--- /dev/null
++++ b/tests/install.sh
+@@ -0,0 +1,201 @@
++#!/usr/bin/env bash
++#
++# Runs ./install.sh with HOME in a temporary directory and checks its rows,
++# its receipt, a rerun, status, uninstall, and that nothing else under HOME
++# changes. The release paths run against a file:// mirror made from this
++# checkout, so the test needs no network and no published release.
++#
++#   tests/install.sh
++
++set -euo pipefail
++
++ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
++WORK="$(mktemp -d "${TMPDIR:-/tmp}/multipass-install-test.XXXXXX")"
++trap 'rm -rf "$WORK"' EXIT
++
++# cargo and rustup find their toolchains under HOME, so keep them pointing at
++# the real ones before HOME moves.
++export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
++export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
++export HOME="$WORK/home"
++unset XDG_DATA_HOME MULTIPASS_BIN_DIR MULTIPASS_VERSION MULTIPASS_BUILD MULTIPASS_UNVERIFIED \
++  MULTIPASS_REPO MULTIPASS_DOWNLOAD_URL MULTIPASS_ARCHIVE_URL MULTIPASS_OFFLINE
++export NO_COLOR=1
++BIN="$HOME/.local/bin/multipass"
++RECEIPT="$HOME/.local/share/multipass-install/receipt"
++VERSION="$(sed -n 's/^version = "\(.*\)"$/\1/p' "$ROOT/Cargo.toml" | head -n 1)"
++FAILURES=0
++
++fail() {
++  printf 'FAIL: %s\n' "$*" >&2
++  FAILURES=$((FAILURES + 1))
++}
++
++# Runs a command, keeping its combined output in $OUT and status in $STATUS.
++run() {
++  set +e
++  OUT="$("$@" 2>&1)"
++  STATUS=$?
++  set -e
++}
++
++expect_status() {
++  [ "$STATUS" = "$1" ] || fail "$2: exit $STATUS, expected $1; output:"$'\n'"$OUT"
++}
++
++# Checks that a row named $1 whose message contains $2 was printed.
++expect_row() {
++  printf '%s\n' "$OUT" | awk -v name="$1" -v text="$2" '$1 == name && index($0, text) { found = 1 } END { exit !found }' ||
++    fail "$3: no $1 row with \"$2\"; output:"$'\n'"$OUT"
++}
++
++expect_no_row() {
++  ! printf '%s\n' "$OUT" | grep -Eq "^$1 " || fail "$2: unexpected $1 row; output:"$'\n'"$OUT"
++}
++
++receipt() {
++  awk -v key="$1" '$1 == key { sub(/^[^ ]+ /, ""); print; exit }' "$RECEIPT"
++}
++
++sha256() {
++  shasum -a 256 "$1" | cut -d ' ' -f 1
++}
++
++mtime() {
++  stat -f %m "$1" 2>/dev/null || stat -c %Y "$1"
++}
++
++# Every file under HOME with its digest, except the two the installer owns.
++snapshot() {
++  (cd "$HOME" && find . -type f ! -path ./.local/bin/multipass ! -path ./.local/share/multipass-install/receipt \
++    -exec shasum -a 256 {} + | sort)
++}
++
++mkdir -p "$HOME/.multipass"
++printf 'not a real store\n' >"$HOME/.multipass/store.age"
++printf 'export PATH="/usr/bin:$PATH"\n' >"$HOME/.zshrc"
++printf '# bash\n' >"$HOME/.bashrc"
++BEFORE="$(snapshot)"
++
++# A checkout install builds the checkout and fetches nothing.
++run "$ROOT/install.sh"
++expect_status 0 "checkout install"
++expect_row built "$VERSION with rustc" "checkout install"
++expect_row installed "~/.local/bin/multipass $VERSION (built from" "checkout install"
++expect_row not-on-path 'export PATH="$HOME/.local/bin:$PATH"' "checkout install"
++expect_no_row fetched "checkout install"
++[ "$("$BIN" --version)" = "multipass $VERSION" ] || fail "the installed binary does not print multipass $VERSION"
++[ "$(receipt version)" = "$VERSION" ] || fail "receipt version is $(receipt version)"
++[ "$(receipt method)" = checkout ] || fail "receipt method is $(receipt method)"
++[ "$(receipt path)" = "$BIN" ] || fail "receipt path is $(receipt path)"
++[ "$(receipt sha256)" = "$(sha256 "$BIN")" ] || fail "receipt sha256 does not match the binary"
++[ "$(receipt source)" = "$ROOT" ] || fail "receipt source is $(receipt source)"
++[[ "$(receipt installed)" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] ||
++  fail "receipt installed is $(receipt installed)"
++
++# A rerun of the same checkout leaves the file alone.
++touch -t 200001010000 "$BIN"
++before_mtime="$(mtime "$BIN")"
++run "$ROOT/install.sh"
++expect_status 0 "rerun"
++expect_row current "~/.local/bin/multipass $VERSION" "rerun"
++expect_no_row installed "rerun"
++[ "$(mtime "$BIN")" = "$before_mtime" ] || fail "a rerun rewrote the binary"
++
++run "$ROOT/install.sh" status
++expect_status 0 "status"
++expect_row installed "~/.local/bin/multipass $VERSION" "status"
++expect_row current "$VERSION matches the checkout" "status"
++
++# Another multipass earlier on PATH shadows the installed one, and one later
++# on PATH is listed.
++mkdir -p "$WORK/early" "$WORK/late"
++printf '#!/bin/sh\n' >"$WORK/early/multipass"
++printf '#!/bin/sh\n' >"$WORK/late/multipass"
++chmod +x "$WORK/early/multipass" "$WORK/late/multipass"
++run env PATH="$WORK/early:$HOME/.local/bin:$WORK/late:$PATH" "$ROOT/install.sh" status
++expect_row shadowed "$WORK/early/multipass comes first on PATH" "shadowed status"
++expect_row other "$WORK/late/multipass" "shadowed status"
++expect_no_row not-on-path "shadowed status"
++
++# A file changed by hand is no longer the installer's to remove.
++printf 'x' >>"$BIN"
++run "$ROOT/install.sh" status
++expect_row modified "no longer matches" "status after a change by hand"
++run "$ROOT/install.sh" uninstall
++expect_status 0 "uninstall of a changed file"
++expect_row user-owned "~/.local/bin/multipass" "uninstall of a changed file"
++[ -f "$BIN" ] || fail "uninstall removed a file that did not match the receipt"
++
++# Installing again replaces the changed file, and uninstall then removes it.
++run "$ROOT/install.sh"
++expect_row installed "~/.local/bin/multipass $VERSION" "reinstall over a changed file"
++run "$ROOT/install.sh" uninstall
++expect_status 0 "uninstall"
++expect_row removed "~/.local/bin/multipass" "uninstall"
++expect_row kept "your stores" "uninstall"
++[ ! -e "$BIN" ] || fail "uninstall left the binary"
++[ ! -e "$RECEIPT" ] || fail "uninstall left the receipt"
++
++# A release, from a mirror. The installer copied out of the checkout installs
++# a release rather than the checkout.
++MIRROR="$WORK/mirror"
++mkdir -p "$MIRROR/archive" "$MIRROR/download/v$VERSION" "$WORK/release"
++cp "$ROOT/install.sh" "$WORK/release/install.sh"
++git -C "$ROOT" archive --format=tar.gz --prefix="multipass-$VERSION/" HEAD >"$MIRROR/archive/v$VERSION.tar.gz"
++export MULTIPASS_VERSION="$VERSION"
++export MULTIPASS_ARCHIVE_URL="file://$MIRROR/archive"
++export MULTIPASS_DOWNLOAD_URL="file://$MIRROR/download"
++
++run bash "$WORK/release/install.sh"
++expect_status 0 "release source install"
++expect_row release "ninjudd/multipass v$VERSION" "release source install"
++expect_row fetched "v$VERSION source, sha256" "release source install"
++expect_row built "v$VERSION with rustc" "release source install"
++expect_row installed "~/.local/bin/multipass $VERSION (built from source)" "release source install"
++[ "$(receipt method)" = source ] || fail "release source receipt method is $(receipt method)"
++[ "$(receipt source)" = "ninjudd/multipass v$VERSION" ] || fail "release source receipt source is $(receipt source)"
++
++run bash "$WORK/release/install.sh"
++expect_row current "~/.local/bin/multipass $VERSION" "release rerun"
++expect_no_row fetched "release rerun"
++
++if [ "$(uname -s)" = Darwin ]; then
++  # The binary path, with neither cargo nor gh on PATH.
++  cp "$BIN" "$MIRROR/download/v$VERSION/multipass-$VERSION-macos"
++  (cd "$MIRROR/download/v$VERSION" && shasum -a 256 "multipass-$VERSION-macos" >SHA256SUMS)
++  run bash "$WORK/release/install.sh" uninstall
++  BARE_PATH=/usr/bin:/bin:/usr/sbin:/sbin
++
++  run env PATH="$BARE_PATH" bash "$WORK/release/install.sh"
++  expect_status 69 "binary install with neither cargo nor gh"
++  printf '%s\n' "$OUT" | grep -q 'MULTIPASS_UNVERIFIED=1 installs it unchecked' ||
++    fail "binary install with neither cargo nor gh did not say how to go on; output:"$'\n'"$OUT"
++  [ ! -e "$BIN" ] || fail "a binary install with neither cargo nor gh installed something"
++
++  printf '0%.0s' {1..64} >"$WORK/zeros"
++  (cd "$MIRROR/download/v$VERSION" && printf '%s  %s\n' "$(cat "$WORK/zeros")" "multipass-$VERSION-macos" >SHA256SUMS)
++  run env PATH="$BARE_PATH" MULTIPASS_UNVERIFIED=1 bash "$WORK/release/install.sh"
++  expect_status 65 "binary install with a damaged download"
++  [ ! -e "$BIN" ] || fail "a damaged download was installed"
++  (cd "$MIRROR/download/v$VERSION" && shasum -a 256 "multipass-$VERSION-macos" >SHA256SUMS)
++
++  run env PATH="$BARE_PATH" MULTIPASS_UNVERIFIED=1 bash "$WORK/release/install.sh"
++  expect_status 0 "unverified binary install"
++  expect_row checksum "matches SHA256SUMS" "unverified binary install"
++  expect_row unverified "without checking where the binary came from" "unverified binary install"
++  expect_row installed "~/.local/bin/multipass $VERSION (unverified binary)" "unverified binary install"
++  [ "$(receipt method)" = unverified ] || fail "unverified receipt method is $(receipt method)"
++fi
++
++run bash "$WORK/release/install.sh" uninstall
++expect_row removed "~/.local/bin/multipass" "final uninstall"
++
++[ "$(snapshot)" = "$BEFORE" ] || fail "files under HOME changed:"$'\n'"$(diff <(printf '%s\n' "$BEFORE") <(snapshot) || true)"
++[ ! -e "$RECEIPT" ] || fail "the receipt remains after the final uninstall"
++
++if [ "$FAILURES" -gt 0 ]; then
++  printf '%d install.sh checks failed\n' "$FAILURES" >&2
++  exit 1
++fi
++printf 'install.sh checks passed\n'

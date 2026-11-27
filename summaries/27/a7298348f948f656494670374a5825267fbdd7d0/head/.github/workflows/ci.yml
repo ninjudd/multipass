@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# CI only reads the repository, and uses only GitHub's own actions, pinned by
+# commit SHA, so a moved tag cannot change what runs here.
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      # The runner image ships rustup, so installing the toolchain needs no
+      # third-party action.
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+      - name: No dependencies
+        run: |
+          deps="$(cargo tree -e all --prefix none)"
+          echo "$deps"
+          if [ "$(printf '%s\n' "$deps" | wc -l)" -ne 1 ]; then
+            echo "::error::multipass must have no dependencies; see AGENTS.md"
+            exit 1
+          fi
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      # --locked fails a version bump that forgets Cargo.lock here, in its
+      # pull request, rather than in the release workflow.
+      - run: cargo test --locked
+      - run: tests/install.sh
