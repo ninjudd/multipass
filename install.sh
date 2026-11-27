@@ -410,7 +410,7 @@ buildinfo_field() {
 # names, and compares it byte for byte with the slice in the release's
 # universal binary. Installs nothing.
 cmd_verify() {
-  local version arch triple info rust binary src ours theirs field
+  local version arch triple info rust rustflags target binary src ours theirs field
   [ "$(uname -s)" = Darwin ] || die "$EX_UNAVAILABLE" "verify rebuilds a macOS release, so it runs only on macOS"
   # A toolchain from Homebrew embeds its own install path in the binary, so
   # only rustup's toolchains reproduce a release.
@@ -438,18 +438,27 @@ cmd_verify() {
   rust="$(buildinfo_field rustc-release "$info")"
   [[ "$rust" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
     die "$EX_DATAERR" "the v$version build info names no Rust release"
+  # The build info comes from the build that verify exists to distrust, and
+  # a flag such as -C linker=<program> would make cargo run any program. So
+  # only the flags .github/scripts/build-release.sh exports, and a plain
+  # version as the deployment target, may reach the build.
+  rustflags="$(buildinfo_field rustflags "$info")"
+  [ "$rustflags" = "-C link-arg=-Wl,-oso_prefix,." ] ||
+    die "$EX_DATAERR" "the v$version build info's rustflags are not the ones release builds use; nothing was built"
+  target="$(buildinfo_field macosx_deployment_target "$info")"
+  [[ "$target" =~ ^[0-9]+\.[0-9]+$ ]] ||
+    die "$EX_DATAERR" "the v$version build info's macosx_deployment_target is not a version such as 11.0; nothing was built"
   rustup run "$rust" rustc --version >/dev/null 2>&1 ||
     die "$EX_UNAVAILABLE" "v$version was built with Rust $rust; install it with rustup toolchain install $rust --profile minimal, and run verify again"
   src="$WORK/source"
   mkdir "$src"
   tar -xzf "$WORK/source.tar.gz" -C "$src" --strip-components 1 ||
     die "$EX_DATAERR" "could not unpack the v$version source archive"
-  # The release's build info names the flags it built with. The target
-  # directory sits inside the source, as in the release build, because the
-  # linker records object paths relative to the directory cargo runs in.
+  # The target directory sits inside the source, as in the release build,
+  # because the linker records object paths relative to the directory cargo
+  # runs in.
   (cd "$src" && unset CARGO_ENCODED_RUSTFLAGS CARGO_BUILD_RUSTFLAGS &&
-    MACOSX_DEPLOYMENT_TARGET="$(buildinfo_field macosx_deployment_target "$info")" \
-      RUSTFLAGS="$(buildinfo_field rustflags "$info")" CARGO_TARGET_DIR="$src/target" \
+    MACOSX_DEPLOYMENT_TARGET="$target" RUSTFLAGS="$rustflags" CARGO_TARGET_DIR="$src/target" \
       rustup run "$rust" cargo build --release --locked --offline --quiet --target "$triple") ||
     die 1 "rustup run $rust cargo build --release --locked --offline --target $triple failed"
   lipo -thin "$arch" "$WORK/$binary" -output "$WORK/release-slice" ||

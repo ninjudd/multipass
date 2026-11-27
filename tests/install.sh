@@ -213,6 +213,30 @@ if [ "$(uname -s)" = Darwin ]; then
   expect_row unverified "without checking where the binary came from" "unverified binary install"
   expect_row installed "~/.local/bin/multipass $VERSION (unverified binary)" "unverified binary install"
   [ "$(receipt method)" = unverified ] || fail "unverified receipt method is $(receipt method)"
+
+  # verify, against a release whose binary is the checkout build, so its
+  # slice never matches. A fake rustup runs the cargo and rustc on PATH,
+  # whatever version it is asked for.
+  mkdir -p "$WORK/fake-rustup"
+  printf '#!/bin/sh\n[ "$1" = run ] || exit 1\nshift 2\nexec "$@"\n' >"$WORK/fake-rustup/rustup"
+  chmod +x "$WORK/fake-rustup/rustup"
+  lipo -create "$BIN" -output "$MIRROR/download/v$VERSION/multipass-$VERSION-macos"
+  INFO="$MIRROR/download/v$VERSION/multipass-$VERSION.buildinfo"
+  RUST="$(rustc --version | cut -d ' ' -f 2)"
+
+  # The build info comes from the build verify distrusts, so a flag in it
+  # that names a program to run stops verify before anything is built.
+  printf '#!/bin/sh\ntouch "%s"\nexit 1\n' "$WORK/linker-ran" >"$WORK/linker"
+  chmod +x "$WORK/linker"
+  printf 'rustc-release %s\nrustflags -C linker=%s\nmacosx_deployment_target 11.0\n' "$RUST" "$WORK/linker" >"$INFO"
+  run env PATH="$WORK/fake-rustup:$PATH" bash "$WORK/release/install.sh" verify
+  expect_status 65 "verify with a linker in the build info's rustflags"
+  printf '%s\n' "$OUT" | grep -q "build info's rustflags are not" ||
+    fail "verify with a linker in the build info's rustflags did not name the field; output:"$'\n'"$OUT"
+  [ ! -e "$WORK/linker-ran" ] || fail "verify ran the linker the build info named"
+  printf 'rustc-release %s\nrustflags -C link-arg=-Wl,-oso_prefix,.\nmacosx_deployment_target 11.0 x\n' "$RUST" >"$INFO"
+  run env PATH="$WORK/fake-rustup:$PATH" bash "$WORK/release/install.sh" verify
+  expect_status 65 "verify with a deployment target that is not a version"
 fi
 
 run bash "$WORK/release/install.sh" uninstall
