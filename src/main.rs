@@ -547,25 +547,18 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
             clip,
         } => {
             let mut change = ctx.open_change(&name)?;
-            let store = &mut change.store;
-            let existing = store.get(&name);
-            if existing.is_some() && !force {
-                return Err(format!("{name} already exists; pass --force to replace it"));
-            }
-            let otp = existing.and_then(|entry| entry.otp.clone());
+            refuse_replacement(&change.store, &name, force)?;
             let secret = match &generate {
                 Some(recipe) => generator::password(recipe)?,
                 None => read_hidden(&format!("Secret for {name}: "), "secret")?,
             };
-            let stamp = stamp(store, now);
-            store.insert(
+            let stamp = stamp(&change.store, now);
+            set_secret(
+                &mut change.store,
                 name,
-                Entry {
-                    secret: Some(secret.clone()),
-                    username,
-                    notes,
-                    otp,
-                },
+                secret.clone(),
+                username,
+                notes,
                 stamp,
             );
             ctx.commit(change)?;
@@ -1220,6 +1213,40 @@ fn refuse_otp_replacement(store: &Store, name: &str, force: bool) -> Result<()> 
     Ok(())
 }
 
+/// Returns an error naming the entry when one by that name exists and
+/// `force` is false. Call it before reading or drawing the secret, so a
+/// refusal asks for nothing.
+fn refuse_replacement(store: &Store, name: &str, force: bool) -> Result<()> {
+    if !force && store.get(name).is_some() {
+        return Err(format!("{name} already exists; pass --force to replace it"));
+    }
+    Ok(())
+}
+
+/// Stores `secret` as the entry's secret, with the username and notes
+/// given, and keeps the one-time password of the entry it replaces. As with
+/// every insert, a secret it replaces joins the entry's history.
+fn set_secret(
+    store: &mut Store,
+    name: String,
+    secret: String,
+    username: Option<String>,
+    notes: Option<String>,
+    stamp: u64,
+) {
+    let otp = store.get(&name).and_then(|entry| entry.otp.clone());
+    store.insert(
+        name,
+        Entry {
+            secret: Some(secret),
+            username,
+            notes,
+            otp,
+        },
+        stamp,
+    );
+}
+
 fn prompt(text: &str) -> Result<String> {
     tty::read_hidden(text).map_err(|e| format!("could not read from the terminal: {e}"))
 }
@@ -1647,6 +1674,40 @@ mod tests {
         assert!(refuse_otp_replacement(&store, "with", true).is_ok());
         assert!(refuse_otp_replacement(&store, "without", false).is_ok());
         assert!(refuse_otp_replacement(&store, "missing", false).is_ok());
+    }
+
+    #[test]
+    fn add_generate_force_keeps_the_replaced_secret() {
+        let otp = "otpauth://totp/x?secret=JBSWY3DPEHPK3PXP";
+        let mut store = Store::new();
+        store.insert(
+            "x",
+            Entry {
+                secret: Some("old".into()),
+                username: None,
+                notes: None,
+                otp: Some(otp.into()),
+            },
+            1_000,
+        );
+        assert_eq!(
+            refuse_replacement(&store, "x", false).unwrap_err(),
+            "x already exists; pass --force to replace it"
+        );
+        assert!(refuse_replacement(&store, "x", true).is_ok());
+        assert!(refuse_replacement(&store, "missing", false).is_ok());
+
+        let recipe = generator::Options::default().recipe().unwrap();
+        let new = generator::password(&recipe).unwrap();
+        set_secret(&mut store, "x".into(), new.clone(), None, None, 2_000);
+        let entry = store.get("x").unwrap();
+        assert_eq!(entry.secret.as_deref(), Some(new.as_str()));
+        assert_eq!(entry.otp.as_deref(), Some(otp));
+        // `get x --previous 1` reads this.
+        assert_eq!(
+            previous_value(&store, "x", Field::Secret, 1).unwrap(),
+            "old"
+        );
     }
 
     #[test]
