@@ -1,5 +1,5 @@
 ---
-status: draft
+status: ready
 priority: now
 ---
 
@@ -86,8 +86,6 @@ multipass: random characters, 16 from 66, with rules: 96.6 bits
 
 The classes are `upper`, `lower`, `digit`, `special` (ASCII punctuation), `ascii-printable`, and a custom set in brackets such as `[-!#$]`. `unicode` is refused, because multipass draws only ASCII. The rules replace the character-set options, so `--rules` with `--no-digits` or `--symbols` is an error. `--exclude` and `--no-lookalikes` still apply on top. Parsing the rules happens in `src/generate_rules.rs`, outside `src/crypto`, because the rules are public text and parsing them branches on every byte.
 
-This option awaits the owner (§ 6).
-
 ### 2.4 Word lists
 
 | List | Entries | Bits each | Source |
@@ -166,11 +164,11 @@ A random password takes a few dozen two-byte reads and a scan of a 94-byte alpha
 
 ## 6. Open questions
 
-Questions 1 and 2 are decided. Question 3 waits on the owner. The plan describes the recommended answer to it, and becomes `ready` once it is answered.
+The owner has decided all three.
 
 1. **The default with no options.** Decided: random characters, 20 long, from all four sets. Memorable words stay one option away, with `--words`.
 2. **Syllables.** Decided: include `--syllables`, so the plan covers 1Password's "Use full words" switch when it is off. With no count it makes 6 syllables, as § 2.2 describes.
-3. **Per-site rules.** Recommended: both the simple options and `--rules`. The alternative is the simple options only, with `--rules` deferred.
+3. **Per-site rules.** Decided: both the simple options and `--rules`, as § 2.3 describes.
 
 ## 7. Background
 
