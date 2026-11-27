@@ -58,7 +58,7 @@ retired 7c1e9a3b5d2f4e6a8c0b1d3f5a7c9e2b 1761200000 1763000000 Qm9vYmFyYmF6cXV4Z
 
 ### 2.3 How a store opens at a passphrase prompt
 
-1. `open` asks for the passphrase and lists the package. It ignores `.tmp` files and warns about any file that does not match `key.*.age`, `store.*.age`, or `moved.*.age`, without touching it. Names that match loosely, such as a sync service's `store.3f9a….age 2`, are not adopted.
+1. `open` asks for the passphrase and lists the package. It ignores `.tmp` files and the `.DS_Store` file Finder leaves in a folder, without a warning, and warns about any other file that does not match `key.*.age`, `store.*.age`, or `moved.*.age`, without touching it. Names that match loosely, such as a sync service's `store.3f9a….age 2`, are not adopted.
 2. It decrypts every key file with the passphrase. The newest by `created`, with ties going to the larger `generation`, is current. Every key, current or retired, from every file it opened, goes into one set of known keys.
 3. When no key file opens, the passphrase is wrong, and `open` fails with `wrong passphrase, or the store is damaged`, as today. When some open and others do not, the others are under a passphrase set by `passwd` on another Mac, possibly a newer one. `open` says so, naming the files, and asks `Other passphrase: `. With both passphrases, it rotates under the one whose key files carry the later `passphrase-set`, so a `passwd` always wins over a rotation that raced it. Without the other passphrase, it opens read-only: the command can read what it merged, but nothing saves, rotates, or compacts, and it says `another passphrase was set on another Mac; type it to save`. So a lineage under an older passphrase never keeps writing.
 4. It decrypts every store file whose generation it has a key for, and merges them with `Store::merge`. A store file with an unknown generation is left alone, with a warning. When it finds key files but no store file it can open, it fails with `the store is still syncing; try again shortly`. A file that disappears while it reads, because another Mac deleted it after merging it, makes it list the package again, up to three times.
@@ -127,6 +127,8 @@ The old file stays because another Mac, still on an older multipass or not yet s
 | An old file but no move record, such as one a sync service brought back after it was retired | It imports the old file's entries with `modified 0`, so it adds what the package lacks and overrides nothing, writes a move record, and warns. |
 
 Rotation re-encrypts the move record under the new key (§ 2.5 steps 2 and 3). Compaction leaves it alone, since it merges only store files. Session unlock's agent leaves it alone too, because the check needs the passphrase to open the old file, so it runs only at a passphrase prompt. When `--store` or `MULTIPASS_STORE` still names the old file, multipass opens the package beside it and prints `note: <old file> moved to <package>; update MULTIPASS_STORE or --store`. A crash before step 2 leaves a `.tmp` directory, which the next attempt removes and rebuilds. An older multipass cannot open a package, and the README says so.
+
+The package and the move ship as two pull requests, the package first. Until the move lands, a build refuses a single-file store with `<path> is a single-file store from an earlier multipass, which this build cannot open`, and changes nothing on disk.
 
 ### 2.7 Recovering the store with stock age
 
