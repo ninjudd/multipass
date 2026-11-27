@@ -1,5 +1,5 @@
 ---
-status: draft
+status: ready
 priority: next
 ---
 
@@ -17,7 +17,7 @@ The usual fix, a `curl … | bash` installer that downloads a binary, is itself 
 
 A new `install.sh` at the repository root installs a release into `~/.local/bin/multipass`. When `cargo` is on PATH, it downloads the release's source archive and builds it with `cargo build --release --locked --offline`, which takes about three seconds because multipass has no dependencies, so the only code it trusts beyond the tagged source is your own toolchain. Without `cargo`, it downloads the release's universal macOS binary and installs it only after `gh attestation verify` proves that the release workflow built it from the release's tag. When neither `cargo` nor `gh` is installed, it refuses and says how to get either one, unless you set `MULTIPASS_UNVERIFIED=1`. Run from a checkout, it builds that checkout instead and downloads nothing. A new release workflow publishes each version you merge: it tags `v<version>` from `Cargo.toml`, builds the binary on a pinned toolchain, attests it, and publishes an immutable GitHub release. The build is reproducible, and `install.sh verify` rebuilds a release on your Mac and compares the bytes. The installer never touches your stores, `~/.multipass`, or your shell's startup files.
 
-The installer itself is a release asset, attested with the binary. The project's domain, `getmultipass.dev`, serves no code: a minimal Vercel project redirects `https://getmultipass.dev/install.sh` to the newest release's `install.sh` on GitHub (§ 2.9), deployed by hand (§ 7.1). So the command you run is:
+The installer itself is a release asset, attested with the binary. The project's domain, `getmultipass.dev`, serves no code: a small Vercel website, built from `site/` and deployed by a GitHub Actions workflow on every push to `main`, redirects `https://getmultipass.dev/install.sh` to the newest release's `install.sh` on GitHub (§ 2.9). So the command you run is:
 
 ```sh
 curl -fsSL https://getmultipass.dev/install.sh | bash
@@ -70,7 +70,7 @@ The receipt lives under `XDG_DATA_HOME`, so `status` and `uninstall` follow it t
 
 ### 2.3 Upgrading
 
-You upgrade with `multipass upgrade`, which runs the installer for you, or by running the installer again yourself (pending § 7.2). multipass contains no network code, and it reaches the network only when you type `upgrade`: there are no background checks and no new-version notices.
+You upgrade with `multipass upgrade`, which runs the installer for you, or by running the installer again yourself (§ 7.2). multipass contains no network code, and it reaches the network only when you type `upgrade`: there are no background checks and no new-version notices.
 
 `multipass upgrade [<version>]` runs these steps:
 
@@ -168,24 +168,30 @@ curl -fsSL https://github.com/ninjudd/multipass/releases/download/v0.2.0/install
 | --- | --- |
 | `install.sh` | New. The installer, with the commands and settings in § 2.2. Bash, using only `curl`, `tar`, `shasum`, `uname`, and, when present, `cargo`, `gh`, and `lipo`. |
 | `.github/workflows/release.yml` | New. The release workflow in § 2.5. |
-| `.github/workflows/ci.yml` | Adds `--locked` to `cargo test`, and a step that runs `tests/install.sh`. |
+| `.github/workflows/ci.yml` | Adds `--locked` to `cargo test`, a step that runs `tests/install.sh`, and a step that runs `.github/scripts/check-site.sh static`, so a pull request that breaks the redirects fails before it can merge. |
 | `tests/install.sh` | New. Runs the installer from the checkout with `HOME` and `MULTIPASS_BIN_DIR` in a temporary directory, and checks the rows, the receipt, a rerun, `status`, `uninstall`, and that nothing else under `HOME` changed. It also runs the binary path against a `file://` mirror through `MULTIPASS_DOWNLOAD_URL`, once the first release exists to mirror. |
 | `README.md` | The Install section shows the one-line install, the three-line check-first install and the pinned installs from § 2.6, the checkout install with `./install.sh`, how to upgrade and uninstall, and how to check a release with `install.sh verify`. |
-| `AGENTS.md` | A Releases section: how to cut a release, that `RUST_VERSION` in `release.yml` changes only in a pull request of its own, and that the release workflow uses only GitHub's actions, pinned by commit SHA. A Domain section: that `site/` serves only redirects, never a copy of `install.sh`. |
+| `AGENTS.md` | A Releases section: how to cut a release, that `RUST_VERSION` in `release.yml` changes only in a pull request of its own, and that the release workflow uses only GitHub's actions, pinned by commit SHA. A Website section: that `site/` never holds a copy of `install.sh`, that `check-site.sh` guards its redirects, and that the Vercel CLI the site workflow installs is a deployment tool for the website, never a dependency of multipass, so the no-dependencies rule, which is about crates and the binary, does not cover it. |
+| `site/index.html` | New. The landing page: what multipass is, the install commands from § 2.6, and links to the repository and the README. One static HTML file with no scripts and no outside resources. |
 | `site/vercel.json` | New. The redirects and headers in § 2.9, with no build command and no framework. |
+| `.github/workflows/site.yml` | New. The deploy workflow in § 2.10. |
+| `.github/vercel/package.json`, `.github/vercel/package-lock.json` | New. The Vercel CLI at one exact version, with every package it pulls in pinned by the lock file's integrity hashes. They sit outside `site/` so Vercel never reads `site/` as a Node project. |
+| `.github/scripts/check-site.sh` | New. The redirect guard in § 2.10: `check-site.sh static` reads `site/vercel.json`, and `check-site.sh live <url>` reads the responses with `curl -sI`. |
 | `src/upgrade.rs` | New. `upgrade` and `upgrade --check` as § 2.3 describes. It takes the paths of `curl`, `bash`, and `gh` and the base URL as parameters, so tests run it against fake programs in a temporary directory; `main.rs` passes the fixed paths and `https://getmultipass.dev`. |
 | `src/main.rs` | Adds the `upgrade` command, its optional version, and `--check`, and updates `USAGE`. |
 
 ### 2.9 The domain
 
-`getmultipass.dev` uses Vercel's DNS, under a Vercel team, and a minimal Vercel project on that team serves it. The project holds only `site/vercel.json`, has no build step, runs no code, holds no secret, and serves no copy of `install.sh`. It only redirects to GitHub, so the file that runs is always the immutable, attested release asset.
+`getmultipass.dev` uses Vercel's DNS, under a Vercel team, and a Vercel project on that team serves the small website in `site/`: one static page and the redirects. The project has no build step, runs no code, holds no secret, and serves no copy of `install.sh`. For the installer it only redirects to GitHub, so the file that runs is always the immutable, attested release asset.
 
 | Request | Response |
 | --- | --- |
 | `https://getmultipass.dev/install.sh` | A temporary redirect (307) to `https://github.com/ninjudd/multipass/releases/latest/download/install.sh`, which GitHub in turn redirects to the newest release's file |
 | `https://getmultipass.dev/<tag>/install.sh`, such as `/v0.2.0/install.sh` | A temporary redirect to `https://github.com/ninjudd/multipass/releases/download/<tag>/install.sh` |
-| `https://getmultipass.dev/` | A temporary redirect to `https://github.com/ninjudd/multipass`, until the project wants a landing page of its own |
+| `https://getmultipass.dev/` | `site/index.html`, the landing page |
 | `https://www.getmultipass.dev/…` | A permanent redirect to the same path on `getmultipass.dev` |
+
+The domain's DNS answers only for `getmultipass.dev` and `www.getmultipass.dev`. Vercel DNS adds an `ALIAS` for the `*` wildcard by default, and rollout removes it, so a made-up name such as `install.getmultipass.dev` does not resolve and cannot be mistaken for the real one.
 
 Each redirect carries `Cache-Control: no-store`, so no cache serves an old target. GitHub resolves the newest release and sends `Cache-Control: no-cache` on its own redirect, so a release is live through the domain as soon as it is published. `.dev` is on browsers' HTTPS preload list, so browsers only ever load the domain over HTTPS, and Vercel issues and renews its certificate.
 
@@ -196,11 +202,27 @@ Whoever controls the registrar account, the Vercel team, or the domain's DNS can
 | Auto-renew, so the domain cannot lapse and be registered by someone else | The registrar | Being set by the owner |
 | Registrar lock, so the domain cannot be transferred away without unlocking it first | The registrar | Being set by the owner |
 | Two-factor sign-in on the registrar account and for every member of the Vercel team | Both accounts | To confirm in rollout |
-| A CAA record that allows only the certificate authorities Vercel uses, plus `0 issuewild ";"` to forbid wildcard certificates | Vercel DNS | To add in rollout. Vercel requires `0 issue "letsencrypt.org"`, and community reports describe a default `pki.goog` record as well, so keep each authority Vercel's own records name. Unverified until the records exist. |
+| CAA records naming the certificate authorities that may issue for the domain | Vercel DNS | Verified: Vercel DNS adds CAA records for Let's Encrypt, Sectigo, and Google Trust Services by default (`0 issue "letsencrypt.org"`, `0 issue "sectigo.com"`, `0 issue "pki.goog"`). Keep all three, because Vercel does not document which of them it falls back to when one fails, and removing one could stop a certificate renewing. |
+| `0 issuewild ";"`, so no authority may issue a wildcard certificate | Vercel DNS | To add in rollout. `issuewild` governs only wildcard requests (RFC 8659 § 4.3), so the apex and `www` certificates, which name exact hosts, still issue under the `issue` records. Unverified that Vercel never puts a wildcard name into the certificate it requests for the apex, so rollout adds the record only after `vercel certs ls` shows certificates naming just the two hosts, and checks again after the first renewal. |
 | DNSSEC | Vercel DNS | Not available, unverified with Vercel. Vercel's community forum says its DNS does not support DNSSEC, `.dev` domains included, and Vercel's documentation says nothing either way. |
 | The README offers a pinned URL, GitHub's own URL, and the check-first install (§ 2.6) | `README.md` | In this project |
 
 Without DNSSEC, someone who can forge DNS answers to a certificate authority could, in principle, get a certificate for the domain. CAA narrows that to the authorities it names. The check-first install and `gh attestation verify` do not depend on the domain at all, which is why the README keeps them.
+
+### 2.10 Deploying the website
+
+`.github/workflows/site.yml` deploys `site/` to Vercel on every push to `main` that changes `site/`, the workflow, `.github/vercel/`, or `check-site.sh`, and on `workflow_dispatch`. Vercel gets no access to the repository: the workflow pushes to Vercel, and no Vercel app is installed.
+
+1. The job runs on `ubuntu-latest` with `permissions: contents: read`, in a GitHub environment named `production` whose deployment branches are limited to `main`. The environment holds the `VERCEL_TOKEN` secret, so a pull request's workflow, which never runs on `main`, cannot read it. The Vercel team and project IDs are environment variables, not secrets.
+2. It checks out the pushed commit with `persist-credentials: false`, using `actions/checkout` pinned by commit SHA.
+3. It runs `.github/scripts/check-site.sh static`. The guard fails unless every redirect whose source ends in `install.sh` points at a URL that starts with `https://github.com/ninjudd/multipass/releases/`, no rewrite touches `install.sh`, `site/` holds no file named `install.sh`, and `vercel.json` sets no build command, framework, or function.
+4. It runs `npm ci --ignore-scripts` in `.github/vercel/`, which installs exactly the locked Vercel CLI and runs none of its packages' install scripts.
+5. It runs `vercel deploy --prod` in `site/` with the token.
+6. It runs `.github/scripts/check-site.sh live https://getmultipass.dev`, which fails unless `/install.sh` and `/v0.0.0/install.sh` answer with a redirect into `https://github.com/ninjudd/multipass/releases/` and `cache-control: no-store`. When it fails, the job runs `vercel rollback` to the previous production deployment and fails, so the bad redirect stays live only for the seconds between the deploy and the check.
+
+The token is created for the Vercel team, with an expiry, and is replaced before it expires. Whether Vercel can scope a token to one project rather than the whole team is unverified; if it can, the token is scoped to this project.
+
+The Vercel CLI is the one piece of third-party code in this design, and it runs only in this job, never in the release workflow and never in the binary. It still matters: it runs with the token, so a compromised CLI could deploy a different redirect. The lock file means the CLI changes only in a reviewed pull request, and the live check runs `curl`, not the CLI, so it catches a bad redirect the CLI deployed. What stays is the risk that someone who can merge to `main`, or who holds the token, changes the website. Merging already requires a clean Projector review, and anyone who can merge can already change the installer itself, so the website adds no more than that. The guard catches the one change that would hurt users, a redirect to another script, and the check-first install and GitHub's own URL (§ 2.6) never touch the domain.
 
 ## 3. Why this design
 
@@ -241,6 +263,11 @@ Without DNSSEC, someone who can forge DNS answers to a certificate authority cou
 | `multipass upgrade` on a binary from `cargo install` | Exit 69 naming that path, and nothing downloaded |
 | `multipass upgrade --check` when current, and when a release behind | Exit 0 and exit 1, with the messages in § 2.3 |
 | `multipass upgrade` with `gh` on PATH, against an `install.sh` changed by one byte | Exit 65, and the installer never runs |
+| A pull request that points the `/install.sh` redirect at another host | CI fails on `check-site.sh static`, naming the redirect |
+| A pull request's workflow that tries to read `VERCEL_TOKEN` | The secret is empty, because the `production` environment admits only `main` |
+| A push to `main` that changes `site/index.html` | The site workflow deploys it, and `check-site.sh live` passes |
+| The site workflow's live check against a deployment whose redirect points elsewhere | The job runs `vercel rollback` and fails |
+| `dig +short install.getmultipass.dev` | Nothing, because the wildcard record is gone |
 | `curl -sI https://getmultipass.dev/install.sh` | `HTTP/2 307`, `location: https://github.com/ninjudd/multipass/releases/latest/download/install.sh`, and `cache-control: no-store` |
 | `curl -sI https://getmultipass.dev/v0.1.0/install.sh` | A 307 to `https://github.com/ninjudd/multipass/releases/download/v0.1.0/install.sh` |
 | `curl -sI http://getmultipass.dev/install.sh` and `curl -sI https://www.getmultipass.dev/install.sh` | Each redirects to `https://getmultipass.dev/install.sh`, never serving a file over plain HTTP |
@@ -252,6 +279,7 @@ Tests that must fail before the change and pass after it:
 - **`tests/install.sh`**, run by CI on the checkout. It checks each row from a checkout install, the receipt's fields, that a rerun prints `current` and leaves the file alone, that `status` reports `current`, that `uninstall` refuses a file whose SHA-256 differs from the receipt, and that nothing under `HOME` changes except the binary and the receipt. Catches an installer that edits a startup file or the store directory, a rerun that reinstalls, and an uninstall that deletes someone else's `multipass`.
 - **`upgrade` against fake programs**, in `src/upgrade.rs`. A fake `curl` writes a script and a fake `gh` passes or fails. Checks that a failing `gh` stops `upgrade` before `bash` runs, that a named version reaches both the URL and `MULTIPASS_VERSION`, that a missing receipt or one naming another path stops it, and that `--check` parses the tag from the redirect and exits 1 for a newer release. Catches an upgrade that runs an installer whose check failed, and one that installs a second copy beside the first.
 - **Argument parsing** for `upgrade`, `upgrade <version>`, and `upgrade --check`, and rejecting `--check` with a version.
+- **`check-site.sh static` against bad `vercel.json` files**, run in CI beside the real one: a redirect to another host, a redirect to `github.com/ninjudd/multipass` outside `/releases/`, a rewrite of `/install.sh`, and an `install.sh` file in `site/`. Each must fail. Catches a guard that checks only the first redirect, or that accepts a look-alike URL such as `https://github.com/ninjudd/multipass-releases/`.
 - **The tampered mirror**, in `tests/install.sh` once a release exists. Catches an installer that trusts `SHA256SUMS`, or that ignores `gh`'s exit status.
 - **The release build's second build**, in `release.yml`. Catches a change that makes the binary depend on the build path or the time.
 
@@ -266,26 +294,31 @@ None of this changes the multipass binary, so commands cost what they cost today
 1. Merge the installer and the release workflow.
 2. In the repository's settings, turn on immutable releases, and add a tag ruleset that blocks updating and deleting tags matching `v*`. Only the repository owner can change these.
 3. Publish the first release, `v0.1.0`, from the current version by running the release workflow by hand.
-4. Once the domain's nameservers point at Vercel, confirm auto-renew and the registrar lock at the registrar, and two-factor sign-in on the registrar account and for every member of the Vercel team. Add the CAA records from § 2.9 after reading which authorities Vercel's own records name.
-5. Create the Vercel project on that team, add `getmultipass.dev` and `www.getmultipass.dev` to it, and deploy `site/` by hand with `vercel deploy --prod`, as § 7.1 decides. Until step 3's release exists, the redirect leads to a missing file.
-6. Check the release and domain rows of § 4, then point the README's Install section at the one-liner.
+4. The domain's nameservers already point at Vercel. Confirm auto-renew and the registrar lock at the registrar, and two-factor sign-in on the registrar account and for every member of the Vercel team. Remove the default `*` `ALIAS` record.
+5. Create the Vercel project on that team and add `getmultipass.dev` and `www.getmultipass.dev` to it. Create the `production` environment limited to `main`, a team token with an expiry, and the `VERCEL_TOKEN` secret and the two ID variables in that environment. Run the site workflow by hand once. Until step 3's release exists, the redirect leads to a missing file.
+6. Once `vercel certs ls` shows certificates naming only the two hosts, add `0 issuewild ";"`.
+7. Check the release and domain rows of § 4, then point the README's Install section at the one-liner.
 
 ## 7. Open questions
 
 ### 7.1 How the domain's Vercel project deploys
 
-Decided: by hand. The domain is `getmultipass.dev` on Vercel's DNS, and § 3 says why Vercel rather than GitHub Pages serves it. These were the ways `site/` could reach Vercel:
+Decided by the owner: a small website in `site/`, deployed on every push to `main` by a GitHub Actions workflow with a pinned Vercel CLI, as § 2.10 describes. The domain is `getmultipass.dev` on Vercel's DNS, and § 3 says why Vercel rather than GitHub Pages serves it. The alternatives were:
 
-- **By hand (chosen):** the owner runs `vercel deploy --prod` in `site/` when it changes, which is rarely, since the redirects always point at the newest release. No Vercel app gets access to the repository, and no workflow holds a Vercel token. What is served can drift from `main`, and the `curl -sI` rows of § 4 catch that.
-- **Vercel's GitHub app:** `site/` deploys on every merge, so what is served always matches `main`. But Vercel's documentation lists the app's repository permissions as read and write on contents and on workflows, so a third party could then change any file, `release.yml` included.
-- **GitHub Pages instead of Vercel:** the repository's Pages site moves to the domain. § 3 gives the costs: a second party that can change what the domain serves, no HTTP redirects, fixed caching, and a change to Projector.
+- **Deploy by hand:** no token in GitHub, but what is served can drift from `main`, and a website someone edits should go live when its change merges.
+- **Vercel's GitHub app:** deploys on every merge too, but Vercel's documentation lists the app's repository permissions as read and write on contents and on workflows, so a third party could change any file, `release.yml` included. The workflow gets the same result with Vercel given no access to the repository.
+- **GitHub Pages instead of Vercel:** § 3 gives the costs: a second party that can change what the domain serves, no HTTP redirects, fixed caching, and a change to Projector.
 
 ### 7.2 Whether multipass itself may reach the network
 
-Undecided; the owner's to answer. The owner leans toward `multipass upgrade`, and the plan assumes it, as § 2.3 describes.
+Decided by the owner: `multipass upgrade`, which reaches the network only when you type it, as § 2.3 describes. multipass contains no network code; `upgrade` downloads the installer with `/usr/bin/curl`, checks its attestation when `gh` is installed, and runs it, so an upgrade gets the installer's checks. `upgrade --check` only reports. Nothing runs in the background, and multipass shows no new-version notices. A running session-unlock agent ends after an upgrade through the session-unlock plan's binary check (§ 2.7).
 
-- **`multipass upgrade` when you type it, and never otherwise (recommended):** it downloads the installer with `curl`, checks its attestation when `gh` is installed, and runs it, so an upgrade gets the installer's checks. `upgrade --check` says whether a newer release is out. multipass contains no network code, and nothing runs in the background or shows a notice.
-- **Never:** no `upgrade` command. You upgrade by running the installer again, and `install.sh status` says whether a newer release is out. multipass then never starts a program that reaches the network.
+Two details were left to the plan, and § 2.3 settles them:
+
+- **A temporary file, not a pipe into `bash`.** Downloading first is what lets `upgrade` check the installer's attestation before any of it runs. A pipe starts running the script before the download ends.
+- **The version is an argument, `multipass upgrade 0.2.0`.** `--version` already prints multipass's own version, so an option of that name would mean two things.
+
+The rejected alternative was no `upgrade` command, upgrading by running the installer again.
 
 ### 7.3 Deferred
 
@@ -303,5 +336,5 @@ Undecided; the owner's to answer. The owner leans toward `multipass upgrade`, an
 - **A build from source is fast and repeatable.** A clean `cargo build --release --locked --offline` of the current `main` took 2.6 seconds on an Apple silicon Mac and wrote a 420,704-byte arm64 binary. Building the same commit in two checkouts at different paths, with the same toolchain, gave identical bytes. The binary embeds the toolchain's standard-library source paths, which differ between rustup's and Homebrew's toolchains, and the SDK version in its `LC_BUILD_VERSION` load command, so reproducing a release needs the same rustup toolchain and the same SDK version. The linker signs it ad hoc, and that signature is part of the reproducible bytes.
 - **Attestations without a login.** The GitHub API returns a public repository's attestations without a token. `gh attestation verify` without `--bundle` stops and asks for `gh auth login`. With `--bundle` and no login it went on to read the bundle, so a bundle published with the release lets `gh` check the binary without a login. The implementer confirms this against the first release.
 - **Caching.** GitHub Pages answered the repository's site with `cache-control: max-age=600`. GitHub's `releases/latest/download/<file>` URL answered with a 302 to the newest release's file and `cache-control: no-cache`.
-- **The domain's DNS.** When this was written, the domain's nameservers were still the registrar's, with no DS record and no CAA record. Vercel's community forum reports that Vercel DNS does not support DNSSEC, `.dev` included, and that domains on Vercel's nameservers can show a default CAA record for `pki.goog` beside Let's Encrypt. Vercel's documentation requires `0 issue "letsencrypt.org"` in any custom CAA record. Vercel's older documentation lists its GitHub app's permissions as read and write on repository contents, and a later changelog adds read and write on workflows.
+- **The domain's DNS.** The `.dev` registry delegates the domain to `ns1.vercel-dns.com` and `ns2.vercel-dns.com`. Vercel DNS lists, by default, CAA records for `pki.goog`, `sectigo.com`, and `letsencrypt.org`, and `ALIAS` records to Vercel for the apex and for the `*` wildcard. Vercel's community forum reports that Vercel DNS does not support DNSSEC, `.dev` included. Vercel's documentation requires `0 issue "letsencrypt.org"` in any custom CAA record, and does not say whether it also issues through the other two. Vercel's older documentation lists its GitHub app's permissions as read and write on repository contents, and a later changelog adds read and write on workflows.
 - **The name.** Homebrew has no `multipass` formula. Its `multipass` cask is Canonical's Multipass, at version 1.17.2, which installs a package that puts a `multipass` command in `/usr/local/bin`.
