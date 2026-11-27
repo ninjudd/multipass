@@ -1,0 +1,163 @@
+{
+ "version": 1,
+ "name": "Mergeable store",
+ "project": "store-merge",
+ "pr": {
+  "repo": "ninjudd/multipass",
+  "number": 22,
+  "title": "Merge stores entry by entry, and keep each entry's earlier secrets",
+  "head": "0aa2ae43583076b0e177d0cf84cc21789f2fff4f",
+  "headRef": "store-merge",
+  "base": "5728b7c8ce71a5e79e6233388eeb95a0cab98319",
+  "baseRef": "main"
+ },
+ "overview": {
+  "summary": [
+   "multipass keeps every password in one text document, encrypted as one age file. Each save replaces the whole file, so when two Macs each change a copy, nothing can combine them and one copy's changes are lost. The next plan in line, vault-key, writes every save as a new file and needs a way to combine the files it finds into one store. This pull request supplies that combination.",
+   "It does so with a new store text, <b>format 3</b>, and a merge function:",
+   "<ol><li><b>Every entry records when it last changed.</b> A <code>modified</code> line holds the time in milliseconds. A change is stamped one millisecond past the newest stamp in the store it was made from, so a change made after seeing another always wins, even when clocks disagree.</li><li><b>Removing an entry leaves a tombstone.</b> <code>rm</code> keeps the name with <code>modified</code> and <code>deleted</code>, so a merge can tell a removal from an entry it has never seen. For 30 days the tombstone also keeps the whole removed entry, and <code>multipass restore &lt;name&gt;</code> brings it back.</li><li><b>Stores merge entry by entry.</b> <code>Store::merge</code> keeps each name's newest version, so every Mac that merges the same files writes the same store. Nothing outside the tests calls it yet; vault-key is its first caller.</li><li><b>Each entry keeps its earlier secrets.</b> <code>previous-secret</code> and <code>previous-otp</code> lines hold replaced secrets and setup keys. A merge turns the losing version's secret into history, so a merge never drops a secret. <code>multipass history</code> lists the dates, and <code>multipass get --previous &lt;n&gt;</code> prints one.</li></ol>",
+   "multipass still reads formats 1 and 2, whose entries read as <code>modified 0</code>, and writes format 3. An older multipass refuses a format 3 store with <code>the store uses format 3, but this multipass reads formats 1 and 2</code>."
+  ],
+  "cards": [
+   {
+    "id": "terms",
+    "title": "Terms",
+    "html": "<ul class=\"tight\"><li><b>Stamp</b>: an entry's <code>modified</code> value, milliseconds since 1970.</li><li><b>Version</b>: one name's state in one store, a live entry or a tombstone, with its stamp and history.</li><li><b>Tombstone</b>: a removed entry, kept as its name, <code>modified</code>, <code>deleted</code>, and history lines, with the removed entry's fields after <code>deleted</code> for 30 days.</li><li><b>History</b>: an entry's earlier secrets and setup keys, each with the time it was replaced.</li><li><b>Cutoffs</b>: the three times before which <code>Store::expire</code> drops things, as the CLI opens the store and as <code>to_text</code> writes it.</li></ul>"
+   },
+   {
+    "id": "retention",
+    "title": "What is kept, and for how long",
+    "html": "<div class=\"tblwrap\"><table class=\"tbl\"><thead><tr><th>What</th><th>Kept</th></tr></thead><tbody><tr><td>A live entry's earlier secrets and setup keys</td><td class=\"r\">The newest 10 of each, or every one replaced in the past year, whichever is more</td></tr><tr><td>A removed entry, whole, for <code>restore</code></td><td class=\"r\">30 days</td></tr><tr><td>A removed entry's secrets and setup key, as history</td><td class=\"r\">30 days</td></tr><tr><td>A removed entry's marker</td><td class=\"r\">120 days</td></tr></tbody></table></div><p class=\"note\">multipass applies each limit as it opens the store, so no command shows a value past its limit. The file itself drops the value at the next save, so <code>age -d</code> can still show it until then.</p>"
+   },
+   {
+    "id": "review",
+    "title": "Review so far",
+    "html": "<ul class=\"tight\"><li>The review of <code>f7a68da</code> asked for two changes to how <code>rm</code> was described: a removed secret could outlive the 30 days the README promised, and undoing a removal brought back only the secret.</li><li>This head fixed both in code. <code>Store::expire</code> runs as the CLI opens the store, and <code>restore</code> brings back the whole entry. Both threads are resolved, and the review of <code>0aa2ae4</code> is clean.</li><li>fmt, clippy, tests, the dependency check, and CI passed. Stock <code>age</code> was not installed where the review ran, so no store from this head was decrypted with <code>age -d</code> in the review.</li></ul>"
+   }
+  ]
+ },
+ "groups": [
+  {
+   "id": "store",
+   "title": "Format 3, history, and the merge",
+   "kicker": "The store module: the new text, the version type, and how two stores combine.",
+   "intro": [
+    "All of the change's logic lives in <code>src/store.rs</code>. The store maps each name to a <code>Version</code>: a live entry or a tombstone, its stamp, and its <code>History</code>. A tombstone's <code>removed</code> field keeps the removed entry for 30 days. Every change goes through <code>insert</code>, <code>remove</code>, or <code>restore</code>, which take a stamp and move the replaced secret and setup key into the history. The old <code>get_mut</code>, which changed an entry without a stamp, is gone.",
+    "<code>Version::join</code> is the merge of two versions of one name. It keeps the one with the newer stamp, breaks a tie by comparing the versions' text without their history, and takes the union of both histories plus each version's own secret and setup key. A losing value is dated by its own version's stamp, not the winner's, which is what keeps the merge commutative, associative, and idempotent: two Macs that merge the same files in any order write the same store.",
+    "Nothing is pruned in the merge. <code>Store::expire</code> applies the three cutoffs. The CLI runs it as it opens the store, and <code>to_text</code> runs it on a copy before writing, so the merge stays a pure union and no command shows a value the next write would drop."
+   ],
+   "checks": [
+    {
+     "kind": "context",
+     "text": "The plan's § 2.1 table is the format's definition. A field line always starts with a tab, and names escape tab, newline, carriage return, and backslash, so an entry name can never read as a <code>modified</code>, <code>deleted</code>, or <code>previous-*</code> line."
+    }
+   ],
+   "files": [
+    {
+     "path": "src/store.rs",
+     "note": "The format 3 text, <code>Version</code> and <code>History</code>, stamps, <code>Store::merge</code>, <code>expire</code> and <code>restore</code>, and the reader for formats 1 to 3.",
+     "checks": [
+      {
+       "kind": "verify",
+       "text": "The merge laws hold with history and removed entries included. The review walked <code>join</code> and <code>normalize</code> by hand, and <code>merge_is_commutative_associative_and_idempotent</code> passed over 3,000 generated triples that include tombstones with and without a removed entry.",
+       "line": 181
+      },
+      {
+       "kind": "verify",
+       "text": "<code>restore</code> brings back the whole removed entry within 30 days of the removal, measured by its stamp. The review restored an entry's username, notes, and setup key with a release build, and <code>restore_brings_back_the_whole_entry_for_30_days</code> checks the boundary.",
+       "line": 278
+      },
+      {
+       "kind": "verify",
+       "text": "A name added again after the 30 days takes no removed secret back, even when no write ran in between. <code>re_adding_after_30_days_leaves_the_removed_secrets_behind</code> covers the case the first review reproduced.",
+       "line": 298
+      },
+      {
+       "kind": "context",
+       "text": "<code>expire</code> holds every cutoff rule, and <code>expiring_leaves_what_a_write_and_a_read_leave</code> checks that it leaves exactly the store <code>to_text</code> writes. A caller that merges must expire each store before the merge.",
+       "line": 369
+      },
+      {
+       "kind": "verify",
+       "text": "Malformed lines fail with only their line number. <code>rejects_malformed_text</code> covers a missing or misplaced <code>modified</code>, a field before <code>deleted</code>, a removed entry with neither secret nor otp, and history dated after the entry or with no value.",
+       "line": 534
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cli",
+   "title": "The CLI: stamps, history, and --previous",
+   "kicker": "How each command stamps its change, the two new ways to read history, and restore.",
+   "intro": [
+    "<code>run</code> reads the clock once, and <code>open</code> expires the store as of that time. Each saving command (<code>add</code>, <code>rm</code>, <code>restore</code>, <code>otp --set</code>, <code>otp --clear</code>) takes a stamp from the store it opened, warns when that stamp is more than a day ahead of the clock, and saves with <code>Cutoffs::at(now)</code>.",
+    "Two read commands are new. <code>multipass history &lt;name&gt;</code> lists when the entry changed and when each earlier value was replaced, and never shows a value. <code>multipass get &lt;name&gt; --previous &lt;n&gt;</code> prints or copies the nth most recently replaced secret, or with <code>--field otp</code> the setup key. Both also find a removed entry. Without <code>--previous</code>, <code>get</code> still prints the current value.",
+    "<code>multipass restore &lt;name&gt;</code> makes a removed entry live again within its 30 days. It refuses a live name with <code>&lt;name&gt; is not removed</code>, an unknown one with <code>no removed entry named &lt;name&gt;</code>, and an expired removal."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": "src/main.rs",
+     "note": "Stamps for each saving command, expiry on open, the <code>history</code> and <code>restore</code> commands, <code>get --previous</code>, and a UTC date formatter.",
+     "checks": [
+      {
+       "kind": "verify",
+       "text": "<code>restore</code> refuses a live and an unknown name with errors that show no value. The review saw both against a release build driven with <code>expect</code>.",
+       "line": 413
+      },
+      {
+       "kind": "verify",
+       "text": "Errors from <code>previous_value</code> name only a count, such as <code>x has only 2 earlier secrets</code>. The review saw this against a release build driven with <code>expect</code>, and <code>previous_counts_from_the_most_recently_replaced</code> covers it.",
+       "line": 518
+      },
+      {
+       "kind": "verify",
+       "text": "<code>history</code> prints dates and no value. <code>history_lists_dates_and_no_values</code> checks that no secret or key appears, and the release build printed only dates.",
+       "line": 540
+      },
+      {
+       "kind": "context",
+       "text": "Every command expires the store here, so a removed secret past its 30 days is gone from every read before any write.",
+       "line": 617
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "docs",
+   "title": "README, AGENTS.md, and the plans",
+   "kicker": "What users and agents are told about format 3 and history.",
+   "intro": [
+    "The README gains a section on getting an earlier password back and on <code>restore</code>, and its recovery example shows format 3, including a tombstone with its removed entry. AGENTS.md says multipass writes format 3 and that the merge must keep its laws with history included. The store-merge plan records the history design, the 30-day decision, <code>expire</code>, and <code>restore</code>, and is marked completed with an outcome. The passkeys plan no longer calls history undecided."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": "README.md",
+     "note": "A new section on earlier passwords and <code>restore</code>, and the recovery example in format 3.",
+     "checks": [
+      {
+       "kind": "context",
+       "text": "This paragraph says when a removed entry stops being found, and that the file drops it only at the next save, which is what the code does.",
+       "line": 62
+      }
+     ]
+    },
+    {
+     "path": "AGENTS.md",
+     "note": "Says multipass writes format 3, and that <code>Store::merge</code> must stay commutative, associative, and idempotent."
+    },
+    {
+     "path": "docs/projects/store-merge/readme.md",
+     "note": "Adds § 2.6, password history, with <code>expire</code> and <code>restore</code>, and marks the plan completed with an outcome."
+    },
+    {
+     "path": "docs/projects/passkeys/readme.md",
+     "note": "Says the history in § 2.6 keeps a losing password edit, but no passkey."
+    }
+   ]
+  }
+ ]
+}
