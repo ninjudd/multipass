@@ -102,7 +102,26 @@ This is the plan's largest risk. age's `mlkem768x25519` stanza is HPKE (RFC 9180
 
 That is about 1,500 lines in `src/crypto`, more than all the cryptography there today, each checked against its official vectors. The constant-time rule matters more here than anywhere so far. ML-KEM's arithmetic, its decapsulation's implicit rejection, and X25519's ladder must not branch on or index by secret data. A subtle mistake would leak a member's identity, which then opens every grant ever written to them.
 
-The alternative is Apple's CryptoKit, which the passkeys plan's rule allows on Apple devices. Its documentation lists `MLKEM768` and `XWingMLKEM768X25519` on macOS 26 and iOS 26. The latter is "the X-Wing (ML-KEM768 with X25519) Key Encapsulation Mechanism", defined in draft-connolly-cfrg-xwing-kem-06. Its HPKE offers `HPKE.KEM.XWingMLKEM768X25519` with `HPKE.AEAD.chaChaPoly` through `init(kem:kdf:aead:)`. CryptoKit is a Swift API, so the CLI would reach it only through the Mac app's helper, and macOS 26 would become the floor for shared vaults. Whether CryptoKit's X-Wing produces stanzas that stock age reads, given the different draft each names, is unverified.
+The alternative is Apple's CryptoKit, which the passkeys plan's rule allows on Apple devices. CryptoKit's Swift interface in the macOS 27.2 SDK declares, each from macOS 26 and iOS 26: `MLKEM768` and `MLKEM1024`; `XWingMLKEM768X25519`, the X-Wing hybrid, which Apple's documentation describes as defined in draft-connolly-cfrg-xwing-kem-06; the HPKE ciphersuite `XWingMLKEM768X25519_SHA256_AES_GCM_256`; enclave forms `SecureEnclave.MLKEM768` and `SecureEnclave.MLKEM1024`; and the signatures `MLDSA65` and `MLDSA87`. Apple's documentation also lists `HPKE.KEM.XWingMLKEM768X25519` as a KEM, `HPKE.AEAD.chaChaPoly` as an AEAD, and a `Ciphersuite.init(kem:kdf:aead:)` that combines them.
+
+| | Hand-written in `src/crypto` | CryptoKit |
+| --- | --- | --- |
+| Platforms | Every platform the CLI builds on | macOS 26, iOS 26, and later only |
+| Code to write and check | About 1,500 lines of the hardest constant-time code in the repository | A few dozen lines of Swift calling vetted, constant-time implementations |
+| How the CLI reaches it | Directly, in Rust | Through a small Swift shim linked into the CLI, which adds Swift and Xcode to the CLI's build, or through the Mac app's helper, as session unlock's § 8 does |
+| No-dependency rule | Kept | Allowed by the rule that counts Apple's frameworks like the standard library, on Apple devices only |
+
+CryptoKit makes the Apple-platform implementation cheap and well vetted, and hand-writing is the only way to keep shared vaults working off Apple platforms. § 6 leaves the choice to the user.
+
+Whether stock age can read what CryptoKit writes comes down to three things. Each is verified or not, as marked:
+
+| Parameter | age's `mlkem768x25519` | CryptoKit | Status |
+| --- | --- | --- | --- |
+| KDF | HKDF-SHA256 | The predefined suite names SHA256 | Matches, verified from both texts |
+| AEAD | ChaCha20Poly1305 | The predefined suite uses AES-GCM-256; `chaChaPoly` is available through `init(kem:kdf:aead:)` | The predefined suite does not match, verified. A custom suite should match, unverified. |
+| KEM | "MLKEM768-X25519 from draft-ietf-hpke-pq-03", which the specification calls "i.e. X-Wing", with a 1120-byte encapsulated key | X-Wing from draft-connolly-cfrg-xwing-kem-06 | Unverified. An X-Wing ciphertext is 1,088 bytes of ML-KEM-768 plus 32 bytes of X25519, 1,120 in all, which agrees with age's length, but the two drafts may differ in the combiner or the HPKE KEM identifier. |
+
+So a grant that CryptoKit writes with a custom suite of X-Wing, HKDF-SHA256, ChaCha20-Poly1305, and age's `info` string may be readable by stock age, but nobody has checked. § 6 question 6 is that check.
 
 ## 3. Why this design
 
@@ -137,17 +156,17 @@ Opening adds one HPKE decapsulation per grant, well under a millisecond each wit
 
 Every question here is deliberately deferred until the plan is scheduled. The user owns questions 1 to 5. Questions 6 and 7 are checks for whoever implements the plan.
 
-1. **Hand-written cryptography or CryptoKit.** Writing ML-KEM, X25519, SHA-3, HPKE, and Bech32 keeps the CLI dependency-free on every platform, at the cost and risk in § 2.7. CryptoKit avoids that risk on Apple devices, requires macOS 26 or iOS 26, and reaches the CLI only through the Mac app.
+1. **Hand-written cryptography or CryptoKit.** Writing ML-KEM, X25519, SHA-3, HPKE, and Bech32 keeps shared vaults working on every platform, at the cost and risk in § 2.7. CryptoKit makes them cheap and well vetted on Apple devices, requires macOS 26 or iOS 26, and reaches the CLI through a Swift shim or the Mac app's helper.
 2. **Roles.** Whether every member may admit and remove others, or only some.
-3. **Signatures.** Whether each member signs their store files, for example with ML-DSA, so a reader can tell who wrote what, and a compromised member cannot pose as another.
+3. **Signatures.** Whether each member signs their store files, for example with ML-DSA, which CryptoKit offers as `MLDSA65` and `MLDSA87`, so a reader can tell who wrote what, and a compromised member cannot pose as another.
 4. **Per-device identities**, including one in the Secure Enclave with `SecureEnclave.MLKEM768`.
 5. **Routine rotation in a large vault.** Whether 21 days still fits, since every rotation ends every member's sessions.
-6. **Compatibility of CryptoKit's X-Wing with age's `mlkem768x25519`.** The age specification cites draft-ietf-hpke-pq-03 and CryptoKit cites draft-connolly-cfrg-xwing-kem-06. Owner: the implementer, by decrypting age's published test files with CryptoKit.
+6. **Compatibility of CryptoKit's X-Wing with age's `mlkem768x25519`.** The KDF matches, and the AEAD can be made to match with a custom suite. Whether the KEMs are byte-identical is unverified (§ 2.7). Owner: the implementer, by decrypting the age specification's `mlkem768x25519` test files with a CryptoKit suite of X-Wing, HKDF-SHA256, and ChaChaPoly, and by having stock age decrypt a grant CryptoKit wrote.
 7. **Which age releases read `mlkem768x25519`.** The C2SP age specification defines it, and the Rust `age` crate at 0.12.1 does not implement it (§ 7). Which Go release does, and so what "stock age" means for recovering a shared vault, is unverified. Owner: the implementer.
 
 ## 7. Background
 
 - The age specification (C2SP's `age.md`) defines "The MLKEM768-X25519 (i.e. X-Wing) hybrid post-quantum recipient type", with recipients encoded as Bech32 with the prefix `age1pq` and identities with `AGE-SECRET-KEY-PQ-`. Its stanza is "the HPKE SealBase function from RFC 9180" with KEM "MLKEM768-X25519 from draft-ietf-hpke-pq-03", KDF HKDF-SHA256, AEAD ChaCha20Poly1305, and `info = "age-encryption.org/mlkem768x25519"`.
 - The same specification requires an scrypt stanza to be the only stanza in its file, which is why an identity file under a passphrase and a grant to a recipient must be separate files.
-- Apple's CryptoKit documentation lists `MLKEM768`, `XWingMLKEM768X25519`, and `SecureEnclave.MLKEM768`, each from macOS 26 and iOS 26, and `HPKE.KEM.XWingMLKEM768X25519` among HPKE's KEMs, with `chaChaPoly` among its AEADs.
+- CryptoKit's Swift interface in the macOS 27.2 SDK declares `MLKEM768`, `MLKEM1024`, `XWingMLKEM768X25519`, the HPKE ciphersuite `XWingMLKEM768X25519_SHA256_AES_GCM_256`, `SecureEnclave.MLKEM768`, `SecureEnclave.MLKEM1024`, `MLDSA65`, and `MLDSA87`, each available from macOS 26 and iOS 26. It shows no enclave form of X-Wing. Apple's documentation lists `HPKE.KEM.XWingMLKEM768X25519` among HPKE's KEMs and `chaChaPoly` among its AEADs.
 - The `age` crate at version 0.12.1 depends on `ml-kem`, `x25519-dalek`, `hpke`, and `sha3`, but its source implements only the `tagpq` type, ML-KEM-768 with P-256 for hardware keys, and has no `mlkem768x25519`. So at that version Rust age cannot read a grant. Whether the Go implementation, `age` and `age-keygen`, reads it, and from which release, is unverified.
