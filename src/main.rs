@@ -2,6 +2,7 @@ mod age;
 mod agent;
 mod clipboard;
 mod crypto;
+mod generator;
 #[cfg(target_os = "macos")]
 mod objc;
 mod otp;
@@ -22,6 +23,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crypto::generate::Recipe;
 use otp::Otp;
 use store::{Entry, Store, Version};
 use vault::{Ask, Opened, Session, Vault};
@@ -39,6 +41,10 @@ Commands:
     --notes <value>
     --force             Replace the entry's secret, username and notes if it
                         already exists, keeping its one-time password
+    --generate          Make a new password for the secret instead of reading
+                        one, taking the password options below. It is never
+                        printed
+      --clip            Also copy it to the clipboard, for 30 seconds
   get <name>            Print one field of an entry, by default its secret
     --field <field>     secret, username, notes or otp
     --clip              Copy it to the clipboard instead, for 30 seconds
@@ -54,6 +60,9 @@ Commands:
                         prompt otherwise. Creates the entry if needed
       --force           Replace the entry's one-time password if it has one
     --clear             Remove the entry's one-time password
+  generate              Print a new password, by default 20 random characters,
+                        without storing it. Its strength goes to stderr
+    --clip              Copy it to the clipboard instead, for 30 seconds
   list                  List entry names, one per line
   rm <name>             Remove an entry. restore brings it back for 30 days
   restore <name>        Bring back an entry removed in the past 30 days,
@@ -68,6 +77,20 @@ Commands:
                         the installer, checking its attestation when gh is
                         installed. Only this command reaches the network
     --check             Say whether a newer release is out, and change nothing
+
+Password options, for generate and add --generate:
+  --length <n>          Random characters, from 4 to 128 [default: 20]
+  --no-uppercase, --no-lowercase, --no-digits, --no-symbols
+                        Leave a set out. Each set left in appears at least once
+  --symbols <chars>     The symbols to use [default: all ASCII punctuation]
+  --exclude <chars>     Characters never to use
+  --no-lookalikes       Leave out 0 O o 1 l I and |
+  --words [<n>]         Memorable words instead, from 3 to 15 [default: 5]
+    --separator <sep>   hyphen, space, period, comma, underscore, digit or
+                        digit-or-symbol [default: hyphen]
+    --capitalize <how>  none, first (every word) or one (one word)
+                        [default: none]
+  --pin [<n>]           A PIN instead, from 4 to 64 digits [default: 6]
 
 Options:
   --store <path>        The store package, or $MULTIPASS_STORE
@@ -89,6 +112,12 @@ enum Command {
         username: Option<String>,
         notes: Option<String>,
         force: bool,
+        generate: Option<Recipe>,
+        clip: bool,
+    },
+    Generate {
+        recipe: Recipe,
+        clip: bool,
     },
     Get {
         name: String,
@@ -198,6 +227,28 @@ fn take_value(
     }
 }
 
+fn number(flag: &str, value: &str) -> Result<usize> {
+    value
+        .parse()
+        .map_err(|_| format!("{flag} needs a whole number, not {value}"))
+}
+
+/// The count after `--words` or `--pin`, which may be left out: an inline
+/// value, or the next argument when it is a number.
+fn optional_number(
+    flag: &str,
+    inline: Option<String>,
+    args: &mut std::iter::Peekable<impl Iterator<Item = String>>,
+) -> Result<Option<usize>> {
+    if let Some(value) = inline {
+        return number(flag, &value).map(Some);
+    }
+    match args.next_if(|next| next.parse::<usize>().is_ok()) {
+        Some(value) => number(flag, &value).map(Some),
+        None => Ok(None),
+    }
+}
+
 fn parse(args: Vec<String>) -> Result<Parsed> {
     let mut store = None;
     let mut username = None;
@@ -208,9 +259,11 @@ fn parse(args: Vec<String>) -> Result<Parsed> {
     let mut previous = None;
     let mut otp_action = None;
     let mut check = false;
+    let mut generate = false;
+    let mut options = generator::Options::default();
     let mut positional = Vec::new();
 
-    let mut args = args.into_iter();
+    let mut args = args.into_iter().peekable();
     while let Some(arg) = args.next() {
         if arg == "--" {
             positional.extend(args.by_ref());
@@ -254,6 +307,27 @@ fn parse(args: Vec<String>) -> Result<Parsed> {
                         .ok_or("--previous takes a number from 1, the most recently replaced")?,
                 )
             }
+            "--length" => {
+                options.length = Some(number(&flag, &take_value(&flag, inline, &mut args)?)?)
+            }
+            "--words" => options.words = Some(optional_number(&flag, inline, &mut args)?),
+            "--pin" => options.pin = Some(optional_number(&flag, inline, &mut args)?),
+            "--symbols" => options.symbols = Some(take_value(&flag, inline, &mut args)?),
+            "--exclude" => options.exclude = Some(take_value(&flag, inline, &mut args)?),
+            "--separator" => options.separator = Some(take_value(&flag, inline, &mut args)?),
+            "--capitalize" => options.capitalize = Some(take_value(&flag, inline, &mut args)?),
+            "--generate" | "--no-uppercase" | "--no-lowercase" | "--no-digits" | "--no-symbols"
+            | "--no-lookalikes"
+                if inline.is_some() =>
+            {
+                return Err(format!("{flag} takes no value"));
+            }
+            "--generate" => generate = true,
+            "--no-uppercase" => options.no_uppercase = true,
+            "--no-lowercase" => options.no_lowercase = true,
+            "--no-digits" => options.no_digits = true,
+            "--no-symbols" => options.no_symbols = true,
+            "--no-lookalikes" => options.no_lookalikes = true,
             "--force" if inline.is_none() => force = true,
             "--clip" if inline.is_none() => clip = true,
             "--clip" => return Err("--clip takes no value".into()),
@@ -302,7 +376,9 @@ fn parse(args: Vec<String>) -> Result<Parsed> {
             || force
             || clip
             || previous.is_some()
-            || otp_action.is_some();
+            || otp_action.is_some()
+            || generate
+            || !options.is_empty();
         if store_flags {
             return Err("upgrade takes only a version or --check".into());
         }
@@ -325,11 +401,27 @@ fn parse(args: Vec<String>) -> Result<Parsed> {
         "status" => Command::Status,
         "lock" => Command::Lock,
         agent::COMMAND => Command::Agent,
-        "add" => Command::Add {
-            name: name()?,
-            username: username.take(),
-            notes: notes.take(),
-            force: std::mem::take(&mut force),
+        "add" => {
+            let name = name()?;
+            let generate = if std::mem::take(&mut generate) {
+                Some(std::mem::take(&mut options).recipe()?)
+            } else if clip {
+                return Err("--clip on add needs --generate".into());
+            } else {
+                None
+            };
+            Command::Add {
+                name,
+                username: username.take(),
+                notes: notes.take(),
+                force: std::mem::take(&mut force),
+                generate,
+                clip: std::mem::take(&mut clip),
+            }
+        }
+        "generate" => Command::Generate {
+            recipe: std::mem::take(&mut options).recipe()?,
+            clip: std::mem::take(&mut clip),
         },
         "get" => {
             let field = field.take().unwrap_or(Field::Secret);
@@ -373,7 +465,10 @@ fn parse(args: Vec<String>) -> Result<Parsed> {
         return Err("--field only applies to get".into());
     }
     if clip {
-        return Err("--clip only applies to get, and to otp without --set or --clear".into());
+        return Err(
+            "--clip only applies to get, generate, add --generate, and otp without --set or --clear"
+                .into(),
+        );
     }
     if otp_action.is_some() {
         return Err("--set and --clear only apply to otp".into());
@@ -384,10 +479,22 @@ fn parse(args: Vec<String>) -> Result<Parsed> {
     if check {
         return Err("--check only applies to upgrade".into());
     }
+    if generate {
+        return Err("--generate only applies to add".into());
+    }
+    if !options.is_empty() {
+        return Err("password options only apply to generate and add --generate".into());
+    }
     Ok(Parsed::Run { store, command })
 }
 
 fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
+    if let Command::Generate { recipe, clip } = &command {
+        let password = generator::password(recipe)?;
+        deliver(&password, *clip)?;
+        eprintln!("multipass: {}", generator::strength(recipe));
+        return Ok(());
+    }
     let place =
         package_path(store.or_else(|| std::env::var_os("MULTIPASS_STORE").map(PathBuf::from)))?;
     let path = place.package;
@@ -436,6 +543,8 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
             username,
             notes,
             force,
+            generate,
+            clip,
         } => {
             let mut change = ctx.open_change(&name)?;
             let store = &mut change.store;
@@ -444,12 +553,15 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
                 return Err(format!("{name} already exists; pass --force to replace it"));
             }
             let otp = existing.and_then(|entry| entry.otp.clone());
-            let secret = read_hidden(&format!("Secret for {name}: "), "secret")?;
+            let secret = match &generate {
+                Some(recipe) => generator::password(recipe)?,
+                None => read_hidden(&format!("Secret for {name}: "), "secret")?,
+            };
             let stamp = stamp(store, now);
             store.insert(
                 name,
                 Entry {
-                    secret: Some(secret),
+                    secret: Some(secret.clone()),
                     username,
                     notes,
                     otp,
@@ -457,7 +569,14 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
                 stamp,
             );
             ctx.commit(change)?;
+            if let Some(recipe) = &generate {
+                eprintln!("multipass: {}", generator::strength(recipe));
+                if clip {
+                    deliver(&secret, true)?;
+                }
+            }
         }
+        Command::Generate { .. } => unreachable!("generate opens no store"),
         Command::Get {
             name,
             field,
@@ -1213,6 +1332,8 @@ mod tests {
                 username: Some("octocat".into()),
                 notes: None,
                 force: true,
+                generate: None,
+                clip: false,
             }
         );
         assert_eq!(
@@ -1222,6 +1343,8 @@ mod tests {
                 username: None,
                 notes: Some("hi".into()),
                 force: false,
+                generate: None,
+                clip: false,
             }
         );
         assert_eq!(
@@ -1341,11 +1464,86 @@ mod tests {
             "upgrade --force",
             "upgrade --clip",
             "upgrade --previous 1",
+            "upgrade --generate",
+            "upgrade --words",
             "list --check",
             "get x --check",
         ] {
             assert!(parse(args(bad)).is_err(), "{bad:?} parsed");
         }
+    }
+
+    #[test]
+    fn parses_password_options() {
+        let recipe = |options: generator::Options| options.recipe().unwrap();
+        assert_eq!(
+            run_of("generate"),
+            Command::Generate {
+                recipe: recipe(generator::Options::default()),
+                clip: false,
+            }
+        );
+        assert_eq!(
+            run_of("generate --words --separator=digit --clip"),
+            Command::Generate {
+                recipe: recipe(generator::Options {
+                    words: Some(None),
+                    separator: Some("digit".into()),
+                    ..Default::default()
+                }),
+                clip: true,
+            }
+        );
+        // A count after --words or --pin is taken; anything else is not.
+        assert_eq!(
+            run_of("generate --pin 8"),
+            Command::Generate {
+                recipe: recipe(generator::Options {
+                    pin: Some(Some(8)),
+                    ..Default::default()
+                }),
+                clip: false,
+            }
+        );
+        assert_eq!(
+            run_of("add x --generate --words 6 --capitalize one --clip"),
+            Command::Add {
+                name: "x".into(),
+                username: None,
+                notes: None,
+                force: false,
+                generate: Some(recipe(generator::Options {
+                    words: Some(Some(6)),
+                    capitalize: Some("one".into()),
+                    ..Default::default()
+                })),
+                clip: true,
+            }
+        );
+        assert_eq!(
+            run_of("add --pin x --generate"),
+            Command::Add {
+                name: "x".into(),
+                username: None,
+                notes: None,
+                force: false,
+                generate: Some(Recipe::Pin { length: 6 }),
+                clip: false,
+            }
+        );
+        assert_eq!(
+            run_of("generate --length 32 --no-symbols --exclude abc --no-lookalikes"),
+            Command::Generate {
+                recipe: recipe(generator::Options {
+                    length: Some(32),
+                    no_symbols: true,
+                    exclude: Some("abc".into()),
+                    no_lookalikes: true,
+                    ..Default::default()
+                }),
+                clip: false,
+            }
+        );
     }
 
     #[test]
@@ -1403,6 +1601,19 @@ mod tests {
             "restore x y",
             "restore x --force",
             "restore x --previous 1",
+            "add x --length 10",
+            "add x --words",
+            "get x --generate",
+            "generate --generate",
+            "list --pin",
+            "otp x --no-symbols",
+            "generate --length",
+            "generate --length ten",
+            "generate --no-digits=yes",
+            "generate --words 5 extra",
+            "generate --separator space",
+            "generate --words --pin",
+            "generate --length 3",
         ] {
             assert!(parse(args(bad)).is_err(), "{bad:?} parsed");
         }

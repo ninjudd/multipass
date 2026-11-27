@@ -32,20 +32,20 @@ multipass: PIN, 6 digits: 19.9 bits -- weak for a password you cannot rate-limit
 
 $ multipass add github.com --generate --clip
 multipass: random characters, 20 from 94, each set present: 130.9 bits
-multipass: copied the secret for github.com; the clipboard clears in 30 seconds
+Copied to the clipboard; it clears in 30s
 ```
 
 ### 2.1 How a password is made
 
-1. `parse` reads the kind and its options (§ 2.2), and rejects a combination that cannot make a password, such as `--length 3` with four required character sets, naming the options.
-2. `main.rs` builds a `Recipe`, the kind and its settings. A recipe holds no secret. Per-site rules from `--rules` (§ 2.3) become part of the recipe at this step.
+1. `parse` reads the kind and its options (§ 2.2) into `generator::Options`, and `Options::recipe` in `src/generator.rs` checks them and builds a `Recipe`, the kind and its settings. It rejects a combination that cannot make a password, naming the option, such as `--length must be from 4 to 128`, and it refuses a recipe that keeps fewer than one draw in a million, which would loop for a long time.
+2. The recipe is built before the store opens, so a bad option never asks for the passphrase. A recipe holds no secret. Per-site rules from `--rules` (§ 2.3) become part of the recipe at this step.
 3. `crypto::generate::entropy(&recipe)` computes the strength, which depends only on the recipe, so printing it reveals nothing about the password.
 4. `crypto::generate::password(&recipe)` draws the password:
-   1. It draws each position's index below `n`, the size of that position's alphabet or word list, by rejection sampling. It reads two random bytes from `crypto::random::fill`, keeps the value when it is below the largest multiple of `n` that fits in 16 bits, and otherwise draws again. The kept value modulo `n` is uniform.
-   2. It reads the character or word at that index by scanning the whole alphabet or word list and keeping the match with a mask, so the memory it reads does not depend on the index. A word is copied into a fixed buffer as wide as the longest word, with its length.
+   1. It draws each position's index below `n`, the size of that position's alphabet or word list, by rejection sampling with Lemire's method. It reads a 16-bit value `v` from `crypto::random::fill`, 64 bytes at a time, and multiplies it by `n`. The high 16 bits of the product are the index. When the low 16 bits are below `65536 mod n`, `v` is one of the values that would favor some indexes, so it draws again. The method multiplies rather than divides, because division takes longer for some values on some CPUs.
+   2. It reads the character or word at that index by scanning the whole alphabet or word list and keeping the match with a mask, so the memory it reads does not depend on the index. A word is copied into a slot as wide as the longest word, nine bytes, with its length. Once every word and separator is in place, it moves each real byte to its rank among the real bytes, again by masks, so the padding goes without a branch on any word's length.
    3. When the recipe requires a character set, such as "at least one digit", or limits repeats with `max-consecutive`, it draws the whole password again until the password meets every rule. That keeps the result uniform over the passwords that satisfy the rules.
    4. It returns a fixed-capacity buffer and the password's length.
-5. `main.rs` turns the buffer into a `String` and hands it on. `generate` prints it, or copies it with `--clip`. `add --generate` stores it as the entry's `secret`, and copies it too with `--clip`. Converting to text outside `src/crypto` follows the repository's rule for secrets kept as text, as the store's own parsing and escaping do.
+5. `generator::password` turns the buffer into a `String`, and `main.rs` hands it on. `generate` prints it, or copies it with `--clip`. `add --generate` stores it as the entry's `secret`, and copies it too with `--clip`. Converting to text outside `src/crypto` follows the repository's rule for secrets kept as text, as the store's own parsing and escaping do.
 6. It prints the strength line from step 3 on stderr, so a script that reads stdout gets only the password.
 
 The loops in steps 4.1 and 4.3 decide whether to draw again from a value that is then thrown away. Their timing reveals how many draws were discarded, which says nothing about the draw that was kept. AGENTS.md names this as the second exception to the constant-time rule, beside scrypt's lookups.
@@ -60,11 +60,11 @@ The loops in steps 4.1 and 4.3 decide whether to draw again from a value that is
 | `--exclude <chars>` | random | none | Characters never to use, from any set. |
 | `--no-lookalikes` | random | off | Leaves out characters that are easy to misread: `0 O o 1 l I \|`. |
 | `--rules <rules>` | random | none | A site's password rules, as § 2.3 describes. |
-| `--words <n>` | memorable | `5`, or `6` with `--syllables` | Words, from 3 to 15, the range a guide to 1Password gives (§ 7). The default clears 64 bits either way: 5 words are 64.6 bits, but 5 syllables would be only 54.8, so 6 syllables, 65.8 bits, is the default with `--syllables`. |
+| `--words [<n>]` | memorable | `5`, or `6` with `--syllables` | Words, from 3 to 15, the range a guide to 1Password gives (§ 7). The count may be left out. The default clears 64 bits either way: 5 words are 64.6 bits, but 5 syllables would be only 54.8, so 6 syllables, 65.8 bits, is the default with `--syllables`. |
 | `--separator <sep>` | memorable | `hyphen` | What goes between words: `hyphen`, `space`, `period`, `comma`, `underscore`, `digit`, or `digit-or-symbol`. The last two draw a new random character for each gap. |
 | `--capitalize <which>` | memorable | `none` | `none`, `first` (the first letter of every word), or `one` (the first letter of one randomly chosen word). |
 | `--syllables` | memorable | off | Uses short pronounceable syllables instead of full words (§ 2.4). |
-| `--pin <n>` | PIN | `6` when given alone | Digits, from 4 to 64. |
+| `--pin [<n>]` | PIN | `6` | Digits, from 4 to 64. The count may be left out. |
 
 With no kind option, `generate` and `add --generate` make random characters. An option for another kind is an error, such as `--separator` with `--length`. 1Password's random type has three toggles, letters, numbers, and symbols. Splitting letters into uppercase and lowercase gives sites that require both a way to say so, and each set that is on must appear at least once, as sites that list required characters expect. The strength line counts only the passwords that meet those requirements.
 
@@ -90,10 +90,10 @@ The classes are `upper`, `lower`, `digit`, `special` (ASCII punctuation), `ascii
 
 | List | Entries | Bits each | Source |
 | --- | --- | --- | --- |
-| Full words | 7,776 | 12.9 | The EFF's large word list, `eff_large_wordlist.txt`, under CC BY 3.0 US |
+| Full words | 7,776 | 12.9 | The EFF's large word list, `eff_large_wordlist.txt`, under CC BY 4.0 International |
 | Syllables | 2,000 | 11.0 | Generated in code: a consonant, a vowel, and a consonant, from 20 consonants (all but `q`) and 5 vowels |
 
-The word list ships as `src/crypto/wordlist/eff_large.txt`, compiled in with `include_str!`, without the dice numbers that start each line in the EFF's file. A test pins its SHA-256 and checks that it has 7,776 distinct words of lowercase ASCII letters. The README credits the EFF and names the license, as CC BY requires. 1Password's own word lists are not published, so a memorable password from multipass looks like one from 1Password but comes from a different list.
+The word list ships as `src/crypto/wordlist/eff_large.txt`, compiled in with `include_str!`, without the dice numbers that start each line in the EFF's file. A test pins its SHA-256, `6d557f0693958fb5e650b68b5bee585eb82cf4da32965505c789e924743bc522`, and checks that it has 7,776 distinct words of lowercase ASCII letters and hyphens, at most nine bytes long. Four words hold a hyphen: `drop-down`, `felt-tip`, `t-shirt`, and `yo-yo`. So with the `hyphen` separator a few different draws can produce the same text, such as `drop` and `down` against `drop-down`, which lowers the true strength by far less than the line's one decimal place shows. The EFF's dice page states no license of its own, and EFF's copyright policy (`https://www.eff.org/copyright`) puts its original material under the Creative Commons Attribution 4.0 International license. The README credits the EFF and names that license, as CC BY requires. 1Password's own word lists are not published, so a memorable password from multipass looks like one from 1Password but comes from a different list.
 
 ### 2.5 Strength
 
@@ -107,13 +107,14 @@ The strength line prints `log2` of the number of passwords the recipe can produc
 | Memorable, `w` words | `w × log2(list)`, plus `(w − 1) × log2(10)` for `digit` separators or `(w − 1) × log2(10 + symbols)` for `digit-or-symbol`, plus `log2(w)` for `--capitalize one` |
 | PIN, `n` digits | `n × log2(10)` |
 
-The counts are exact, computed with 256-bit integers in `src/crypto/generate.rs`, because 128 characters from 94 is more than `u128` holds. When the strength is below 64 bits, the line ends with `-- weak for a password you cannot rate-limit`, which a 6-digit PIN always gets, and which is still right for a PIN that a bank's servers rate-limit.
+`crypto::generate::acceptance` computes the share of uniformly drawn strings that meet the requirements and the run limit, by a dynamic program over which requirements are met so far, the current run length, and the set the last character came from. The strength is `n × log2(a)` plus `log2` of that share. Working in shares rather than counts keeps every value between 0 and 1 in an `f64`, where 128 characters from 94, about 840 bits, would overflow any fixed-width integer, and tests check the result against brute-force counts. When the strength is below 64 bits, the line ends with `-- weak for a password you cannot rate-limit`, which a 6-digit PIN always gets, and which is still right for a PIN that a bank's servers rate-limit.
 
 ### 2.6 Changes by file
 
 | File | Change |
 | --- | --- |
-| `src/crypto/generate.rs` | New. `Recipe`, `password(&Recipe) -> Generated`, `entropy(&Recipe) -> f64`, the uniform index draw, the masked table read, and the exact counts. `Generated` holds a fixed buffer and a length. |
+| `src/crypto/generate.rs` | New. `Recipe`, `password(&Recipe) -> Generated`, `entropy(&Recipe) -> f64`, `acceptance`, the uniform index draw, the masked table read, and the exact counts. `Generated` holds a fixed buffer and a length. |
+| `src/generator.rs` | New. `Options`, the options as given; `Options::recipe`, which checks them and builds the recipe; `password`, which turns a drawn buffer into text; and `strength`, the line on stderr. |
 | `src/crypto/wordlist/eff_large.txt` | New. The EFF's large word list, one word per line. |
 | `src/crypto/mod.rs` | Declares `generate`. |
 | `src/generate_rules.rs` | New. Parses `--rules` into the recipe's sets, length bounds, and run limit. |
@@ -143,18 +144,19 @@ The counts are exact, computed with 256-bit integers in `src/crypto/generate.rs`
 | `multipass generate --words 5 --separator digit --capitalize one` | Five EFF words, a digit between each pair, one capitalized, and `80.2 bits` |
 | `multipass generate --pin 6` | Six digits and `19.9 bits` ending in the weak warning |
 | `multipass add x --generate`, then `multipass get x` | `add` prints no password on stdout or stderr. `get` prints a 20-character password. |
-| `multipass add x --generate --clip` in a test, against the private pasteboard | The pasteboard holds the stored secret |
-| `multipass generate --length 3` | Fails, naming `--length` and the four required sets |
+| `multipass add x --generate --clip` | Stores the password, then copies it through `deliver`, the same function `get --clip` uses, whose clipboard tests run against a private pasteboard. The tests do not run this command, because it copies to the real clipboard; the parser test checks that `--clip` reaches `add` only with `--generate`. |
+| `multipass generate --length 3` | Fails with `--length must be from 4 to 128` |
 | `multipass generate --separator space` | Fails: `--separator` needs `--words` |
 | `multipass generate --rules 'required: unicode;'` | Fails, naming `unicode` |
 
 Tests that must fail before the change and pass after it:
 
-- **Uniform draws.** Draw 1,000,000 indexes below 94 with a fixed byte stream fed in place of `/dev/urandom`, and check that no count is off by more than five standard deviations. Catches a draw of one byte modulo `n`, which puts the first 68 counts about 10 percent high. The bias of a 16-bit value modulo `n` is too small for this test to see, which is why the next test exists.
-- **Rejection bounds.** For `n` of 94, 7,776, and 10, a 16-bit value at the largest kept multiple minus one is kept, and the next is drawn again. Catches an off-by-one that keeps one biased value.
-- **Exact counts.** The count of 4-character passwords over `{a, 1}` with both sets required is 14, and over 94 characters with all four sets required matches a brute-force count for length 4. Catches an inclusion and exclusion with a wrong sign, which would misstate strength.
+- **Every 16-bit value maps evenly.** Feeding each of the 65,536 values once, for `n` of 10, 94, 2,000, and 7,776, hits every index exactly `65536 / n` times, rounded down. Catches a plain `v % n`, which hits the first `65536 mod n` indexes once more, a bias too small for a statistical test to see.
+- **Only the remainder is rejected.** Exactly `65536 mod n` values are drawn again, and every kept value maps below `n`. Catches a threshold that rejects too much, which wastes draws, or maps out of range.
+- **Uniform draws.** 1,000,000 indexes below 94, drawn from a fixed SHA-256 stream fed in place of `/dev/urandom`, each land within five standard deviations of the mean. Catches a draw of one byte modulo `n`, which puts the first 68 counts about 10 percent high.
+- **Exact counts.** The count of 4-character passwords over `{a, 1}` with both sets required is 14. Over four small sets of 8 characters in all, with every set required, the strength matches a brute-force count of all 4,096 strings, with no run limit and with limits of 1 and 2. The plan's own figures, 130.9, 64.6, 80.2, 19.9, and 96.6 bits, come out of the code. Catches a count with a wrong term, which would misstate strength.
 - **`max-consecutive`.** The count of 3-character passwords over two characters with at most 2 in a row is 6, and 10,000 drawn passwords never break the limit. Catches a rule checked on the wrong run.
-- **The word list.** The file's SHA-256 matches the pinned digest, and it has 7,776 distinct lowercase words. Catches a truncated or edited list, which would lower the strength the line claims.
+- **The word list.** The file's SHA-256 matches the pinned digest, and it has 7,776 distinct words of lowercase letters and hyphens, at most nine bytes long. Catches a truncated or edited list, which would lower the strength the line claims.
 - **The masked read** returns the same word as plain indexing for every index of the list. Catches a mask that picks the wrong entry.
 - **Rules parsing.** Apple's examples parse to the expected sets and bounds, `unicode` is refused, and unknown properties are refused with their name. Catches a rule that is silently ignored.
 

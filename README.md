@@ -45,6 +45,7 @@ To upgrade, pull the checkout and run `./install.sh` again. A rerun that would i
 ```sh
 multipass init                                   # create ~/.multipass/store.multipass
 multipass add github.com --username octocat      # prompts for the secret
+multipass add example.com --generate --clip      # makes a new password and copies it
 multipass get github.com --clip                  # copies the secret for 30 seconds
 multipass get github.com --field username
 multipass list
@@ -61,7 +62,39 @@ A store from an earlier multipass is a single file, `~/.multipass/store.age`. Th
 
 When a passphrase prompt finds the vault key 14 or more days old, multipass replaces it: it writes a new key file and a new store file, and deletes the old ones. So the key in use is always under 21 days old. When a key replacement, a merge of several store files, or a merge of a change to an old single-file store cannot write to the folder, as in a read-only backup, `get`, `list`, `history` and `otp` still read the store, after a `could not write to <folder>` warning, and commands that save fail with that error before they ask for anything. When neither is due, a read prints no warning, and a command that saves fails with the same error once it saves. `passwd` always replaces the key, so your old passphrase opens nothing written afterwards, and `rekey` replaces it at once, for example when you think someone copied it. Neither reveals or changes your passphrase.
 
-`--clip` on `get` and `otp` copies the value instead of printing it, and clears the clipboard 30 seconds later, unless you have copied something else since. It marks the value as concealed and as this Mac only, so Universal Clipboard does not send it to your other Apple devices, and clipboard-history apps that honor the marking skip it. Until it clears, any app running on this Mac can still read it: the markings only keep it off your other devices and out of the history apps that honor them. `--clip` works only on macOS. Piping to `pbcopy` also works, but `pbcopy` cannot mark the value, so it syncs and lands in clipboard history.
+`--clip` on `get`, `otp`, `generate`, and `add --generate` copies the value instead of printing it, and clears the clipboard 30 seconds later, unless you have copied something else since. It marks the value as concealed and as this Mac only, so Universal Clipboard does not send it to your other Apple devices, and clipboard-history apps that honor the marking skip it. Until it clears, any app running on this Mac can still read it: the markings only keep it off your other devices and out of the history apps that honor them. `--clip` works only on macOS. Piping to `pbcopy` also works, but `pbcopy` cannot mark the value, so it syncs and lands in clipboard history.
+
+## Make new passwords
+
+`multipass generate` prints a new password and stores nothing. `multipass add <name> --generate` makes one and stores it as the entry's secret without printing it; add `--clip` to copy it, so you can paste it into the site's form. Both print the password's strength on stderr, in bits: the base-2 logarithm of how many passwords the options could have produced, each equally likely.
+
+```console
+$ multipass generate
+k7#Rv2!mQe9_Tz4@pLw8
+multipass: random characters, 20 from 94, each set present: 130.9 bits
+
+$ multipass generate --words 5
+oxidize-tattered-flier-rebound-anyone
+multipass: memorable, 5 words from 7,776 with hyphens: 64.6 bits
+
+$ multipass generate --pin 6
+480213
+multipass: PIN, 6 digits: 19.9 bits -- weak for a password you cannot rate-limit
+```
+
+| Option | Default | Effect |
+| --- | --- | --- |
+| `--length <n>` | `20` | Random characters, from 4 to 128. Uppercase letters, lowercase letters, digits, and symbols each appear at least once. |
+| `--no-uppercase`, `--no-lowercase`, `--no-digits`, `--no-symbols` | | Leaves a set out. |
+| `--symbols <chars>` | all 32 ASCII punctuation characters | The symbols to use, for a site that accepts only some. |
+| `--exclude <chars>` | | Characters never to use. |
+| `--no-lookalikes` | | Leaves out `0`, `O`, `o`, `1`, `l`, `I`, and `\|`. |
+| `--words [<n>]` | `5` | Memorable words instead, from 3 to 15, drawn from the EFF's large word list of 7,776 words. |
+| `--separator <sep>` | `hyphen` | With `--words`: `hyphen`, `space`, `period`, `comma`, `underscore`, `digit`, or `digit-or-symbol`. The last two draw a new character for each gap. |
+| `--capitalize <how>` | `none` | With `--words`: `first` capitalizes every word, and `one` capitalizes one word chosen at random. |
+| `--pin [<n>]` | `6` | A PIN instead, from 4 to 64 digits. |
+
+Every character, word, and separator is drawn from `/dev/urandom` without bias, and the strength line counts exactly the passwords that meet the options. A password under 64 bits gets a warning: that is too weak to survive an attacker who can guess offline, though a PIN that a bank's servers rate-limit is still fine.
 
 ## Stay unlocked between commands
 
@@ -186,4 +219,4 @@ If you lose the passphrase, no one can recover the store. That is the point.
 
 ## License
 
-MIT
+MIT. The word list in `src/crypto/wordlist/eff_large.txt` is the [EFF's large word list](https://www.eff.org/dice) by the Electronic Frontier Foundation, with its dice numbers removed, under the [Creative Commons Attribution 4.0 International license](https://creativecommons.org/licenses/by/4.0/) that [EFF's copyright policy](https://www.eff.org/copyright) gives its original material.
