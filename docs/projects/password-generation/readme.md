@@ -166,9 +166,9 @@ A random password takes a few dozen two-byte reads and a scan of a 94-byte alpha
 
 ## 6. Open questions
 
-These wait on the owner. The plan describes the recommended answer to each, and becomes `ready` once all three are answered.
+Question 1 is decided. Questions 2 and 3 wait on the owner. The plan describes the recommended answer to each, and becomes `ready` once both are answered.
 
-1. **The default with no options.** Recommended: random characters, 20 long, all four sets. The alternative is memorable words by default.
+1. **The default with no options.** Decided: random characters, 20 long, from all four sets. Memorable words stay one option away, with `--words`.
 2. **Syllables.** Recommended: include `--syllables`, so the plan covers 1Password's "Use full words" switch when it is off. The alternative is full words only, which keeps one list.
 3. **Per-site rules.** Recommended: both the simple options and `--rules`. The alternative is the simple options only, with `--rules` deferred.
 
