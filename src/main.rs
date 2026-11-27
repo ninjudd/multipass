@@ -269,7 +269,7 @@ fn parse(args: Vec<String>) -> Result<Parsed> {
         return Err("--field only applies to get".into());
     }
     if clip {
-        return Err("--clip only applies to get and otp".into());
+        return Err("--clip only applies to get, and to otp without --set or --clear".into());
     }
     if otp_action.is_some() {
         return Err("--set and --clear only apply to otp".into());
