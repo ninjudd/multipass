@@ -39,7 +39,7 @@ curl -fsSL https://github.com/ninjudd/multipass/releases/latest/download/install
 To pin a release, so a later one cannot change what you run, name its tag in the URL and its version for the installer:
 
 ```sh
-curl -fsSL https://github.com/ninjudd/multipass/releases/download/v0.1.0/install.sh | MULTIPASS_VERSION=0.1.0 bash
+curl -fsSL https://github.com/ninjudd/multipass/releases/download/v0.2.0/install.sh | MULTIPASS_VERSION=0.2.0 bash
 ```
 
 To check the installer before you run it, download it with its attestation bundle and verify it. The bundle makes the check work without a `gh` login:
@@ -67,10 +67,10 @@ curl -fsSL https://getmultipass.dev/install.sh | bash -s -- status      # what i
 curl -fsSL https://getmultipass.dev/install.sh | bash -s -- uninstall   # remove the binary the installer wrote, keeping your stores
 ```
 
-A release is reproducible, so you can check one by building it yourself. `install.sh verify 0.1.0` rebuilds your Mac's slice of that release with the Rust toolchain its build info names, and compares the bytes with the release's binary. It needs [rustup](https://rustup.rs), and the bytes match only with the macOS SDK the release used; when they differ, it names each build-info field that differs on your Mac:
+A release is reproducible, so you can check one by building it yourself. `install.sh verify 0.2.0` rebuilds your Mac's slice of that release with the Rust toolchain its build info names, and compares the bytes with the release's binary. It needs [rustup](https://rustup.rs), and the bytes match only with the macOS SDK the release used; when they differ, it names each build-info field that differs on your Mac:
 
 ```sh
-curl -fsSL https://github.com/ninjudd/multipass/releases/latest/download/install.sh | bash -s -- verify 0.1.0
+curl -fsSL https://github.com/ninjudd/multipass/releases/latest/download/install.sh | bash -s -- verify 0.2.0
 ```
 
 To upgrade a checkout install, pull the checkout and run `./install.sh` again. A rerun that would install the same bytes leaves the file alone. For a copy the installer installed from a release, `multipass upgrade` downloads the newest release's installer with `/usr/bin/curl`, checks its attestation with `gh` when `gh` is installed, and runs it; `multipass upgrade 0.2.0` installs a given release, and `multipass upgrade --check` only says whether a newer release is out. `upgrade` is the only command that reaches the network, and only when you type it. `uninstall` removes only a file that still matches the receipt, so it never deletes a `multipass` you replaced by hand. Set `MULTIPASS_BIN_DIR` to install somewhere other than `~/.local/bin`; a later rerun installs to the same place without it.
