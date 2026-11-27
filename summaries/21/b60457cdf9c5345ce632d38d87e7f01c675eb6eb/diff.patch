@@ -1,0 +1,602 @@
+diff --git a/docs/projects/session-unlock/readme.md b/docs/projects/session-unlock/readme.md
+index abd8d79..3df3b11 100644
+--- a/docs/projects/session-unlock/readme.md
++++ b/docs/projects/session-unlock/readme.md
+@@ -1,5 +1,5 @@
+ ---
+-status: draft
++status: ready
+ priority: now
+ ---
+ 
+@@ -25,7 +25,7 @@ The agent keeps the vault key in protected memory: it denies debugger attachment
+ 
+ Starting a session without being asked, and keeping it for two weeks, is safe only because every request needs your touch (§ 2.8). Without that touch, such a session would let any program running as you read and rewrite the store silently.
+ 
+-This plan stays a draft until the prototype in § 6.5 confirms that the agent can show the Touch ID sheet.
++The prototype in § 6.5 confirmed that an agent detached with `setsid` can show the Touch ID sheet.
+ 
+ ### 2.1 How a session starts
+ 
+@@ -156,7 +156,7 @@ This table assumes the mergeable-store and vault-key plans have shipped, and tha
+ | `src/store.rs` | No new code. The agent builds its one-entry replies with `Store::new`, `insert`, and `to_text(cutoff)`, as the mergeable-store plan's § 2.5 defines them. |
+ | `src/vault.rs` | No new code. The agent lists, merges, compacts, and saves the package through the functions the vault-key plan adds, given the keys it holds. |
+ | `src/agent.rs` | New. The agent half: reads the start message from stdin, binds the socket, answers `read`, `list`, `edit` and `save`, `status`, and `lock` on a thread per connection, enforces the one-entry rule on `save`, checks its executable's identity on each request, ends the session as § 2.9 says, and writes the end note. It asks for approval through an `Approver` trait, which `touch_id::TouchId` implements and tests replace with a fake. The client half: `read`, `list`, `edit`, `status`, `lock`, `end_note`, and `start`, which spawns an agent and writes the start message. The socket path, the end note's path, and the directory check live here, shared by both halves. |
+-| `src/touch_id.rs` | New `unsafe` module. Links `LocalAuthentication.framework`, and wraps `canEvaluatePolicy:error:`, `evaluatePolicy:localizedReason:reply:`, and `invalidate` in a safe `TouchId::available()` and `TouchId::approve(reason, timeout) -> Approval`, where `Approval` is `Approved`, `Denied`, or `Unavailable`. |
++| `src/touch_id.rs` | New `unsafe` module, built from the prototype in `touch-id-prototype/probe.rs` (§ 6.5). Loads `LocalAuthentication.framework` with `dlopen` the first time a command needs approval, as `src/clipboard.rs` loads AppKit, so no other command has it in its process, and wraps `canEvaluatePolicy:error:`, `evaluatePolicy:localizedReason:reply:`, and `invalidate` in a safe `TouchId::available()` and `TouchId::approve(reason, timeout) -> Approval`, where `Approval` is `Approved`, `Denied`, or `Unavailable`. |
+ | `src/objc.rs` | New `unsafe` module. The typed `objc_msgSend`, class, selector, and `NSString` helpers move here from `src/clipboard.rs`, so the clipboard and Touch ID share one copy, and it adds the global block that carries `evaluatePolicy`'s reply. |
+ | `src/clipboard.rs` | Calls the helpers in `src/objc.rs` instead of defining its own. Its module comment stops calling it the program's only `unsafe` code. |
+ | `src/sys.rs` | New `unsafe` module, built like `src/clipboard.rs`: `unsafe extern "C"` declarations for `getuid`, `getpeereid`, `getsockopt(LOCAL_PEERPID)`, `proc_pidpath`, `setsid`, `ptrace(PT_DENY_ATTACH)`, `setrlimit(RLIMIT_CORE)`, and `mlock`, behind safe wrappers, plus `wipe(&mut [u8])`, which zeroes with volatile writes. All under `#[cfg(target_os = "macos")]`. The standard library offers no stable call for any of them at `rust-version = "1.85"`. |
+@@ -237,7 +237,7 @@ An approved request costs one touch, about a second of your time, plus one socke
+ 
+ ## 6. Open questions
+ 
+-Only § 6.5 is open, and it waits on a prototype. Questions 6.1 to 6.4 are decided, and § 2 is written for those decisions.
++Questions 6.1 to 6.5 are decided, and § 2 is written for those decisions. § 6.5 also names two cases that the implementation checks by hand.
+ 
+ ### 6.1 What the agent holds
+ 
+@@ -257,7 +257,28 @@ Decided: on demand, with automatic restart. Any command that has to ask for the
+ 
+ ### 6.5 Touch ID from the detached agent
+ 
+-The agent calls `setsid` and runs without a terminal. Whether LocalAuthentication shows its sheet for such a process, started from a command in your login session, and whether `canEvaluatePolicy` fails cleanly for one started where no one can touch the sensor, is unverified. Owner: the implementer, with a prototype of `src/touch_id.rs` before this plan goes `ready`. If the sheet does not appear for a detached process, the agent skips `setsid` and the implementer records what closing the terminal then does. The vault-key plan does not wait on this.
++Decided by a prototype the owner ran: LocalAuthentication shows its Touch ID sheet for an agent that called `setsid`, runs with no controlling terminal, and was orphaned to launchd, when a command in your login session started it. So the agent keeps `setsid`, as § 2.1 describes, and the fallback of keeping only a process group of its own is not needed.
++
++The prototype is `touch-id-prototype/probe.rs`, beside this plan, one file built with `rustc` outside the crate. It is the shape `src/touch_id.rs` takes: LocalAuthentication loaded with `dlopen`, `LAContext` called through typed `objc_msgSend` pointers, and the reply carried by a global block built by hand, with no captured variables, that hands the result to the waiting thread through a `std::sync::mpsc` channel. `touch-id-prototype/run.sh` builds it and runs the sheet test.
++
++What it showed on an Apple silicon Mac with Touch ID, on macOS 27.0.1, in November 2026:
++
++| Check | Result |
++| --- | --- |
++| `evaluatePolicy` for `LAPolicyDeviceOwnerAuthenticationWithBiometricsOrWatch` (value 4), run from Terminal | The sheet appeared, and a touch approved it after 2.4 seconds |
++| The same from a child that called `setsid` and was orphaned to launchd, with stdin, stdout, and stderr on `/dev/null` | The sheet appeared, and a touch approved it after 1.4 seconds. The child led its own session, `/dev/tty` did not open, and `launchctl managername` still printed `Aqua`, because `setsid` leaves the launchd session alone. |
++| The same from a child with only its own process group, orphaned to launchd | The sheet appeared, and a touch approved it after 1.1 seconds |
++| `canEvaluatePolicy` for policy 4, attached and from both kinds of child | Succeeds, and `biometryType` is Touch ID |
++| The watch policy alone (value 3), with no watch paired | Fails cleanly with `LAErrorWatchNotAvailable` (-11), "No companion device was discovered" |
++| `evaluatePolicy` with `interactionNotAllowed` set, attached and from the `setsid` child | The hand-built block receives the reply in 16 ms with `LAErrorNotInteractive` (-1004), and no sheet appears |
++
++macOS 15 renamed policy 4 `LAPolicyDeviceOwnerAuthenticationWithBiometricsOrCompanion` and error -11 `LAErrorCompanionNotAvailable`, with the same values, so the plan's names still name the right policy and error.
++
++Three cases stay unverified. None of them can expose the store, because each one fails toward a denied request or a passphrase prompt, so none holds the plan in draft. The implementation checks the first two by hand before its pull request is handed over:
++
++- **The terminal closed.** The owner has not run this test yet: a request after you close the Terminal window that started the agent. `setsid` keeps the window's hangup signal from reaching the agent, so the agent keeps running. If LocalAuthentication then refuses to show the sheet, or shows none, the request ends as § 2.8 says for a cancelled or unanswered touch: the agent replies `denied` and exits, the command fails, and the next command asks for the passphrase. `run.sh close` runs this test from a child that called `setsid`, as the agent does.
++- **SSH.** Nobody has yet tested `canEvaluatePolicy` from an SSH login, which runs outside the `Aqua` session. § 2.1 step 3 already starts no agent when `SSH_CONNECTION` is set, so an ordinary SSH login never reaches the check. The hand check covers a login that does not set it, such as a shell whose environment was cleared. § 6.4 assumes `canEvaluatePolicy` fails there, so no agent starts and every command prompts. If it succeeds instead, an agent started that way would show its sheet on the Mac's own screen, and each request would wait 60 seconds and then end the session as denied. In that case § 2.1 step 3 also starts no agent when `launchctl managername` does not print `Aqua`, which keeps § 6.4's behavior.
++- **An Apple Watch approval.** No watch was paired, so only Touch ID was tested. A watch out of reach leaves the request `unavailable`, and the command asks for the passphrase. A watch in reach that nobody answers for 60 seconds is `denied` and ends the session, as § 2.8 says.
+ 
+ ## 7. Background
+ 
+diff --git a/docs/projects/session-unlock/touch-id-prototype/probe.rs b/docs/projects/session-unlock/touch-id-prototype/probe.rs
+new file mode 100644
+index 0000000..ee4647c
+--- /dev/null
++++ b/docs/projects/session-unlock/touch-id-prototype/probe.rs
+@@ -0,0 +1,458 @@
++//! Prototype for the session-unlock plan, § 6.5: does LocalAuthentication
++//! show its Touch ID sheet for a process that has left the terminal's
++//! session, as the agent will?
++//!
++//! This is the shape `src/touch_id.rs` takes in § 2.11: LocalAuthentication
++//! loaded with `dlopen`, as `src/clipboard.rs` loads AppKit, `LAContext`
++//! called through typed `objc_msgSend` pointers, and the reply delivered by
++//! a global block built by hand, which hands the result to the waiting
++//! thread through a channel. It is one file built with `rustc`, outside the
++//! crate, so it adds nothing to multipass's build.
++//!
++//! ```text
++//! probe can                         canEvaluatePolicy for each policy
++//! probe evaluate <reason>           evaluatePolicy, attached to the terminal
++//! probe noui                        evaluatePolicy with interaction not allowed,
++//!                                   which fails through the reply block with
++//!                                   no sheet, to test the block safely
++//! probe spawn setsid|group <mode> <out> [<reason>]
++//!                                   start a detached copy that runs <mode>
++//!                                   (can, evaluate, or noui) and writes to <out>,
++//!                                   then exit at once, as the CLI will
++//! ```
++//!
++//! `spawn setsid` puts the child in a new session with no controlling
++//! terminal, as the agent will. `spawn group` only gives it its own process
++//! group, as `src/clipboard.rs` does for the clearing process, which is the
++//! plan's fallback if `setsid` loses the sheet.
++
++use std::ffi::{CStr, c_char, c_int, c_void};
++use std::io::Write;
++use std::sync::Mutex;
++use std::sync::mpsc;
++use std::time::{Duration, Instant};
++
++type Id = *mut c_void;
++type Sel = *mut c_void;
++
++/// `LAPolicyDeviceOwnerAuthenticationWithBiometricsOrWatch`, which macOS 15
++/// renamed `...WithBiometricsOrCompanion` with the same value.
++const POLICY_BIOMETRICS_OR_WATCH: isize = 4;
++const POLICIES: [(isize, &str); 4] = [
++    (1, "WithBiometrics"),
++    (
++        2,
++        "DeviceOwnerAuthentication (falls back to the login password)",
++    ),
++    (3, "WithWatch (WithCompanion)"),
++    (
++        4,
++        "WithBiometricsOrWatch (WithBiometricsOrCompanion), the plan's policy",
++    ),
++];
++const TIMEOUT: Duration = Duration::from_secs(60);
++
++const LOCAL_AUTHENTICATION: &CStr =
++    c"/System/Library/Frameworks/LocalAuthentication.framework/LocalAuthentication";
++const RTLD_LAZY: c_int = 1;
++const NS_UTF8_STRING_ENCODING: usize = 4;
++/// `BLOCK_IS_GLOBAL` from the block ABI: the runtime never copies or frees
++/// the block, which suits one that captures nothing and lives forever.
++const BLOCK_IS_GLOBAL: i32 = 1 << 28;
++
++// From libSystem, which every macOS program links.
++unsafe extern "C" {
++    fn dlopen(path: *const c_char, mode: c_int) -> *mut c_void;
++    fn dlerror() -> *mut c_char;
++    fn setsid() -> c_int;
++    fn getsid(pid: c_int) -> c_int;
++    fn getpid() -> c_int;
++    fn getppid() -> c_int;
++    /// The block runtime's class for global blocks; only its address is used.
++    static _NSConcreteGlobalBlock: *const c_void;
++}
++
++#[link(name = "objc")]
++unsafe extern "C" {
++    fn objc_getClass(name: *const c_char) -> Id;
++    fn sel_registerName(name: *const c_char) -> Sel;
++    fn objc_msgSend();
++    fn objc_autoreleasePoolPush() -> *mut c_void;
++    fn objc_autoreleasePoolPop(pool: *mut c_void);
++}
++
++// `objc_msgSend` must be called through a pointer of the method's exact
++// type, because on Apple silicon a variadic call passes arguments in
++// different registers than the method expects. Each caller must pass a
++// receiver that responds to the selector with exactly these argument and
++// return types.
++unsafe fn send<R>(receiver: Id, selector: &CStr) -> R {
++    let f: unsafe extern "C" fn(Id, Sel) -> R =
++        unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
++    unsafe { f(receiver, sel_registerName(selector.as_ptr())) }
++}
++
++unsafe fn send1<A, R>(receiver: Id, selector: &CStr, a: A) -> R {
++    let f: unsafe extern "C" fn(Id, Sel, A) -> R =
++        unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
++    unsafe { f(receiver, sel_registerName(selector.as_ptr()), a) }
++}
++
++unsafe fn send2<A, B, R>(receiver: Id, selector: &CStr, a: A, b: B) -> R {
++    let f: unsafe extern "C" fn(Id, Sel, A, B) -> R =
++        unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
++    unsafe { f(receiver, sel_registerName(selector.as_ptr()), a, b) }
++}
++
++unsafe fn send3<A, B, C, R>(receiver: Id, selector: &CStr, a: A, b: B, c: C) -> R {
++    let f: unsafe extern "C" fn(Id, Sel, A, B, C) -> R =
++        unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
++    unsafe { f(receiver, sel_registerName(selector.as_ptr()), a, b, c) }
++}
++
++fn load() -> Result<(), String> {
++    // `dlopen` takes a NUL-terminated path. `dlerror` returns null or a
++    // NUL-terminated message valid until the next `dl` call on this thread,
++    // so it is copied at once.
++    let handle = unsafe { dlopen(LOCAL_AUTHENTICATION.as_ptr(), RTLD_LAZY) };
++    if !handle.is_null() {
++        return Ok(());
++    }
++    let reason = unsafe {
++        let message = dlerror();
++        if message.is_null() {
++            "unknown error".to_string()
++        } else {
++            CStr::from_ptr(message).to_string_lossy().into_owned()
++        }
++    };
++    Err(format!("could not load LocalAuthentication: {reason}"))
++}
++
++fn with_pool<T>(f: impl FnOnce() -> T) -> T {
++    let pool = unsafe { objc_autoreleasePoolPush() };
++    let result = f();
++    unsafe { objc_autoreleasePoolPop(pool) };
++    result
++}
++
++/// A new `LAContext`, owned by the caller, who must release it.
++unsafe fn new_context() -> Id {
++    unsafe {
++        let class = objc_getClass(c"LAContext".as_ptr());
++        let allocated: Id = send(class, c"alloc");
++        send(allocated, c"init")
++    }
++}
++
++/// An `NSString` holding `s`, owned by the caller, who must release it.
++unsafe fn new_string(s: &str) -> Id {
++    unsafe {
++        let class = objc_getClass(c"NSString".as_ptr());
++        let allocated: Id = send(class, c"alloc");
++        send3(
++            allocated,
++            c"initWithBytes:length:encoding:",
++            s.as_ptr().cast::<c_void>(),
++            s.len(),
++            NS_UTF8_STRING_ENCODING,
++        )
++    }
++}
++
++unsafe fn release(object: Id) {
++    unsafe { send::<()>(object, c"release") }
++}
++
++/// The code and description of an `NSError`, which must be null or a valid
++/// `NSError` for the length of the call.
++unsafe fn describe(error: Id) -> (isize, String) {
++    if error.is_null() {
++        return (0, String::new());
++    }
++    unsafe {
++        let code: isize = send(error, c"code");
++        let text: Id = send(error, c"localizedDescription");
++        let utf8: *const c_char = if text.is_null() {
++            std::ptr::null()
++        } else {
++            send(text, c"UTF8String")
++        };
++        let text = if utf8.is_null() {
++            String::new()
++        } else {
++            CStr::from_ptr(utf8).to_string_lossy().into_owned()
++        };
++        (code, text)
++    }
++}
++
++fn error_name(code: isize) -> &'static str {
++    match code {
++        0 => "",
++        -1 => "LAErrorAuthenticationFailed",
++        -2 => "LAErrorUserCancel",
++        -3 => "LAErrorUserFallback",
++        -4 => "LAErrorSystemCancel",
++        -5 => "LAErrorPasscodeNotSet",
++        -6 => "LAErrorBiometryNotAvailable",
++        -7 => "LAErrorBiometryNotEnrolled",
++        -8 => "LAErrorBiometryLockout",
++        -9 => "LAErrorAppCancel",
++        -10 => "LAErrorInvalidContext",
++        -11 => "LAErrorWatchNotAvailable (CompanionNotAvailable)",
++        -12 => "LAErrorBiometryNotPaired",
++        -13 => "LAErrorBiometryDisconnected",
++        -14 => "LAErrorInvalidDimensions",
++        -1004 => "LAErrorNotInteractive",
++        _ => "unknown",
++    }
++}
++
++fn biometry_name(kind: isize) -> &'static str {
++    match kind {
++        0 => "none",
++        1 => "Touch ID",
++        2 => "Face ID",
++        4 => "Optic ID",
++        _ => "unknown",
++    }
++}
++
++fn can() -> Result<String, String> {
++    load()?;
++    let mut out = String::new();
++    with_pool(|| unsafe {
++        let context = new_context();
++        for (policy, name) in POLICIES {
++            // `canEvaluatePolicy:error:` takes an `NSInteger` policy and an
++            // `NSError **`, and returns a `BOOL`, one byte on both
++            // architectures. The error it writes is autoreleased, so the
++            // pool frees it.
++            let mut error: Id = std::ptr::null_mut();
++            let ok: u8 = send2(
++                context,
++                c"canEvaluatePolicy:error:",
++                policy,
++                &mut error as *mut Id,
++            );
++            let (code, text) = describe(error);
++            if ok != 0 {
++                out.push_str(&format!("can-evaluate   policy {policy} {name}: yes\n"));
++            } else {
++                out.push_str(&format!(
++                    "can-evaluate   policy {policy} {name}: no, {code} {} ({text})\n",
++                    error_name(code)
++                ));
++            }
++        }
++        // `biometryType` is set only after a `canEvaluatePolicy` call.
++        let kind: isize = send(context, c"biometryType");
++        out.push_str(&format!("biometry       {}\n", biometry_name(kind)));
++        release(context);
++    });
++    Ok(out)
++}
++
++/// What `evaluatePolicy`'s reply carried: success, and the error's code and
++/// description when it failed.
++type Reply = (bool, isize, String);
++
++/// Where the reply block sends its result. The block captures nothing, so
++/// the one waiting request leaves its sender here.
++static REPLY: Mutex<Option<mpsc::Sender<Reply>>> = Mutex::new(None);
++
++#[repr(C)]
++struct BlockDescriptor {
++    reserved: usize,
++    size: usize,
++}
++
++/// A block literal laid out as the block ABI defines it.
++#[repr(C)]
++struct Block {
++    isa: *const c_void,
++    flags: i32,
++    reserved: i32,
++    invoke: unsafe extern "C" fn(*const Block, u8, Id),
++    descriptor: *const BlockDescriptor,
++}
++
++/// The reply block's body. LocalAuthentication calls it once, on a queue of
++/// its own, with the block, a `BOOL`, and a null or valid `NSError`.
++unsafe extern "C" fn on_reply(_block: *const Block, success: u8, error: Id) {
++    let (code, text) = with_pool(|| unsafe { describe(error) });
++    if let Some(sender) = REPLY.lock().unwrap().take() {
++        let _ = sender.send((success != 0, code, text));
++    }
++}
++
++/// The reply block, built once and never freed, as a global block must be.
++fn reply_block() -> *const Block {
++    static DESCRIPTOR: BlockDescriptor = BlockDescriptor {
++        reserved: 0,
++        size: std::mem::size_of::<Block>(),
++    };
++    let block = Box::new(Block {
++        isa: (&raw const _NSConcreteGlobalBlock).cast(),
++        flags: BLOCK_IS_GLOBAL,
++        reserved: 0,
++        invoke: on_reply,
++        descriptor: &DESCRIPTOR,
++    });
++    Box::leak(block)
++}
++
++fn evaluate(reason: &str, interactive: bool) -> Result<String, String> {
++    load()?;
++    let (sender, receiver) = mpsc::channel();
++    *REPLY.lock().unwrap() = Some(sender);
++    let started = Instant::now();
++    let context = unsafe { new_context() };
++    if !interactive {
++        // `setInteractionNotAllowed:` takes a `BOOL`. With `YES` the evaluation
++        // fails with LAErrorNotInteractive through the reply block instead of
++        // showing a sheet, which tests the block without asking for a touch.
++        unsafe { send1::<u8, ()>(context, c"setInteractionNotAllowed:", 1) };
++    }
++    with_pool(|| unsafe {
++        let text = new_string(reason);
++        // `evaluatePolicy:localizedReason:reply:` takes an `NSInteger`, an
++        // `NSString`, which it copies, and a block it calls exactly once.
++        send3::<isize, Id, *const Block, ()>(
++            context,
++            c"evaluatePolicy:localizedReason:reply:",
++            POLICY_BIOMETRICS_OR_WATCH,
++            text,
++            reply_block(),
++        );
++        release(text);
++    });
++    let result = match receiver.recv_timeout(TIMEOUT) {
++        Ok((true, _, _)) => format!(
++            "evaluate       approved after {} ms\n",
++            started.elapsed().as_millis()
++        ),
++        Ok((false, code, text)) => format!(
++            "evaluate       refused after {} ms: {code} {} ({text})\n",
++            started.elapsed().as_millis(),
++            error_name(code)
++        ),
++        Err(_) => {
++            // `invalidate` cancels the pending evaluation; the reply then
++            // arrives with LAErrorAppCancel, which this waits for briefly.
++            unsafe { send::<()>(context, c"invalidate") };
++            let late = receiver.recv_timeout(Duration::from_secs(5));
++            format!(
++                "evaluate       timeout: no answer in {} s, invalidated; late reply {late:?}\n",
++                TIMEOUT.as_secs()
++            )
++        }
++    };
++    unsafe { release(context) };
++    Ok(result)
++}
++
++fn session_report() -> String {
++    let (pid, sid, ppid) = unsafe { (getpid(), getsid(0), getppid()) };
++    let tty = match std::fs::File::open("/dev/tty") {
++        Ok(_) => "opens".to_string(),
++        Err(e) => format!("does not open ({e})"),
++    };
++    let manager = std::process::Command::new("/bin/launchctl")
++        .arg("managername")
++        .output()
++        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
++        .unwrap_or_else(|e| format!("unknown ({e})"));
++    format!(
++        "process        pid {pid}, session {sid}{}, parent {ppid}\n\
++         tty            /dev/tty {tty}\n\
++         launchd        {manager} session\n",
++        if sid == pid { " (its own)" } else { "" }
++    )
++}
++
++fn run(mode: &str, reason: &str) -> Result<String, String> {
++    let mut out = session_report();
++    out.push_str(&match mode {
++        "can" => can()?,
++        "evaluate" => evaluate(reason, true)?,
++        "noui" => evaluate(reason, false)?,
++        other => return Err(format!("unknown mode {other}")),
++    });
++    Ok(out)
++}
++
++fn spawn(how: &str, mode: &str, out: &str, reason: &str) -> Result<(), String> {
++    use std::os::unix::process::CommandExt;
++    use std::process::{Command, Stdio};
++    let mut command = Command::new(std::env::current_exe().map_err(|e| e.to_string())?);
++    command
++        .args(["__child", how, mode, out, reason])
++        .stdin(Stdio::null())
++        .stdout(Stdio::null())
++        .stderr(Stdio::null());
++    match how {
++        // `setsid` is async-signal-safe and takes no arguments, so it may run
++        // between `fork` and `exec`. It fails only for a group leader, which
++        // a freshly forked child never is.
++        "setsid" => unsafe {
++            command.pre_exec(|| {
++                if setsid() < 0 {
++                    return Err(std::io::Error::last_os_error());
++                }
++                Ok(())
++            });
++        },
++        "group" => {
++            command.process_group(0);
++        }
++        other => return Err(format!("unknown spawn {other}; use setsid or group")),
++    }
++    let child = command.spawn().map_err(|e| e.to_string())?;
++    println!("spawned        pid {} ({how}), writing {out}", child.id());
++    Ok(())
++}
++
++fn main() -> std::process::ExitCode {
++    let args: Vec<String> = std::env::args().skip(1).collect();
++    let args: Vec<&str> = args.iter().map(String::as_str).collect();
++    let default_reason = "test the multipass session-unlock prototype";
++    let result = match args.as_slice() {
++        ["can"] => run("can", "").map(|s| print!("{s}")),
++        ["evaluate"] => run("evaluate", default_reason).map(|s| print!("{s}")),
++        ["evaluate", reason] => run("evaluate", reason).map(|s| print!("{s}")),
++        ["noui"] => run("noui", default_reason).map(|s| print!("{s}")),
++        ["spawn", how, mode, out] => spawn(how, mode, out, default_reason),
++        ["spawn", how, mode, out, reason] => spawn(how, mode, out, reason),
++        ["__child", how, mode, out, reason] => {
++            // Give the parent time to exit, so the child runs orphaned, as
++            // the agent will once the command that started it returns.
++            // `PROBE_DELAY` seconds, when set, leave time to close the
++            // terminal first.
++            let delay = std::env::var("PROBE_DELAY")
++                .ok()
++                .and_then(|s| s.parse::<u64>().ok())
++                .map_or(Duration::from_millis(500), Duration::from_secs);
++            std::thread::sleep(delay);
++            let text = match run(mode, reason) {
++                Ok(s) => format!("spawn          {how}\n{s}"),
++                Err(e) => format!("spawn          {how}\nerror          {e}\n"),
++            };
++            let written = std::fs::File::create(out)
++                .and_then(|mut f| f.write_all(format!("{text}done\n").as_bytes()));
++            written.map_err(|e| e.to_string())
++        }
++        _ => Err(
++            "usage: probe can | evaluate [<reason>] | spawn setsid|group can|evaluate|noui <out> [<reason>]"
++                .to_string(),
++        ),
++    };
++    match result {
++        Ok(()) => std::process::ExitCode::SUCCESS,
++        Err(e) => {
++            eprintln!("probe: {e}");
++            std::process::ExitCode::FAILURE
++        }
++    }
++}
+diff --git a/docs/projects/session-unlock/touch-id-prototype/run.sh b/docs/projects/session-unlock/touch-id-prototype/run.sh
+new file mode 100755
+index 0000000..bbf712a
+--- /dev/null
++++ b/docs/projects/session-unlock/touch-id-prototype/run.sh
+@@ -0,0 +1,64 @@
++#!/bin/bash
++# Runs the session-unlock § 6.5 Touch ID test: three Touch ID requests, one
++# attached to this terminal and two from detached processes, as the agent
++# will be. Run it from Terminal on a Mac with Touch ID, and touch the sensor
++# each time a sheet appears.
++#
++#   run.sh            the three requests
++#   run.sh close      the closing-the-terminal test, from a setsid child as the
++#                     agent runs, which needs you to close this terminal window
++#                     within 15 seconds
++#
++# It builds the probe with rustc into the repository's target directory and
++# writes the detached results beside it. It touches nothing else.
++set -euo pipefail
++
++here=$(cd "$(dirname "$0")" && pwd)
++root=$(cd "$here/../../../.." && pwd)
++out="$root/target/touch-id-prototype"
++probe="$out/probe"
++mkdir -p "$out"
++rustc --edition 2024 -O "$here/probe.rs" -o "$probe"
++
++wait_for() {
++  local file=$1
++  for _ in $(seq 1 150); do
++    if [ -f "$file" ] && grep -q '^done$' "$file"; then
++      cat "$file"
++      return 0
++    fi
++    sleep 0.5
++  done
++  echo "no result in $file after 75 seconds"
++  return 1
++}
++
++detached() {
++  local how=$1 reason=$2 file="$out/evaluate-$1.txt"
++  rm -f "$file"
++  "$probe" spawn "$how" evaluate "$file" "$reason"
++  wait_for "$file"
++}
++
++if [ "${1:-}" = close ]; then
++  file="$out/evaluate-close.txt"
++  rm -f "$file"
++  PROBE_DELAY=15 "$probe" spawn setsid evaluate "$file" "test after closing the terminal"
++  echo
++  echo "Close this terminal window now. In 15 seconds a sheet should ask to"
++  echo "\"test after closing the terminal\". Touch the sensor, then open a new"
++  echo "terminal and run:  cat $file"
++  exit 0
++fi
++
++echo "== 1 of 3: attached to this terminal"
++echo "A sheet should ask to \"test attached to the terminal\". Touch the sensor."
++"$probe" evaluate "test attached to the terminal"
++echo
++echo "== 2 of 3: detached with setsid, in a session of its own"
++echo "A sheet should ask to \"test from a detached session\". Touch the sensor."
++detached setsid "test from a detached session"
++echo
++echo "== 3 of 3: detached in its own process group only"
++echo "A sheet should ask to \"test from a detached process group\". Touch the sensor."
++detached group "test from a detached process group"
