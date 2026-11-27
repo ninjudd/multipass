@@ -1,0 +1,136 @@
+{
+ "version": 1,
+ "name": "Installer and releases",
+ "project": "installer",
+ "pr": {
+  "repo": "ninjudd/multipass",
+  "number": 29,
+  "title": "Upgrade an installed multipass with multipass upgrade",
+  "head": "debacd7e5e8875dc838b6a97ec44c35c8607f6ef",
+  "headRef": "installer-upgrade",
+  "base": "ec5f3c07feee60c4fed8a21a3d70c94e443e53e4",
+  "baseRef": "installer-release",
+  "basePr": 28
+ },
+ "overview": {
+  "summary": [
+   "multipass is a password manager with no network code and no dependencies. The layers below this one add <code>install.sh</code>, which installs a tagged release into <code>~/.local/bin</code> and records what it installed in a receipt, and a release workflow that attests the binary and the installer. This pull request adds <code>multipass upgrade</code>, so someone who installed a release can upgrade it without finding and rerunning the installer by hand.",
+   "<code>upgrade</code> does not download or replace the binary itself. It downloads the released <code>install.sh</code> with <code>/usr/bin/curl</code> into a private temporary directory. When <code>gh</code> is installed, it checks the script's attestation against the release's Sigstore bundle. Then it runs the script with <code>/bin/bash</code>, so an upgrade gets exactly the installer's own checks and its atomic rename. <code>upgrade --check</code> only reports whether a newer release is out.",
+   "<ol><li><b>It refuses a copy the installer did not install.</b> The receipt must name the running executable, and a checkout install is sent back to its checkout.</li><li><b>It checks the installer before running it.</b> The bundle comes straight from the GitHub release, so the script must match that release's attestation. If a release is published between the two downloads, the check fails instead of passing.</li><li><b>It runs the installer</b> with <code>MULTIPASS_BIN_DIR</code> set to the receipt's directory, plus <code>MULTIPASS_VERSION</code> when you name a version, and passes the installer's exit status through.</li></ol>",
+   "The review found one problem: <code>upgrade --check</code> orders a prerelease such as <code>1.0.0-rc.1</code> above its own final release, <code>1.0.0</code>."
+  ],
+  "cards": [
+   {
+    "id": "terms",
+    "title": "Terms",
+    "html": "<ul class=\"tight\"><li><b>Receipt</b>: the <code>key value</code> file the installer writes under <code>${XDG_DATA_HOME:-~/.local/share}/multipass-install/</code>, recording the version, the install method, and the installed path.</li><li><b>Bundle</b>: <code>multipass.sigstore.json</code>, the release asset that holds the signed build attestation for the binary and <code>install.sh</code>. With it, <code>gh attestation verify</code> needs no login.</li><li><b>Release version</b>: three dot-separated numbers with an optional <code>-</code> suffix, such as <code>0.2.0</code> or <code>1.0.0-rc.1</code>.</li></ul>"
+   },
+   {
+    "id": "stack",
+    "title": "Where this sits",
+    "html": "<p>This is the top layer of a stack. It sits on the release workflow and <code>install.sh verify</code> (#28), which sits on <code>install.sh</code> (#27). This page shows only this layer's diff. The design is the installer plan, § 2.3.</p>"
+   }
+  ]
+ },
+ "groups": [
+  {
+   "id": "upgrade",
+   "title": "The upgrade module",
+   "kicker": "How upgrade finds the install, fetches and checks the installer, and runs it",
+   "intro": [
+    "<code>src/upgrade.rs</code> holds all of <code>upgrade</code>'s behavior. It takes a <code>Tools</code> value that names the programs to run, the URLs, the receipt, and the running executable. <code>Tools::system</code> fills it with the real paths, and the tests fill it with fake shell scripts in a temporary directory, so no test reaches the network.",
+    "The code starts every program by absolute path with a separate argv entry for each argument, so no shell ever parses a URL or a version. A version must pass <code>release_version</code> before it reaches a URL."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": "src/upgrade.rs",
+     "note": "New. The upgrade and check logic, with tests that run it against fake curl, gh, and bash scripts.",
+     "checks": [
+      {
+       "kind": "context",
+       "text": "<code>gh</code> is the first executable found on <code>PATH</code>, skipping relative entries. <code>curl</code> and <code>bash</code> are fixed paths.",
+       "line": 56
+      },
+      {
+       "kind": "verify",
+       "text": "These arguments match the installer plan's § 2.3 step 3 exactly. The unit test <code>runs_the_checked_installer_and_passes_its_status_through</code> asserts the full command line.",
+       "line": 127
+      },
+      {
+       "kind": "context",
+       "text": "When the attestation fails, this message says the release workflow did not build the installer. A release published between the two downloads, or a <code>gh</code> too old for these flags, fails here too. The review suggests saying so.",
+       "line": 145
+      },
+      {
+       "kind": "context",
+       "text": "The installer inherits the rest of the environment, so an exported <code>MULTIPASS_VERSION</code> still reaches it when no version is named. The review suggests removing it in that case.",
+       "line": 158
+      },
+      {
+       "kind": "flag",
+       "text": "<code>compare</code> breaks a tie on equal numbers by comparing the text, so <code>1.0.0</code> sorts below <code>1.0.0-rc.1</code>. <code>upgrade --check</code> then tells someone running the rc that it is newer than the final release, and exits 0. A prerelease should order below its final release, as SemVer orders them.",
+       "line": 216
+      },
+      {
+       "kind": "verify",
+       "text": "With no receipt, and with a receipt naming another file, a debug build in a temporary <code>HOME</code> exited 69 with this message and downloaded nothing.",
+       "line": 229
+      },
+      {
+       "kind": "context",
+       "text": "The receipt is read by the same rule as the installer's <code>receipt_get</code>, the first <code>key value</code> line whose key matches. Paths are compared after canonicalizing both.",
+       "line": 237
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cli",
+   "title": "The command line",
+   "kicker": "Parsing upgrade, its version, and --check, and keeping them apart from store commands",
+   "intro": [
+    "<code>main.rs</code> gives <code>upgrade</code> its own <code>Parsed</code> variant rather than a <code>Command</code>, because it opens no store and so takes no store path. Parsing refuses any store option with <code>upgrade</code>, a version together with <code>--check</code>, and <code>--check</code> on any other command."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": "src/main.rs",
+     "note": "Adds the upgrade command to parsing, USAGE, and main, with parsing tests.",
+     "checks": [
+      {
+       "kind": "context",
+       "text": "<code>upgrade</code> returns its own exit status: the installer's status, or 1 from <code>--check</code> when a newer release is out.",
+       "line": 133
+      },
+      {
+       "kind": "verify",
+       "text": "<code>--store x upgrade</code> and <code>upgrade 0.2</code> each exit 1 with their messages, run by hand with a debug build.",
+       "line": 237
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "docs",
+   "title": "Documentation",
+   "kicker": "The README's upgrade sentence and the plan's settled details",
+   "intro": [
+    "The README's Install section now says how <code>multipass upgrade</code> works for a release install. The installer plan's § 2.3 records what this pull request settled: the accepted version forms, the options <code>upgrade</code> refuses, and what <code>--check</code> prints for a build newer than the newest release."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": "README.md",
+     "note": "Describes upgrade and --check for a copy installed from a release."
+    },
+    {
+     "path": "docs/projects/installer/readme.md",
+     "note": "Installer plan, § 2.3: the version argument's accepted forms and the --check message for a newer build."
+    }
+   ]
+  }
+ ]
+}
