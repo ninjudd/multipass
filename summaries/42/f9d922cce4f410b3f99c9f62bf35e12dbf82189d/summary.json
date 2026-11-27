@@ -1,0 +1,71 @@
+{
+ "version": 1,
+ "name": "Find exit statuses",
+ "project": "websites",
+ "pr": {
+  "repo": "ninjudd/multipass",
+  "number": 42,
+  "title": "Have find exit as grep does, and correct a refused-address row",
+  "head": "f9d922cce4f410b3f99c9f62bf35e12dbf82189d",
+  "headRef": "websites-find-exit-codes",
+  "base": "108242d29134777b72ff3dc4a829227feb92916b",
+  "baseRef": "main"
+ },
+ "overview": {
+  "summary": [
+   "multipass is a command-line password manager. Its websites plan, which is ready but not built yet, adds a <code>website</code> field to each entry and a <code>multipass find &lt;url&gt;</code> command that prints the names of the entries for a web page, so a browser extension or the Mac app can offer the right login on the right site.",
+   "A script that calls <code>find</code> needs to know whether the page simply has no entry or whether something went wrong, such as a wrong passphrase. multipass exits with status 1 on every error today, so if <code>find</code> also exited 1 for \"no match\", the script would have to read the error text to tell the two apart. The plan left that choice to the owner.",
+   "This pull request records the owner's answer: <code>find</code> exits as <code>grep</code> does. It changes only the plan document.",
+   "<div class=\"tblwrap\"><table class=\"tbl\"><thead><tr><th>Status</th><th>Meaning</th></tr></thead><tbody><tr><td class=\"r\">0</td><td>At least one entry matches.</td></tr><tr><td class=\"r\">1</td><td>No entry matches. Related entries, if any, are named on stderr.</td></tr><tr><td class=\"r\">2</td><td>An error, such as a refused page address, a wrong passphrase, or a store that cannot be read.</td></tr></tbody></table></div>",
+   "While moving the acceptance rows for refused addresses to status 2, the author also fixed one row that contradicted the plan's own parsing rules, as the group below explains."
+  ],
+  "cards": [
+   {
+    "id": "review",
+    "title": "Where the review stands",
+    "html": "<ul class=\"tight\"><li>One open finding: the plan says every other command keeps exiting 1 on any error, but <code>multipass upgrade</code> already exits with 65, 69, or the installer's own status.</li><li>Four suggestions: say that status 2 covers every error, a usage error and a declined Touch ID sheet included; name the statuses in the plan's changes-by-file rows for <code>src/main.rs</code> and <code>README.md</code>; add an acceptance row for a wrong passphrase; and extend the look-alike address test to the corrected case.</li><li>One follow-up: the plan does not say how <code>find</code> opens the store while a Touch ID session is unlocked.</li></ul>"
+   },
+   {
+    "id": "terms",
+    "title": "Terms",
+    "html": "<ul class=\"tight\"><li><b>Exit status</b>: the number a command returns to the shell, which a script tests with <code>if</code> or <code>$?</code>.</li><li><b>Authority</b>: the part of a web address between <code>://</code> and the first <code>/</code>, <code>?</code>, or <code>#</code>; it holds the host and port.</li><li><b>Refused address</b>: a page address the plan's strict parser rejects because a browser would read its host differently.</li><li><b>Session unlock</b>: the background agent that keeps the store open between commands and asks for a touch of Touch ID instead of the passphrase.</li></ul>"
+   }
+  ]
+ },
+ "groups": [
+  {
+   "id": "plan",
+   "title": "The websites plan",
+   "kicker": "How find reports its result, and one corrected acceptance row",
+   "intro": [
+    "Three parts of the plan change. § 2.2, which describes matching, gains the table of exit statuses and a sentence saying every other command is unchanged. § 6, the plan's decided questions, records the choice and the alternative the owner rejected: status 1 for every failure. § 4, the acceptance criteria, moves its rows for refused addresses from \"fails\" to \"exits 2\".",
+    "The corrected row concerns the address <code>https://evil.example\\@github.com/</code>. The plan refuses an address that holds an <code>@</code> in its authority, because a browser reads the text before the <code>@</code> as a user name and password. It runs that check before every other rule and never repeats such an address in an error, since the text before the <code>@</code> may be a real password. The old row expected an error naming the address because of its backslash, which broke that rule. The row now expects the <code>@</code> error without the address, and a new row covers a backslash on its own, which may be named."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": "docs/projects/websites/readme.md",
+     "note": "The plan for the <code>website</code> field and <code>find</code>: § 2.2 gains the exit-status table, § 4 its refused-address rows, and § 6 the decision.",
+     "collapsed": false,
+     "checks": [
+      {
+       "kind": "flag",
+       "line": 79,
+       "text": "Open finding: \"Every other command keeps exiting 1 on any error\" is not true today. <code>multipass upgrade</code> exits with 65 or 69 when it fails, or with the installer's own status, as <code>run_upgrade</code> in <code>src/main.rs</code> shows. § 6 item 2 repeats the claim."
+      },
+      {
+       "kind": "context",
+       "line": 77,
+       "text": "§ 2.2: status 2 lists three errors. A declined Touch ID sheet (<code>the request was not approved</code>) and a mistyped command are errors too, and <code>main</code> turns every error into status 1 today, so the implementation has to route <code>find</code>'s errors to 2 on purpose."
+      },
+      {
+       "kind": "verify",
+       "line": 149,
+       "text": "§ 4: checked against § 2.1. The authority of <code>https://evil.example\\@github.com/</code> runs to the first <code>/</code>, so it holds the <code>@</code>, the <code>@</code> check runs first, and its error must not name the address. The new row on line 150 holds no <code>@</code>, so naming it is allowed."
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}

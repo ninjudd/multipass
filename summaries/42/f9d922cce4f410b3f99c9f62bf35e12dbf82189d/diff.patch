@@ -1,0 +1,38 @@
+diff --git a/docs/projects/websites/readme.md b/docs/projects/websites/readme.md
+index f39f3e9..5539a8d 100644
+--- a/docs/projects/websites/readme.md
++++ b/docs/projects/websites/readme.md
+@@ -68,7 +68,15 @@ A website is parsed strictly, so that `find` and a browser never disagree about
+ 4. The hosts match when they are equal once a leading `www.` is removed from each, provided what remains still has a dot, so `www.example.com` and `example.com` are one host. Otherwise the page's host must end with `.` followed by the stored host as written, `www.` included. So `example.com` matches `portal.example.com`, but `portal.example.com` does not match `example.com` or `admin.example.com`, `example.com` never matches `notexample.com`, and a stored `www.host.example` never matches `anyone.host.example`. An IPv4 address matches only itself.
+ 5. The path is ignored.
+ 
+-`find` prints each matching entry's name once, sorted, and exits 1 when none matches, so a script can test it. It opens the store, so it asks for the passphrase like `get`.
++`find` prints each matching entry's name once, sorted, and exits as `grep` does, so a script can tell the cases apart without reading stderr:
++
++| Exit status | Meaning |
++| --- | --- |
++| 0 | At least one entry matches. |
++| 1 | No entry matches. Related entries, if any, are named on stderr. |
++| 2 | An error: a refused page address, a wrong passphrase, or a store that cannot be read. |
++
++Every other command keeps exiting 1 on any error. `find` opens the store, so it asks for the passphrase like `get`.
+ 
+ When nothing matches, `find` looks for related entries: those with a website whose root domain is the page's root domain, under the same scheme rule. It prints none of them on stdout, so stdout still holds only real matches. It names each on stderr with the website that relates it and the command that would add the page's scheme, host, and port, then exits 1. The command leaves out the page's path, query, and fragment, because a login page's query can carry a one-time token, which belongs neither in the store nor on stderr:
+ 
+@@ -137,8 +145,9 @@ This plan builds on the mergeable store, which supplies format 3, the `modified`
+ | `multipass find https://www.github.com/login` | Prints `x` |
+ | `multipass find http://github.com` | Exits 1 with no output, because the entry stored `https` |
+ | `multipass find https://notgithub.com` | Exits 1, with no related entry |
+-| `multipass find https://github.com@evil.example/` | Fails with `a website cannot hold a user name or password`, and names no entry |
+-| `multipass find 'https://evil.example\@github.com/'` | Fails naming the address, because it holds a backslash, and names no entry |
++| `multipass find https://github.com@evil.example/` | Exits 2 with `a website cannot hold a user name or password`, and names no entry |
++| `multipass find 'https://evil.example\@github.com/'` | Exits 2 with `a website cannot hold a user name or password`, without naming the address, because the `@` check runs first, and names no entry |
++| `multipass find 'https://evil.example\github.com/'` | Exits 2 naming the address, because it holds a backslash, and names no entry |
+ | `multipass find 'https://evil.example#@github.com'` | Exits 1 with nothing on stdout, because the host is `evil.example` |
+ | `multipass add z --website https://sam:hunter2@bank.example` | Fails with `a website cannot hold a user name or password`, and neither output contains `hunter2` |
+ | With `w` listing only `https://www.host.example`, `multipass find https://host.example` and then `multipass find https://anyone.host.example` | The first prints `w`. The second exits 1 with nothing on stdout and names `w` on stderr only as related. |
+@@ -162,3 +171,4 @@ Each website adds one short line to its entry. `find` compares the page with eve
+ ## 6. Open questions
+ 
+ 1. **How strictly a website matches.** Decided by the owner: the same host or any subdomain of it, with `www.` ignored, and an entry that shares only the page's root domain is shown as a hint you can add, as § 2.2 describes. The rejected alternative was matching the whole site, every host under the same registrable domain, which needs the Public Suffix List as a data file.
++2. **How `find` reports no match.** Decided by the owner: exit statuses as `grep` uses them, 0 for a match, 1 for no match, and 2 for an error, as § 2.2 describes, while every other command keeps exiting 1 on any error. `find` is the one command a script tests for "no match", and it is new, so no script depends on its status. The rejected alternative was exit 1 for every failure, which leaves a script reading stderr to tell a missing entry from a wrong passphrase.
