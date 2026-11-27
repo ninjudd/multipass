@@ -1,0 +1,94 @@
+{
+ "version": 1,
+ "name": "Websites find follow-ups",
+ "project": "websites",
+ "pr": {
+  "repo": "ninjudd/multipass",
+  "number": 45,
+  "title": "Settle how find routes usage errors, starts the agent, and talks to it",
+  "head": "38b8198e320d205890b417ca2c8ccf98dec3d911",
+  "headRef": "websites-find-session-details",
+  "base": "3d614791b5e19de2dd9f7a9faf3ada34d6c46c29",
+  "baseRef": "main"
+ },
+ "overview": {
+  "summary": [
+   "multipass is a password manager whose CLI keeps every login in one encrypted store. The websites plan, which is <code>ready</code> and not built yet, lets each entry list the websites it is used on, and adds <code>multipass find &lt;url&gt;</code>, which prints the names of the entries for a page. Like <code>grep</code>, <code>find</code> exits 0 on a match, 1 on no match, and 2 on any error.",
+   "The review of the previous websites pull request left four details an implementer would otherwise have to guess. This pull request settles each of them in the plan:",
+   "<ol><li><b>Usage errors before the command word.</b> <code>parse</code> reads options before it reads the command word, so in <code>multipass find --bogus https://github.com</code> or <code>multipass --bogus find …</code> the error can come before <code>main</code> knows the command is <code>find</code>. <code>parse</code> now returns the command word with every usage error, and <code>main</code> gives status 2 when it is <code>find</code>.</li><li><b>Starting the agent when nothing matches.</b> <code>run</code> starts the session agent only when the command returns <code>Ok</code>. So <code>find</code> reports no match as a result, not an error, and a lookup that finds nothing still starts the session.</li><li><b>The request and reply on the wire.</b> The request is <code>find &lt;n&gt;</code> and the page address, like <code>read</code>. The agent checks the address itself, because any program running as you can send one, and closes the connection without a Touch ID sheet when the address is refused. The reply is <code>ok &lt;n&gt;</code> and lines of <code>match &lt;name&gt;</code> and <code>related &lt;website&gt; &lt;name&gt;</code>.</li><li><b>The README's sheet sentences.</b> The README says each sheet names one entry and the agent hands over only that entry. A <code>find</code> sheet names a host and its reply names several entries, so the plan's README row now rewords both.</li></ol>",
+   "No code changes, and the plan stays <code>ready</code>. Two new acceptance rows and one new agent test cover the first three points."
+  ],
+  "cards": [
+   {
+    "id": "terms",
+    "title": "Terms",
+    "html": "<ul class=\"tight\"><li><b>Session agent</b>: <code>multipass __agent</code>, a background process that holds the vault key between commands and answers one request per Touch ID approval, in <code>src/agent.rs</code>.</li><li><b>Sheet</b>: the Touch ID dialog macOS shows, reading \"multipass is trying to …\". Declining it ends the session.</li><li><b>Usage error</b>: a command line <code>parse</code> refuses, such as an unknown option or a missing argument.</li><li><b>Related entry</b>: an entry with a website under the page's root domain that does not match it, which <code>find</code> names on stderr as a hint.</li><li><b>Counted body</b>: the agent's framing, a short line such as <code>ok 42</code> followed by exactly that many bytes.</li></ul>"
+   },
+   {
+    "id": "review",
+    "title": "Review so far",
+    "html": "<ul class=\"tight\"><li>One Projector review of this head, clean, with no finding threads.</li><li>Three suggestions: say the command-word scan skips an option's value such as <code>--store</code>'s, say a non-UTF-8 argument to <code>find</code> exits 2 too, and list the agent's other replies to a <code>find</code> request.</li></ul>"
+   }
+  ]
+ },
+ "groups": [
+  {
+   "id": "plan",
+   "title": "The websites plan",
+   "kicker": "Four details of find's exit statuses and session-agent protocol, settled in the plan",
+   "intro": [
+    "All four changes are in § 2.2, which describes matching and how <code>find</code> runs, and in the § 2.5 table of changes by file, with new rows in § 4's acceptance criteria. Nothing here is built yet; the plan is what an implementer will follow.",
+    "The session agent speaks a small line protocol over a Unix socket. A request is one line of at most 64 bytes, sometimes followed by a counted body, and the agent answers each request only after one Touch ID approval. The new <code>find</code> request follows the shape <code>read</code> already uses."
+   ],
+   "checks": [
+    {
+     "kind": "verify",
+     "text": "The plan's claims about today's code hold on <code>main</code>: <code>parse</code> runs its option loop before reading the command word, <code>run</code> starts the agent only after the command's arm returns without an error, and the agent drops the connection on a request body it cannot read. Checked by reading <code>src/main.rs</code> and <code>src/agent.rs</code> at the base."
+    },
+    {
+     "kind": "verify",
+     "text": "The pull request's Testing commands pass at this head: <code>project check</code> prints <code>Project plans are valid.</code>, <code>git diff --check</code> prints nothing, and the <code>grep -c</code> prints <code>5</code>."
+    }
+   ],
+   "files": [
+    {
+     "path": "docs/projects/websites/readme.md",
+     "note": "§ 2.2 settles usage errors, starting the agent, and the wire form; § 2.5 and § 4 carry them into the file table and the tests.",
+     "collapsed": false,
+     "checks": [
+      {
+       "kind": "context",
+       "line": 79,
+       "text": "§ 2.2: <code>parse</code> returns the command word with every usage error, taking the first positional argument and scanning the remaining arguments when the error comes first. A naive scan would read the value of an option such as <code>--store</code> as the command word, which the review lists as a suggestion."
+      },
+      {
+       "kind": "verify",
+       "line": 81,
+       "text": "§ 2.2: on <code>main</code>, <code>run</code> starts the agent after the <code>match</code> on the command, and any <code>?</code> in an arm skips it, so no match must be an <code>Ok</code> result for an empty <code>find</code> to start the session. An error, such as a refused address, starts no agent, as a <code>get</code> of a missing entry does today. Checked by reading <code>run</code> and <code>Ctx::open_prompting</code>."
+      },
+      {
+       "kind": "verify",
+       "line": 83,
+       "text": "§ 2.2: the reply cannot be misread. <code>store::escape</code> escapes newlines, so each record is one line, and a website holds no space, so <code>related &lt;website&gt; &lt;name&gt;</code> splits at the first space after the website even when the name has spaces. A refused address is decided before the approver is asked or the store is opened, so the refusal reveals nothing about the entries. Checked against <code>store::escape</code>, <code>read_answer</code>, and <code>handle_one</code>."
+      },
+      {
+       "kind": "context",
+       "line": 129,
+       "text": "§ 2.5: the README row now also rewords the staying-unlocked sentences that say each sheet names the entry and the agent hands over only that entry, matching what the <code>AGENTS.md</code> row already does for the session-agent rule."
+      },
+      {
+       "kind": "context",
+       "line": 157,
+       "text": "§ 4: this row exercises the no-match agent start. The earlier declined-sheet row ends the session, so this row begins with no session."
+      },
+      {
+       "kind": "context",
+       "line": 175,
+       "text": "§ 4: the agent test checks that a refused <code>find</code> address never reaches the approver, which would fail for an agent that trusts the client's normalization."
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}
