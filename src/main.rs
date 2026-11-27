@@ -1,4 +1,5 @@
 mod age;
+mod clipboard;
 mod crypto;
 mod otp;
 mod store;
@@ -27,7 +28,9 @@ Commands:
                         already exists, keeping its one-time password
   get <name>            Print one field of an entry, by default its secret
     --field <field>     secret, username, notes or otp
+    --clip              Copy it to the clipboard instead, for 30 seconds
   otp <name>            Print the entry's current one-time password code
+    --clip              Copy it to the clipboard instead, for 30 seconds
     --set               Store a setup key, an otpauth:// URI or a base32 key,
                         read from stdin when it is piped and from a hidden
                         prompt otherwise. Creates the entry if needed
@@ -56,6 +59,7 @@ enum Command {
     Get {
         name: String,
         field: Field,
+        clip: bool,
     },
     List,
     Rm {
@@ -70,7 +74,7 @@ enum Command {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum OtpAction {
-    Show,
+    Show { clip: bool },
     Set { force: bool },
     Clear,
 }
@@ -99,6 +103,12 @@ fn main() -> ExitCode {
         .map(|arg| arg.into_string())
         .collect();
     let result = match args {
+        Ok(args) if args.first().is_some_and(|a| a == clipboard::CLEAR_COMMAND) => {
+            match &args[1..] {
+                [change_count] => clipboard::clear_later(change_count),
+                _ => Err("usage: multipass __clear-clipboard <change count>".into()),
+            }
+        }
         Ok(args) => parse(args).and_then(|parsed| match parsed {
             Parsed::Help => {
                 print!("{USAGE}");
@@ -140,6 +150,7 @@ fn parse(args: Vec<String>) -> Result<Parsed> {
     let mut notes = None;
     let mut field = None;
     let mut force = false;
+    let mut clip = false;
     let mut otp_action = None;
     let mut positional = Vec::new();
 
@@ -179,6 +190,8 @@ fn parse(args: Vec<String>) -> Result<Parsed> {
                 })
             }
             "--force" if inline.is_none() => force = true,
+            "--clip" if inline.is_none() => clip = true,
+            "--clip" => return Err("--clip takes no value".into()),
             "--set" | "--clear" if inline.is_some() => {
                 return Err(format!("{flag} takes no value"));
             }
@@ -226,15 +239,19 @@ fn parse(args: Vec<String>) -> Result<Parsed> {
         "get" => Command::Get {
             name: name()?,
             field: field.take().unwrap_or(Field::Secret),
+            clip: std::mem::take(&mut clip),
         },
         "rm" => Command::Rm { name: name()? },
         "otp" => Command::Otp {
             name: name()?,
-            action: match otp_action.take().unwrap_or(OtpAction::Show) {
-                OtpAction::Set { .. } => OtpAction::Set {
+            action: match otp_action.take() {
+                None => OtpAction::Show {
+                    clip: std::mem::take(&mut clip),
+                },
+                Some(OtpAction::Set { .. }) => OtpAction::Set {
                     force: std::mem::take(&mut force),
                 },
-                other => other,
+                Some(other) => other,
             },
         },
         other => return Err(format!("unknown command {other}; see multipass --help")),
@@ -250,6 +267,9 @@ fn parse(args: Vec<String>) -> Result<Parsed> {
     }
     if field.is_some() {
         return Err("--field only applies to get".into());
+    }
+    if clip {
+        return Err("--clip only applies to get, and to otp without --set or --clear".into());
     }
     if otp_action.is_some() {
         return Err("--set and --clear only apply to otp".into());
@@ -300,7 +320,7 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
             );
             save(&store, &passphrase)?;
         }
-        Command::Get { name, field } => {
+        Command::Get { name, field, clip } => {
             let (store, _) = open(&path)?;
             let entry = store
                 .get(&name)
@@ -312,7 +332,7 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
                 Field::Otp => entry.otp.as_ref(),
             }
             .ok_or_else(|| format!("{name} has no value for that field"))?;
-            print_value(value)?;
+            deliver(value, clip)?;
         }
         Command::List => {
             let (store, _) = open(&path)?;
@@ -330,7 +350,7 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
         Command::Otp { name, action } => {
             let (mut store, passphrase) = open(&path)?;
             match action {
-                OtpAction::Show => {
+                OtpAction::Show { clip } => {
                     let uri = store
                         .get(&name)
                         .ok_or_else(|| format!("no entry named {name}"))?
@@ -342,7 +362,7 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
                         .duration_since(UNIX_EPOCH)
                         .map_err(|_| "the system clock is set before 1970")?
                         .as_secs();
-                    print_value(&otp.code(now))?;
+                    deliver(&otp.code(now), clip)?;
                     if io::stderr().is_terminal() {
                         eprintln!("expires in {}s", otp.seconds_left(now));
                     }
@@ -466,6 +486,20 @@ fn strip_newline(mut s: String) -> String {
     s
 }
 
+/// Prints `value`, or with `clip` copies it to the clipboard for
+/// `clipboard::CLEAR_AFTER` and says so on stderr without showing it.
+fn deliver(value: &str, clip: bool) -> Result<()> {
+    if !clip {
+        return print_value(value);
+    }
+    clipboard::copy(value)?;
+    eprintln!(
+        "Copied to the clipboard; it clears in {}s",
+        clipboard::CLEAR_AFTER.as_secs()
+    );
+    Ok(())
+}
+
 /// Prints a value with a trailing newline only on a terminal, so
 /// `multipass get x | pbcopy` copies exactly the secret.
 fn print_value(value: &str) -> Result<()> {
@@ -522,6 +556,7 @@ mod tests {
             Command::Get {
                 name: "x".into(),
                 field: Field::Username,
+                clip: false,
             }
         );
         assert_eq!(
@@ -545,7 +580,8 @@ mod tests {
     #[test]
     fn parses_the_otp_command() {
         for (argv, action) in [
-            ("otp github.com", OtpAction::Show),
+            ("otp github.com", OtpAction::Show { clip: false }),
+            ("otp github.com --clip", OtpAction::Show { clip: true }),
             ("otp github.com --set", OtpAction::Set { force: false }),
             ("otp --clear github.com", OtpAction::Clear),
             (
@@ -575,6 +611,15 @@ mod tests {
             Command::Get {
                 name: "github.com".into(),
                 field: Field::Otp,
+                clip: false,
+            }
+        );
+        assert_eq!(
+            run_of("get --clip github.com --field username"),
+            Command::Get {
+                name: "github.com".into(),
+                field: Field::Username,
+                clip: true,
             }
         );
     }
@@ -590,6 +635,11 @@ mod tests {
             "get x --username u",
             "add x --field secret",
             "get x --field password",
+            "add x --clip",
+            "list --clip",
+            "otp x --set --clip",
+            "otp x --clear --clip",
+            "get x --clip=yes",
             "add x --force=yes",
             "list --verbose",
             "list --store",
