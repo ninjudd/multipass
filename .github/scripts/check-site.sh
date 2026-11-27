@@ -45,7 +45,7 @@ on_site() {
 }
 
 check_static() {
-  local dir="${1:-site}" config source destination
+  local dir="${1:-site}" config source destination keys redirects
   config="$dir/vercel.json"
   [ -f "$config" ] || {
     problem "$config does not exist"
@@ -55,10 +55,28 @@ check_static() {
     problem "$config is not valid JSON"
     return
   }
+  # A shape jq cannot read as below would make it fail and leave the keys or
+  # redirects unchecked, so the shape is checked first, and each jq runs on
+  # its own rather than in a process substitution, which hides its status.
+  jq -e 'type == "object" and ((.redirects // []) | type == "array" and
+    all(.[]; type == "object" and ((.source // "") | type == "string") and ((.destination // "") | type == "string")))' \
+    "$config" >/dev/null 2>&1 || {
+    problem "$config must be an object whose redirects are a list of objects with a text source and destination"
+    return
+  }
+  keys="$(jq -r --argjson allowed "$ALLOWED_KEYS" 'keys[] | select(. as $k | $allowed | index($k) | not)' "$config")" || {
+    problem "could not read the keys of $config"
+    return
+  }
+  redirects="$(jq -r '.redirects // [] | .[] | [(.source // ""), (.destination // "")] | @tsv' "$config")" || {
+    problem "could not read the redirects of $config"
+    return
+  }
   while IFS= read -r key; do
-    problem "$config sets $key, which a site of redirects does not need"
-  done < <(jq -r --argjson allowed "$ALLOWED_KEYS" 'keys[] | select(. as $k | $allowed | index($k) | not)' "$config")
+    [ -z "$key" ] || problem "$config sets $key, which a site of redirects does not need"
+  done <<<"$keys"
   while IFS=$'\t' read -r source destination; do
+    [ -n "$redirects" ] || break
     case "$source" in
       *install.sh)
         under_releases "$destination" ||
@@ -69,7 +87,7 @@ check_static() {
           problem "the redirect from $source goes to $destination, off this site"
         ;;
     esac
-  done < <(jq -r '.redirects // [] | .[] | [(.source // ""), (.destination // "")] | @tsv' "$config")
+  done <<<"$redirects"
   # The site serves only its page, so a redirect to anywhere on it, from a
   # source that matches an install.sh path without ending in that text,
   # still reaches nothing a shell would run, and no file can be a copy of
