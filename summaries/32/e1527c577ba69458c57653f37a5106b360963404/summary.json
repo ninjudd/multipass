@@ -1,0 +1,76 @@
+{
+ "version": 1,
+ "name": "CLI finds the container store",
+ "project": "passkeys",
+ "pr": {
+  "repo": "ninjudd/multipass",
+  "number": 32,
+  "title": "Have the CLI find a moved store in the app's iCloud container",
+  "head": "e1527c577ba69458c57653f37a5106b360963404",
+  "headRef": "passkeys-cli-container-store",
+  "base": "d491604a5668ff717ba6e51ec51533c272028445",
+  "baseRef": "main"
+ },
+ "overview": {
+  "summary": [
+   "multipass is a command-line password manager whose store is a package: a folder of encrypted files, by default <code>~/.multipass/store.multipass</code>. The passkeys plan adds a Mac and iPhone app that keeps that package in the app's iCloud container, the app's own folder in iCloud Drive, so every device shares one store. On a Mac, the app moves an existing package out of <code>~/.multipass</code> and into the container.",
+   "After that move, <code>~/.multipass</code> holds no store. At the base, the CLI reached the container only through <code>MULTIPASS_STORE</code>, set from an <code>export</code> line the app shows. Without it, every command found no store, and <code>multipass init</code> would create a second, empty store that no other device sees.",
+   "This pull request changes only the plan. It proposes, as § 6 question 10, that when neither <code>--store</code> nor <code>MULTIPASS_STORE</code> is set and <code>~/.multipass</code> holds neither <code>store.multipass</code> nor <code>store.age</code>, the CLI's default becomes the container's package when it exists. <code>init</code> then finds that package and refuses, and the <code>export</code> line becomes optional. Two guards keep the CLI from saving where no other device reads:",
+   "<ul><li><b>Both locations hold a store.</b> A store can still appear in <code>~/.multipass</code> later, such as from <code>init</code> on a second Mac before iCloud Drive lists the package. Every command then fails, naming both paths and the <code>export</code> line that picks each.</li><li><b>An explicit path names the old location.</b> When <code>--store</code> or <code>MULTIPASS_STORE</code> names a path with no store while the container holds one, the error names the container. <code>init</code> still creates the store you named, after a note on stderr.</li></ul>",
+   "The answer is proposed, not decided, and the plan stays a draft until the user answers it. The question records an alternative: keep <code>~/.multipass</code> as the default, and have <code>init</code> warn when the container holds a store."
+  ],
+  "cards": [
+   {
+    "id": "order",
+    "title": "Where the CLI looks for the store",
+    "html": "<ol><li><code>--store</code>, when passed.</li><li><code>MULTIPASS_STORE</code>, when set.</li><li><code>~/.multipass/store.multipass</code>, or <code>~/.multipass/store.age</code>, which the vault-key plan moves into a package.</li><li><b>New:</b> the container's <code>Documents/store.multipass</code>, when it exists.</li><li>Otherwise <code>~/.multipass/store.multipass</code>, where <code>init</code> creates one.</li></ol><p class=\"note\">When steps 3 and 4 both find a store, every command fails and names both.</p>"
+   },
+   {
+    "id": "review",
+    "title": "Review so far",
+    "html": "<ul class=\"tight\"><li>The review of <code>ccefa45</code> found that a store appearing later in <code>~/.multipass</code> silently took the CLI off the container, and made four suggestions. This head fixes the finding and takes all four.</li><li>The review of <code>e1527c5</code> is clean, with one suggestion: have the <code>README.md</code> row document the refusal when both locations hold a store.</li><li>The plan stays <code>draft</code>, so it makes no readiness claim.</li></ul>"
+   }
+  ]
+ },
+ "groups": [
+  {
+   "id": "plan",
+   "title": "The CLI's fallback to the container",
+   "kicker": "Question 10 and the rows of the passkeys plan that follow from it",
+   "intro": [
+    "Every edit is in the passkeys plan. Question 10 in § 6 states the problem and the proposed answer, and the other edits make the rest of the plan agree with that answer.",
+    "<ul><li><b>§ 2.4's table</b> says the CLI finds the container by itself, refuses to choose when both locations hold a store, and that the <code>export</code> line is then optional.</li><li><b>§ 2.5's <code>src/main.rs</code> row</b> gives the rule, the path <code>~/Library/Mobile Documents/&lt;container&gt;/Documents/store.multipass</code>, how the folder is named, both guards, and the <code>--store</code> help line.</li><li><b>§ 2.5's <code>README.md</code> row</b> says the README documents the fallback.</li><li><b>§ 4</b> expects <code>init</code> to refuse on the moved Mac, and adds a row for each guard.</li><li><b>§ 8 step 1</b> adds a prototype check for a package iCloud Drive has not downloaded, and waits for question 10's answer before the plan moves to <code>ready</code>.</li></ul>"
+   ],
+   "checks": [
+    {
+     "kind": "context",
+     "text": "The container is the app's folder in iCloud Drive. On a Mac it sits under <code>~/Library/Mobile Documents/</code>. A package there may be listed before its files have downloaded, which is what the new prototype check covers."
+    }
+   ],
+   "files": [
+    {
+     "path": "docs/projects/passkeys/readme.md",
+     "collapsed": false,
+     "note": "The passkeys plan: question 10 proposes the CLI's fallback to the container and its two guards, and § 2.4, § 2.5, § 4 and § 8 follow it.",
+     "checks": [
+      {
+       "kind": "verify",
+       "text": "§ 4's expected error matches the one <code>init</code> gives today in <code>run</code> in <code>src/main.rs</code>, <code>a store already exists at &lt;path&gt;</code>, read at the head.",
+       "line": 118
+      },
+      {
+       "kind": "context",
+       "text": "The folder under <code>Mobile Documents</code> is the container identifier with each <code>.</code> replaced by <code>~</code>, as iCloud names every app's folder there.",
+       "line": 89
+      },
+      {
+       "kind": "context",
+       "text": "The refusal runs before the vault-key plan's § 2.6 moves a local <code>store.age</code> into a package, so a stray old file never becomes a second local package.",
+       "line": 145
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}
