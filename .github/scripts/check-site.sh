@@ -71,9 +71,13 @@ check_static() {
         ;;
     esac
   done < <(jq -r '.redirects // [] | .[] | [(.source // ""), (.destination // "")] | @tsv' "$config")
+  # The site serves only its page, so a redirect to anywhere on it, from a
+  # source that matches an install.sh path without ending in that text,
+  # still reaches nothing a shell would run, and no file can be a copy of
+  # the installer. The CLI never uploads .vercel, which `vercel link` writes.
   while IFS= read -r file; do
-    problem "$file is a copy of the installer; the site must only redirect to the release's install.sh"
-  done < <(find "$dir" -iname install.sh)
+    problem "${dir%/}/${file#./} is not index.html or vercel.json, the only files the site serves; a redirect could hand it to curl | bash"
+  done < <(cd "$dir" && find . -path ./.vercel -prune -o ! -type d ! -path ./index.html ! -path ./vercel.json -print)
 }
 
 # Checks that GET <url><path> answers with a temporary redirect to exactly

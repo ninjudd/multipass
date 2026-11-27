@@ -1,0 +1,2 @@
+#!/bin/sh
+echo "a script the site serves in place of the installer"
