@@ -87,7 +87,9 @@ During a session, `find` sends the agent a new request, `Find(page)`, as `find <
 | `denied` | Exits 2 with `the request was not approved`. |
 | `unavailable` | Asks for the passphrase, because neither Touch ID nor a watch could answer, and the session stays. |
 | `stale` | Asks for the passphrase and says why, because the session ended. |
-| `failed <n>` | Exits 2 with the `n` bytes of the agent's error. | The reply never carries a secret, a username, notes, a one-time password key, or history, and websites are not secrets (§ 2.5). When you decline the sheet, `find` exits 2 with `the request was not approved`, as a declined `get` fails today.
+| `failed <n>` | Exits 2 with the `n` bytes of the agent's error. |
+
+The reply never carries a secret, a username, notes, a one-time password key, or history, and websites are not secrets (§ 2.5).
 
 This meets AGENTS.md's rule for the session agent: it answers a request only after Touch ID or a watch approves that one request, and it reads only what the sheet names. A `find` request is for a page, not one entry, so its sheet names the page's host where the rule says the entry, as `list`'s sheet says "list your entries", and its reply holds no more than names and websites.
 
