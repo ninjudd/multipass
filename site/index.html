@@ -63,7 +63,7 @@
   <h2>What it is</h2>
   <ul>
     <li><strong>One passphrase, one file.</strong> Your secrets, and the setup keys of your one-time passwords, live in one file encrypted with <a href="https://age-encryption.org">age</a> under a passphrase. There are no accounts and no server.</li>
-    <li><strong>No dependencies.</strong> Every line is in the repository, cryptography included, small enough to read in a day. No third-party crates, so the only code you trust beyond the repository is the Rust toolchain.</li>
+    <li><strong>No dependencies.</strong> Every line is in the repository, cryptography included, small enough to read in a day. No third-party crates, so a build from source trusts only the Rust toolchain, and GitHub to serve the tagged source. The prebuilt binary also trusts GitHub's hosted macOS runner, with its Xcode linker and <code>lipo</code>, the pinned Rust toolchain, and GitHub's and Sigstore's signing of its attestation, which <code>install.sh verify</code> lets you replace with your own build. The one-liner above also trusts whoever controls this domain, its registrar account, and its Vercel team, which the commands below avoid.</li>
     <li><strong>Recoverable without it.</strong> The store is a standard age file, so <code>age -d</code> prints it as plain text even if multipass disappears.</li>
   </ul>
 
