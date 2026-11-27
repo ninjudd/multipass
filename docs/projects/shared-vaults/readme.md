@@ -135,7 +135,7 @@ Opening adds one HPKE decapsulation per grant, well under a millisecond each wit
 
 ## 6. Open questions
 
-Every question here is deliberately deferred until the plan is scheduled. The user owns each.
+Every question here is deliberately deferred until the plan is scheduled. The user owns questions 1 to 5. Questions 6 and 7 are checks for whoever implements the plan.
 
 1. **Hand-written cryptography or CryptoKit.** Writing ML-KEM, X25519, SHA-3, HPKE, and Bech32 keeps the CLI dependency-free on every platform, at the cost and risk in § 2.7. CryptoKit avoids that risk on Apple devices, requires macOS 26 or iOS 26, and reaches the CLI only through the Mac app.
 2. **Roles.** Whether every member may admit and remove others, or only some.
