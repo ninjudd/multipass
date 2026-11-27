@@ -1,0 +1,9503 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index 9d0583d..66deb85 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -8,8 +8,8 @@ multipass has no dependencies, not even dev-dependencies, and that is a feature
+ 
+ - **Do not add a crate**, for code or for tests, without the maintainer's explicit approval in the pull request. Write the code instead.
+ - **Apple's system frameworks count like the standard library.** `src/clipboard.rs` loads AppKit with `dlopen` only when `--clip` needs the clipboard, rather than linking it, so no other command has AppKit in its process. It holds the program's only `unsafe` code, behind a safe interface. Keep any new `unsafe` code in a module like it, and say in a comment what each call requires of its arguments.
+-- **Every primitive lives in `src/crypto`** and is checked against the official test vectors from its specification: FIPS 180-4 for SHA-1, SHA-256 and SHA-512 (with RFC 3174 for SHA-1), RFC 4231 for HMAC, RFC 5869 for HKDF, RFC 7914 for PBKDF2, scrypt and Salsa20/8, RFC 8439 for ChaCha20 and Poly1305, RFC 4226 for HOTP, RFC 6238 for TOTP, and RFC 4648 for base32 and base64. A change to a primitive keeps those tests and adds any vector that covers the changed path.
+-- **In `src/crypto` and `src/age.rs`, never branch on secret data or index memory with it**, apart from scrypt's data-dependent lookups, which the algorithm requires. Compare MACs and tags with `crypto::ct_eq`. `src/age.rs` builds age's format from the primitives: it derives the scrypt key, unwraps the file key, derives the header and payload keys, and checks the header MAC. It may branch on the header's text and on lengths, which are public.
++- **Every primitive lives in `src/crypto`** and is checked against the official test vectors from its specification: FIPS 180-4 for SHA-1, SHA-256 and SHA-512 (with RFC 3174 for SHA-1), RFC 4231 for HMAC, RFC 5869 for HKDF, RFC 7914 for PBKDF2, scrypt and Salsa20/8, RFC 8439 for ChaCha20 and Poly1305, RFC 4226 for HOTP, RFC 6238 for TOTP, and RFC 4648 for base32 and base64. The password generator's word list is pinned by its SHA-256 in `crypto::generate`'s tests. A change to a primitive keeps those tests and adds any vector that covers the changed path.
++- **In `src/crypto` and `src/age.rs`, never branch on secret data or index memory with it**, apart from scrypt's data-dependent lookups, which the algorithm requires, and the password generator's decision to draw again, which depends only on a value it then throws away. `crypto::generate` reads every character and word by scanning its whole table with a mask. Compare MACs and tags with `crypto::ct_eq`. `src/age.rs` builds age's format from the primitives: it derives the scrypt key, unwraps the file key, derives the header and payload keys, and checks the header MAC. It may branch on the header's text and on lengths, which are public.
+ - **Outside `src/crypto` and `src/age.rs`, keep secrets as text and do no cryptography on them.** The store's escaping and parsing, its UTF-8 check, `strip_newline`, and `otpauth` URI parsing branch on each character of a secret: escaping changes the text's length, and Rust's string handling branches on every byte. So hand a key to `src/crypto` as soon as its text is found, as `src/otp.rs` hands the setup key to `crypto::base32`, and put any computation on key material in `src/crypto`.
+ - **Stay in age's passphrase (scrypt) mode.** Adding public-key recipients would bring back the quantum exposure the design avoids.
+ 
+diff --git a/README.md b/README.md
+index 5f8cdb3..0a78b9f 100644
+--- a/README.md
++++ b/README.md
+@@ -28,6 +28,7 @@ cargo install --path .
+ ```sh
+ multipass init                                   # create ~/.multipass/store.age
+ multipass add github.com --username octocat      # prompts for the secret
++multipass add example.com --generate --clip      # makes a new password and copies it
+ multipass get github.com --clip                  # copies the secret for 30 seconds
+ multipass get github.com --field username
+ multipass list
+@@ -37,7 +38,39 @@ multipass passwd                                 # change the passphrase
+ 
+ Every command asks for the passphrase. To use a different file, set `MULTIPASS_STORE` or pass `--store`.
+ 
+-`--clip` on `get` and `otp` copies the value instead of printing it, and clears the clipboard 30 seconds later, unless you have copied something else since. It marks the value as concealed and as this Mac only, so Universal Clipboard does not send it to your other Apple devices, and clipboard-history apps that honor the marking skip it. Until it clears, any app running on this Mac can still read it: the markings only keep it off your other devices and out of the history apps that honor them. `--clip` works only on macOS. Piping to `pbcopy` also works, but `pbcopy` cannot mark the value, so it syncs and lands in clipboard history.
++`--clip` on `get`, `otp`, `generate`, and `add --generate` copies the value instead of printing it, and clears the clipboard 30 seconds later, unless you have copied something else since. It marks the value as concealed and as this Mac only, so Universal Clipboard does not send it to your other Apple devices, and clipboard-history apps that honor the marking skip it. Until it clears, any app running on this Mac can still read it: the markings only keep it off your other devices and out of the history apps that honor them. `--clip` works only on macOS. Piping to `pbcopy` also works, but `pbcopy` cannot mark the value, so it syncs and lands in clipboard history.
++
++## Make new passwords
++
++`multipass generate` prints a new password and stores nothing. `multipass add <name> --generate` makes one and stores it as the entry's secret without printing it; add `--clip` to copy it, so you can paste it into the site's form. Both print the password's strength on stderr, in bits: the base-2 logarithm of how many passwords the options could have produced, each equally likely.
++
++```console
++$ multipass generate
++k7#Rv2!mQe9_Tz4@pLw8
++multipass: random characters, 20 from 94, each set present: 130.9 bits
++
++$ multipass generate --words 5
++oxidize-tattered-flier-rebound-anyone
++multipass: memorable, 5 words from 7,776 with hyphens: 64.6 bits
++
++$ multipass generate --pin 6
++480213
++multipass: PIN, 6 digits: 19.9 bits -- weak for a password you cannot rate-limit
++```
++
++| Option | Default | Effect |
++| --- | --- | --- |
++| `--length <n>` | `20` | Random characters, from 4 to 128. Uppercase letters, lowercase letters, digits, and symbols each appear at least once. |
++| `--no-uppercase`, `--no-lowercase`, `--no-digits`, `--no-symbols` | | Leaves a set out. |
++| `--symbols <chars>` | all 32 ASCII punctuation characters | The symbols to use, for a site that accepts only some. |
++| `--exclude <chars>` | | Characters never to use. |
++| `--no-lookalikes` | | Leaves out `0`, `O`, `o`, `1`, `l`, `I`, and `\|`. |
++| `--words [<n>]` | `5` | Memorable words instead, from 3 to 15, drawn from the EFF's large word list of 7,776 words. |
++| `--separator <sep>` | `hyphen` | With `--words`: `hyphen`, `space`, `period`, `comma`, `underscore`, `digit`, or `digit-or-symbol`. The last two draw a new character for each gap. |
++| `--capitalize <how>` | `none` | With `--words`: `first` capitalizes every word, and `one` capitalizes one word chosen at random. |
++| `--pin [<n>]` | `6` | A PIN instead, from 4 to 64 digits. |
++
++Every character, word, and separator is drawn from `/dev/urandom` without bias, and the strength line counts exactly the passwords that meet the options. A password under 64 bits gets a warning: that is too weak to survive an attacker who can guess offline, though a PIN that a bank's servers rate-limit is still fine.
+ 
+ ## Keep one-time passwords
+ 
+@@ -98,4 +131,4 @@ If you lose the passphrase, no one can recover the store. That is the point.
+ 
+ ## License
+ 
+-MIT
++MIT. The word list in `src/crypto/wordlist/eff_large.txt` is the [EFF's large word list](https://www.eff.org/dice) by the Electronic Frontier Foundation, with its dice numbers removed, under the [Creative Commons Attribution 4.0 International license](https://creativecommons.org/licenses/by/4.0/) that [EFF's copyright policy](https://www.eff.org/copyright) gives its original material.
+diff --git a/docs/projects/password-generation/readme.md b/docs/projects/password-generation/readme.md
+index 86c270d..40bb066 100644
+--- a/docs/projects/password-generation/readme.md
++++ b/docs/projects/password-generation/readme.md
+@@ -32,20 +32,20 @@ multipass: PIN, 6 digits: 19.9 bits
+ 
+ $ multipass add github.com --generate --clip
+ multipass: random characters, 20 from 94, each set present: 130.9 bits
+-multipass: copied the secret for github.com; the clipboard clears in 30 seconds
++Copied to the clipboard; it clears in 30s
+ ```
+ 
+ ### 2.1 How a password is made
+ 
+-1. `parse` reads the kind and its options (§ 2.2), and rejects a combination that cannot make a password, such as `--length 3` with four required character sets, naming the options.
+-2. `main.rs` builds a `Recipe`, the kind and its settings. A recipe holds no secret. Per-site rules from `--rules` (§ 2.3) become part of the recipe at this step.
++1. `parse` reads the kind and its options (§ 2.2) into `generator::Options`, and `Options::recipe` in `src/generator.rs` checks them and builds a `Recipe`, the kind and its settings. It rejects a combination that cannot make a password, naming the option, such as `--length must be from 4 to 128`, and it refuses a recipe that keeps fewer than one draw in a million, which would loop for a long time.
++2. The recipe is built before the store opens, so a bad option never asks for the passphrase. A recipe holds no secret. Per-site rules from `--rules` (§ 2.3) become part of the recipe at this step.
+ 3. `crypto::generate::entropy(&recipe)` computes the strength, which depends only on the recipe, so printing it reveals nothing about the password.
+ 4. `crypto::generate::password(&recipe)` draws the password:
+-   1. It draws each position's index below `n`, the size of that position's alphabet or word list, by rejection sampling. It reads two random bytes from `crypto::random::fill`, keeps the value when it is below the largest multiple of `n` that fits in 16 bits, and otherwise draws again. The kept value modulo `n` is uniform.
+-   2. It reads the character or word at that index by scanning the whole alphabet or word list and keeping the match with a mask, so the memory it reads does not depend on the index. A word is copied into a fixed buffer as wide as the longest word, with its length.
++   1. It draws each position's index below `n`, the size of that position's alphabet or word list, by rejection sampling with Lemire's method. It reads a 16-bit value `v` from `crypto::random::fill`, 64 bytes at a time, and multiplies it by `n`. The high 16 bits of the product are the index. When the low 16 bits are below `65536 mod n`, `v` is one of the values that would favor some indexes, so it draws again. The method multiplies rather than divides, because division takes longer for some values on some CPUs.
++   2. It reads the character or word at that index by scanning the whole alphabet or word list and keeping the match with a mask, so the memory it reads does not depend on the index. A word is copied into a slot as wide as the longest word, nine bytes, with its length. Once every word and separator is in place, it moves each real byte to its rank among the real bytes, again by masks, so the padding goes without a branch on any word's length.
+    3. When the recipe requires a character set, such as "at least one digit", or limits repeats with `max-consecutive`, it draws the whole password again until the password meets every rule. That keeps the result uniform over the passwords that satisfy the rules.
+    4. It returns a fixed-capacity buffer and the password's length.
+-5. `main.rs` turns the buffer into a `String` and hands it on. `generate` prints it, or copies it with `--clip`. `add --generate` stores it as the entry's `secret`, and copies it too with `--clip`. Converting to text outside `src/crypto` follows the repository's rule for secrets kept as text, as the store's own parsing and escaping do.
++5. `generator::password` turns the buffer into a `String`, and `main.rs` hands it on. `generate` prints it, or copies it with `--clip`. `add --generate` stores it as the entry's `secret`, and copies it too with `--clip`. Converting to text outside `src/crypto` follows the repository's rule for secrets kept as text, as the store's own parsing and escaping do.
+ 6. It prints the strength line from step 3 on stderr, so a script that reads stdout gets only the password.
+ 
+ The loops in steps 4.1 and 4.3 decide whether to draw again from a value that is then thrown away. Their timing reveals how many draws were discarded, which says nothing about the draw that was kept. AGENTS.md names this as the second exception to the constant-time rule, beside scrypt's lookups.
+@@ -60,11 +60,11 @@ The loops in steps 4.1 and 4.3 decide whether to draw again from a value that is
+ | `--exclude <chars>` | random | none | Characters never to use, from any set. |
+ | `--no-lookalikes` | random | off | Leaves out characters that are easy to misread: `0 O o 1 l I \|`. |
+ | `--rules <rules>` | random | none | A site's password rules, as § 2.3 describes. |
+-| `--words <n>` | memorable | `5` | Words, from 3 to 15, as in 1Password. |
++| `--words [<n>]` | memorable | `5` | Words, from 3 to 15, as in 1Password. The count may be left out. |
+ | `--separator <sep>` | memorable | `hyphen` | What goes between words: `hyphen`, `space`, `period`, `comma`, `underscore`, `digit`, or `digit-or-symbol`. The last two draw a new random character for each gap. |
+ | `--capitalize <which>` | memorable | `none` | `none`, `first` (the first letter of every word), or `one` (the first letter of one randomly chosen word). |
+ | `--syllables` | memorable | off | Uses short pronounceable syllables instead of full words (§ 2.4). Awaits the owner (§ 6). |
+-| `--pin <n>` | PIN | `6` when given alone | Digits, from 4 to 64. |
++| `--pin [<n>]` | PIN | `6` | Digits, from 4 to 64. The count may be left out. |
+ 
+ With no kind option, `generate` and `add --generate` make random characters. An option for another kind is an error, such as `--separator` with `--length`. 1Password's random type has three toggles, letters, numbers, and symbols. Splitting letters into uppercase and lowercase gives sites that require both a way to say so, and each set that is on must appear at least once, as sites that list required characters expect. The strength line counts only the passwords that meet those requirements.
+ 
+@@ -92,10 +92,10 @@ This option awaits the owner (§ 6).
+ 
+ | List | Entries | Bits each | Source |
+ | --- | --- | --- | --- |
+-| Full words | 7,776 | 12.9 | The EFF's large word list, `eff_large_wordlist.txt`, under CC BY 3.0 US |
++| Full words | 7,776 | 12.9 | The EFF's large word list, `eff_large_wordlist.txt`, under CC BY 4.0 International |
+ | Syllables | 2,000 | 11.0 | Generated in code: a consonant, a vowel, and a consonant, from 20 consonants (all but `q`) and 5 vowels |
+ 
+-The word list ships as `src/crypto/wordlist/eff_large.txt`, compiled in with `include_str!`, without the dice numbers that start each line in the EFF's file. A test pins its SHA-256 and checks that it has 7,776 distinct words of lowercase ASCII letters. The README credits the EFF and names the license, as CC BY requires. 1Password's own word lists are not published, so a memorable password from multipass looks like one from 1Password but comes from a different list.
++The word list ships as `src/crypto/wordlist/eff_large.txt`, compiled in with `include_str!`, without the dice numbers that start each line in the EFF's file. A test pins its SHA-256, `6d557f0693958fb5e650b68b5bee585eb82cf4da32965505c789e924743bc522`, and checks that it has 7,776 distinct words of lowercase ASCII letters and hyphens, at most nine bytes long. Four words hold a hyphen: `drop-down`, `felt-tip`, `t-shirt`, and `yo-yo`. So with the `hyphen` separator a few different draws can produce the same text, such as `drop` and `down` against `drop-down`, which lowers the true strength by far less than the line's one decimal place shows. The EFF's dice page states no license of its own, and EFF's copyright policy (`https://www.eff.org/copyright`) puts its original material under the Creative Commons Attribution 4.0 International license. The README credits the EFF and names that license, as CC BY requires. 1Password's own word lists are not published, so a memorable password from multipass looks like one from 1Password but comes from a different list.
+ 
+ ### 2.5 Strength
+ 
+@@ -109,13 +109,14 @@ The strength line prints `log2` of the number of passwords the recipe can produc
+ | Memorable, `w` words | `w × log2(list)`, plus `(w − 1) × log2(10)` for `digit` separators or `(w − 1) × log2(10 + symbols)` for `digit-or-symbol`, plus `log2(w)` for `--capitalize one` |
+ | PIN, `n` digits | `n × log2(10)` |
+ 
+-The counts are exact, computed with 256-bit integers in `src/crypto/generate.rs`, because 128 characters from 94 is more than `u128` holds. When the strength is below 64 bits, the line ends with `-- weak for a password you cannot rate-limit`, which a 6-digit PIN always gets, and which is still right for a PIN that a bank's servers rate-limit.
++`crypto::generate::acceptance` computes the share of uniformly drawn strings that meet the requirements and the run limit, by a dynamic program over which requirements are met so far, the current run length, and the set the last character came from. The strength is `n × log2(a)` plus `log2` of that share. Working in shares rather than counts keeps every value between 0 and 1 in an `f64`, where 128 characters from 94, about 840 bits, would overflow any fixed-width integer, and tests check the result against brute-force counts. When the strength is below 64 bits, the line ends with `-- weak for a password you cannot rate-limit`, which a 6-digit PIN always gets, and which is still right for a PIN that a bank's servers rate-limit.
+ 
+ ### 2.6 Changes by file
+ 
+ | File | Change |
+ | --- | --- |
+-| `src/crypto/generate.rs` | New. `Recipe`, `password(&Recipe) -> Generated`, `entropy(&Recipe) -> f64`, the uniform index draw, the masked table read, and the exact counts. `Generated` holds a fixed buffer and a length. |
++| `src/crypto/generate.rs` | New. `Recipe`, `password(&Recipe) -> Generated`, `entropy(&Recipe) -> f64`, `acceptance`, the uniform index draw, the masked table read, and the exact counts. `Generated` holds a fixed buffer and a length. |
++| `src/generator.rs` | New. `Options`, the options as given; `Options::recipe`, which checks them and builds the recipe; `password`, which turns a drawn buffer into text; and `strength`, the line on stderr. |
+ | `src/crypto/wordlist/eff_large.txt` | New. The EFF's large word list, one word per line. |
+ | `src/crypto/mod.rs` | Declares `generate`. |
+ | `src/generate_rules.rs` | New. Parses `--rules` into the recipe's sets, length bounds, and run limit. |
+@@ -145,18 +146,19 @@ The counts are exact, computed with 256-bit integers in `src/crypto/generate.rs`
+ | `multipass generate --words 5 --separator digit --capitalize one` | Five EFF words, a digit between each pair, one capitalized, and `80.2 bits` |
+ | `multipass generate --pin 6` | Six digits and `19.9 bits` ending in the weak warning |
+ | `multipass add x --generate`, then `multipass get x` | `add` prints no password on stdout or stderr. `get` prints a 20-character password. |
+-| `multipass add x --generate --clip` in a test, against the private pasteboard | The pasteboard holds the stored secret |
+-| `multipass generate --length 3` | Fails, naming `--length` and the four required sets |
++| `multipass add x --generate --clip` | Stores the password, then copies it through `deliver`, the same function `get --clip` uses, whose clipboard tests run against a private pasteboard. The tests do not run this command, because it copies to the real clipboard; the parser test checks that `--clip` reaches `add` only with `--generate`. |
++| `multipass generate --length 3` | Fails with `--length must be from 4 to 128` |
+ | `multipass generate --separator space` | Fails: `--separator` needs `--words` |
+ | `multipass generate --rules 'required: unicode;'` | Fails, naming `unicode` |
+ 
+ Tests that must fail before the change and pass after it:
+ 
+-- **Uniform draws.** Draw 1,000,000 indexes below 94 with a fixed byte stream fed in place of `/dev/urandom`, and check that no count is off by more than five standard deviations. Catches a draw of one byte modulo `n`, which puts the first 68 counts about 10 percent high. The bias of a 16-bit value modulo `n` is too small for this test to see, which is why the next test exists.
+-- **Rejection bounds.** For `n` of 94, 7,776, and 10, a 16-bit value at the largest kept multiple minus one is kept, and the next is drawn again. Catches an off-by-one that keeps one biased value.
+-- **Exact counts.** The count of 4-character passwords over `{a, 1}` with both sets required is 14, and over 94 characters with all four sets required matches a brute-force count for length 4. Catches an inclusion and exclusion with a wrong sign, which would misstate strength.
++- **Every 16-bit value maps evenly.** Feeding each of the 65,536 values once, for `n` of 10, 94, 2,000, and 7,776, hits every index exactly `65536 / n` times, rounded down. Catches a plain `v % n`, which hits the first `65536 mod n` indexes once more, a bias too small for a statistical test to see.
++- **Only the remainder is rejected.** Exactly `65536 mod n` values are drawn again, and every kept value maps below `n`. Catches a threshold that rejects too much, which wastes draws, or maps out of range.
++- **Uniform draws.** 1,000,000 indexes below 94, drawn from a fixed SHA-256 stream fed in place of `/dev/urandom`, each land within five standard deviations of the mean. Catches a draw of one byte modulo `n`, which puts the first 68 counts about 10 percent high.
++- **Exact counts.** The count of 4-character passwords over `{a, 1}` with both sets required is 14. Over four small sets of 8 characters in all, with every set required, the strength matches a brute-force count of all 4,096 strings, with no run limit and with limits of 1 and 2. The plan's own figures, 130.9, 64.6, 80.2, 19.9, and 96.6 bits, come out of the code. Catches a count with a wrong term, which would misstate strength.
+ - **`max-consecutive`.** The count of 3-character passwords over two characters with at most 2 in a row is 6, and 10,000 drawn passwords never break the limit. Catches a rule checked on the wrong run.
+-- **The word list.** The file's SHA-256 matches the pinned digest, and it has 7,776 distinct lowercase words. Catches a truncated or edited list, which would lower the strength the line claims.
++- **The word list.** The file's SHA-256 matches the pinned digest, and it has 7,776 distinct words of lowercase letters and hyphens, at most nine bytes long. Catches a truncated or edited list, which would lower the strength the line claims.
+ - **The masked read** returns the same word as plain indexing for every index of the list. Catches a mask that picks the wrong entry.
+ - **Rules parsing.** Apple's examples parse to the expected sets and bounds, `unicode` is refused, and unknown properties are refused with their name. Catches a rule that is silently ignored.
+ 
+diff --git a/src/crypto/generate.rs b/src/crypto/generate.rs
+new file mode 100644
+index 0000000..c443b97
+--- /dev/null
++++ b/src/crypto/generate.rs
+@@ -0,0 +1,744 @@
++//! Drawing new passwords from random bytes, and measuring their strength.
++//!
++//! Every choice, whether a character, a word, a separator, or the word to
++//! capitalize, is "pick one of `n`". [`below`] makes that pick without bias,
++//! and [`pick`] reads the chosen entry by scanning its whole table with a
++//! mask, so no memory access depends on the secret index.
++//!
++//! The one branch on secret data is the decision to draw again. [`below`]
++//! draws again when a 16-bit value falls in the biased remainder, and
++//! [`password`] draws a whole password again when it misses a required set
++//! or repeats a character too often. Each decision depends on a value that
++//! is then thrown away, so its timing says nothing about the value kept.
++//! `AGENTS.md` names this exception beside scrypt's lookups.
++
++use std::io;
++
++use super::ct_eq_mask;
++
++/// The 32 ASCII punctuation characters, the default symbols.
++pub const SYMBOLS: &[u8] = b"!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
++pub const DIGITS: &[u8] = b"0123456789";
++pub const UPPERCASE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
++pub const LOWERCASE: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
++
++/// The EFF's large word list, one lowercase word per line.
++const EFF_LARGE: &str = include_str!("wordlist/eff_large.txt");
++/// The longest word in [`EFF_LARGE`], which `tests::eff_list_is_the_published_one`
++/// checks.
++const WORD_WIDTH: usize = 9;
++
++/// What to draw. A recipe holds no secret, so it can be printed and compared.
++#[derive(Debug, Clone, PartialEq)]
++pub enum Recipe {
++    Chars(Chars),
++    Words(Words),
++    Pin { length: usize },
++}
++
++/// Random characters drawn from the union of `cells`.
++#[derive(Debug, Clone, PartialEq)]
++pub struct Chars {
++    /// Disjoint sets of distinct characters.
++    pub cells: Vec<Cell>,
++    /// How many requirements the cells' `satisfies` bits name. A password is
++    /// kept only when its characters satisfy every one.
++    pub requirements: u32,
++    pub length: usize,
++    /// The most times one character may appear in a row, or `None` for no
++    /// limit.
++    pub max_consecutive: Option<usize>,
++}
++
++#[derive(Debug, Clone, PartialEq)]
++pub struct Cell {
++    pub chars: Vec<u8>,
++    /// Bit `i` is set when a character from this cell meets requirement `i`.
++    pub satisfies: u32,
++}
++
++#[derive(Debug, Clone, PartialEq)]
++pub struct Words {
++    pub count: usize,
++    pub separator: Separator,
++    pub capitalize: Capitalize,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq)]
++pub enum Separator {
++    /// The same character between every pair of words.
++    Fixed(u8),
++    /// A new random digit in each gap.
++    Digit,
++    /// A new random digit or symbol from [`SYMBOLS`] in each gap.
++    DigitOrSymbol,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq)]
++pub enum Capitalize {
++    None,
++    /// The first letter of every word.
++    First,
++    /// The first letter of one word, chosen at random.
++    One,
++}
++
++/// A drawn password: the first `len` bytes of `bytes` are ASCII. The buffer's
++/// size depends only on the recipe.
++pub struct Generated {
++    pub bytes: Vec<u8>,
++    pub len: usize,
++}
++
++/// The number of entries in the word list.
++pub fn word_count() -> usize {
++    EFF_LARGE.lines().count()
++}
++
++/// Draws a password from the operating system's generator.
++pub fn password(recipe: &Recipe) -> io::Result<Generated> {
++    password_from(recipe, &mut super::random::fill)
++}
++
++/// Draws a password from the bytes `fill` supplies, so tests can feed a
++/// fixed stream.
++pub fn password_from(
++    recipe: &Recipe,
++    fill: &mut dyn FnMut(&mut [u8]) -> io::Result<()>,
++) -> io::Result<Generated> {
++    let mut source = Source::new(fill);
++    match recipe {
++        Recipe::Chars(chars) => draw_chars(chars, &mut source),
++        Recipe::Pin { length } => draw_chars(&pin_chars(*length), &mut source),
++        Recipe::Words(words) => draw_words(words, &mut source),
++    }
++}
++
++/// The strength of `recipe` in bits: `log2` of the number of passwords it
++/// can produce, each equally likely. Negative infinity means it can produce
++/// none.
++pub fn entropy(recipe: &Recipe) -> f64 {
++    match recipe {
++        Recipe::Chars(chars) => chars_entropy(chars),
++        Recipe::Pin { length } => chars_entropy(&pin_chars(*length)),
++        Recipe::Words(words) => {
++            let gaps = words.count.saturating_sub(1) as f64;
++            let separator = match words.separator {
++                Separator::Fixed(_) => 0.0,
++                Separator::Digit => (DIGITS.len() as f64).log2(),
++                Separator::DigitOrSymbol => ((DIGITS.len() + SYMBOLS.len()) as f64).log2(),
++            };
++            let capitalize = match words.capitalize {
++                Capitalize::One => (words.count as f64).log2(),
++                Capitalize::None | Capitalize::First => 0.0,
++            };
++            words.count as f64 * (word_count() as f64).log2() + gaps * separator + capitalize
++        }
++    }
++}
++
++/// The share of uniformly drawn strings of `chars.length` characters that
++/// meet every requirement and the run limit. [`password`] draws again for
++/// the rest, so this is the chance that one draw is kept.
++pub fn acceptance(chars: &Chars) -> f64 {
++    let alphabet: usize = chars.cells.iter().map(|cell| cell.chars.len()).sum();
++    if alphabet == 0 || chars.length == 0 {
++        return 0.0;
++    }
++    let full = (1u32 << chars.requirements) - 1;
++    // The run length is tracked only up to the limit; with no limit, every
++    // state has run 1.
++    let runs = match chars.max_consecutive {
++        Some(limit) if limit < chars.length => limit,
++        _ => 1,
++    };
++    let limited = runs > 1 || chars.max_consecutive == Some(1);
++    let cells = chars.cells.len();
++    let index =
++        |mask: u32, run: usize, cell: usize| ((mask as usize * runs) + run - 1) * cells + cell;
++    let size = (1usize << chars.requirements) * runs * cells;
++    let a = alphabet as f64;
++
++    // p[mask, run, cell] is the probability that the characters so far meet
++    // the requirements in `mask`, end in a run of `run` equal characters,
++    // and end with a character from `cell`.
++    let mut p = vec![0.0f64; size];
++    for (c, cell) in chars.cells.iter().enumerate() {
++        p[index(cell.satisfies, 1, c)] += cell.chars.len() as f64 / a;
++    }
++    for _ in 1..chars.length {
++        let mut next = vec![0.0f64; size];
++        for mask in 0..=full {
++            for run in 1..=runs {
++                for prev in 0..cells {
++                    let v = p[index(mask, run, prev)];
++                    if v == 0.0 {
++                        continue;
++                    }
++                    for (c, cell) in chars.cells.iter().enumerate() {
++                        let m = mask | cell.satisfies;
++                        let s = cell.chars.len() as f64;
++                        if limited {
++                            // Any other character of this cell starts a new
++                            // run; the same character extends this one.
++                            let others = if c == prev { s - 1.0 } else { s };
++                            next[index(m, 1, c)] += v * others / a;
++                            if c == prev && run < runs {
++                                next[index(m, run + 1, c)] += v / a;
++                            }
++                        } else {
++                            next[index(m, 1, c)] += v * s / a;
++                        }
++                    }
++                }
++            }
++        }
++        p = next;
++    }
++    (1..=runs)
++        .flat_map(|run| (0..cells).map(move |c| (run, c)))
++        .map(|(run, c)| p[index(full, run, c)])
++        .sum()
++}
++
++fn chars_entropy(chars: &Chars) -> f64 {
++    let alphabet: usize = chars.cells.iter().map(|cell| cell.chars.len()).sum();
++    chars.length as f64 * (alphabet as f64).log2() + acceptance(chars).log2()
++}
++
++fn pin_chars(length: usize) -> Chars {
++    Chars {
++        cells: vec![Cell {
++            chars: DIGITS.to_vec(),
++            satisfies: 0,
++        }],
++        requirements: 0,
++        length,
++        max_consecutive: None,
++    }
++}
++
++/// Random bytes, read from `fill` 64 at a time.
++struct Source<'a> {
++    fill: &'a mut dyn FnMut(&mut [u8]) -> io::Result<()>,
++    buf: [u8; 64],
++    pos: usize,
++}
++
++impl<'a> Source<'a> {
++    fn new(fill: &'a mut dyn FnMut(&mut [u8]) -> io::Result<()>) -> Self {
++        Source {
++            fill,
++            buf: [0; 64],
++            pos: 64,
++        }
++    }
++
++    fn u16(&mut self) -> io::Result<u16> {
++        if self.pos + 2 > self.buf.len() {
++            (self.fill)(&mut self.buf)?;
++            self.pos = 0;
++        }
++        let v = u16::from_le_bytes([self.buf[self.pos], self.buf[self.pos + 1]]);
++        self.pos += 2;
++        Ok(v)
++    }
++}
++
++/// Maps a 16-bit value to an index below `n`, or `None` when the value falls
++/// in the remainder that would favor some indexes. This is Lemire's method:
++/// the high half of `v × n` is the index, and the low half tells whether `v`
++/// is one of the `65536 mod n` values to reject. It multiplies rather than
++/// divides, because division takes longer for some values on some CPUs.
++fn reduce(v: u16, n: u32) -> Option<u32> {
++    debug_assert!((1..=1 << 16).contains(&n));
++    let m = v as u32 * n;
++    let threshold = (1u32 << 16) % n;
++    if (m & 0xffff) < threshold {
++        None
++    } else {
++        Some(m >> 16)
++    }
++}
++
++/// An index below `n`, every one equally likely.
++fn below(n: usize, source: &mut Source) -> io::Result<usize> {
++    loop {
++        if let Some(i) = reduce(source.u16()?, n as u32) {
++            return Ok(i as usize);
++        }
++    }
++}
++
++/// All ones when `a < b`, and zero otherwise, for values below `2^63`.
++fn ct_lt_mask(a: usize, b: usize) -> usize {
++    0usize.wrapping_sub(a.wrapping_sub(b) >> (usize::BITS - 1))
++}
++
++/// `table[i]`, read by scanning every entry.
++fn pick(table: &[u8], i: usize) -> u8 {
++    table
++        .iter()
++        .enumerate()
++        .fold(0u8, |acc, (j, &b)| acc | (b & ct_eq_mask(i, j) as u8))
++}
++
++fn draw_chars(chars: &Chars, source: &mut Source) -> io::Result<Generated> {
++    let alphabet: Vec<u8> = chars
++        .cells
++        .iter()
++        .flat_map(|cell| cell.chars.clone())
++        .collect();
++    let mut bounds = Vec::with_capacity(chars.cells.len());
++    let mut start = 0;
++    for cell in &chars.cells {
++        bounds.push((start, start + cell.chars.len(), cell.satisfies as usize));
++        start += cell.chars.len();
++    }
++    let full = (1usize << chars.requirements) - 1;
++    let limit = chars.max_consecutive.unwrap_or(usize::MAX >> 1);
++    let mut indexes = vec![0usize; chars.length];
++    loop {
++        let mut met = 0usize;
++        let mut run = 0usize;
++        let mut too_long = 0usize;
++        for k in 0..chars.length {
++            let i = below(alphabet.len(), source)?;
++            for &(lo, hi, satisfies) in &bounds {
++                let inside = !ct_lt_mask(i, lo) & ct_lt_mask(i, hi);
++                met |= satisfies & inside;
++            }
++            let same = if k == 0 {
++                0
++            } else {
++                ct_eq_mask(i, indexes[k - 1])
++            };
++            run = ((run + 1) & same) | (1 & !same);
++            too_long |= ct_lt_mask(limit, run);
++            indexes[k] = i;
++        }
++        if met == full && too_long == 0 {
++            break;
++        }
++    }
++    let bytes: Vec<u8> = indexes.iter().map(|&i| pick(&alphabet, i)).collect();
++    let len = bytes.len();
++    Ok(Generated { bytes, len })
++}
++
++/// The word list as fixed-width rows, padded with zero bytes, and each
++/// word's length.
++fn word_table() -> (Vec<[u8; WORD_WIDTH]>, Vec<usize>) {
++    let mut rows = Vec::new();
++    let mut lens = Vec::new();
++    for word in EFF_LARGE.lines() {
++        let mut row = [0u8; WORD_WIDTH];
++        row[..word.len()].copy_from_slice(word.as_bytes());
++        rows.push(row);
++        lens.push(word.len());
++    }
++    (rows, lens)
++}
++
++/// Row `i` and its length, read by scanning every row.
++fn pick_word(rows: &[[u8; WORD_WIDTH]], lens: &[usize], i: usize) -> ([u8; WORD_WIDTH], usize) {
++    let mut out = [0u8; WORD_WIDTH];
++    let mut len = 0usize;
++    for (j, (row, &l)) in rows.iter().zip(lens).enumerate() {
++        let mask = ct_eq_mask(i, j);
++        for (o, &b) in out.iter_mut().zip(row) {
++            *o |= b & mask as u8;
++        }
++        len |= l & mask;
++    }
++    (out, len)
++}
++
++fn draw_words(words: &Words, source: &mut Source) -> io::Result<Generated> {
++    let (rows, lens) = word_table();
++    let separators: Vec<u8> = match words.separator {
++        Separator::Fixed(b) => vec![b],
++        Separator::Digit => DIGITS.to_vec(),
++        Separator::DigitOrSymbol => [DIGITS, SYMBOLS].concat(),
++    };
++    let capitalized = match words.capitalize {
++        Capitalize::One => below(words.count, source)?,
++        Capitalize::None | Capitalize::First => 0,
++    };
++
++    // Each word fills a slot of WORD_WIDTH bytes followed by one separator
++    // byte. `real` marks the bytes that belong to the password, so the
++    // padding can be squeezed out below without a branch.
++    let slot = WORD_WIDTH + 1;
++    let width = words.count * slot - 1;
++    let mut bytes = vec![0u8; width];
++    let mut real = vec![0usize; width];
++    for w in 0..words.count {
++        let (mut word, len) = pick_word(&rows, &lens, below(rows.len(), source)?);
++        let upper = match words.capitalize {
++            Capitalize::None => 0,
++            Capitalize::First => usize::MAX,
++            Capitalize::One => ct_eq_mask(w, capitalized),
++        };
++        // Every word starts with a lowercase ASCII letter, which this makes
++        // uppercase.
++        word[0] -= 0x20 & upper as u8;
++        for (b, &byte) in word.iter().enumerate() {
++            bytes[w * slot + b] = byte;
++            real[w * slot + b] = ct_lt_mask(b, len);
++        }
++        if w + 1 < words.count {
++            let s = below(separators.len(), source)?;
++            bytes[w * slot + WORD_WIDTH] = pick(&separators, s);
++            real[w * slot + WORD_WIDTH] = usize::MAX;
++        }
++    }
++
++    // Moves each real byte to its rank among the real bytes: output byte k
++    // takes the real byte that has k real bytes before it.
++    let mut ranks = vec![0usize; width];
++    let mut len = 0usize;
++    for j in 0..width {
++        ranks[j] = len;
++        len += real[j] & 1;
++    }
++    let mut out = vec![0u8; width];
++    for (k, o) in out.iter_mut().enumerate() {
++        for j in 0..width {
++            *o |= bytes[j] & (ct_eq_mask(ranks[j], k) & real[j]) as u8;
++        }
++    }
++    Ok(Generated { bytes: out, len })
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::crypto::hex;
++    use crate::crypto::hmac::Digest;
++    use crate::crypto::sha256::Sha256;
++
++    /// A repeatable stream of random-looking bytes, SHA-256 of a seed and a
++    /// counter, so tests never read `/dev/urandom`.
++    fn stream(seed: u8) -> impl FnMut(&mut [u8]) -> io::Result<()> {
++        let mut counter = 0u64;
++        move |buf: &mut [u8]| {
++            for chunk in buf.chunks_mut(32) {
++                let mut input = vec![seed];
++                input.extend_from_slice(&counter.to_le_bytes());
++                let block = Sha256::digest(&input);
++                chunk.copy_from_slice(&block[..chunk.len()]);
++                counter += 1;
++            }
++            Ok(())
++        }
++    }
++
++    fn draw(recipe: &Recipe, fill: &mut dyn FnMut(&mut [u8]) -> io::Result<()>) -> String {
++        let g = password_from(recipe, fill).unwrap();
++        String::from_utf8(g.bytes[..g.len].to_vec()).unwrap()
++    }
++
++    fn sets(lists: &[&[u8]]) -> Chars {
++        Chars {
++            cells: lists
++                .iter()
++                .enumerate()
++                .map(|(i, chars)| Cell {
++                    chars: chars.to_vec(),
++                    satisfies: 1 << i,
++                })
++                .collect(),
++            requirements: lists.len() as u32,
++            length: 20,
++            max_consecutive: None,
++        }
++    }
++
++    fn default_chars(length: usize) -> Chars {
++        Chars {
++            length,
++            ..sets(&[UPPERCASE, LOWERCASE, DIGITS, SYMBOLS])
++        }
++    }
++
++    fn bits(recipe: &Recipe) -> String {
++        format!("{:.1}", entropy(recipe))
++    }
++
++    #[test]
++    fn every_16_bit_value_maps_evenly() {
++        // Feeding each 16-bit value once must hit every index equally often.
++        // A plain `v % n` would hit the first `65536 mod n` indexes once more.
++        for n in [10u32, 94, 2000, 7776] {
++            let mut counts = vec![0u32; n as usize];
++            for v in 0..=u16::MAX {
++                if let Some(i) = reduce(v, n) {
++                    counts[i as usize] += 1;
++                }
++            }
++            let each = (1u32 << 16) / n;
++            assert!(counts.iter().all(|&c| c == each), "n = {n}");
++        }
++    }
++
++    #[test]
++    fn rejects_only_the_biased_remainder() {
++        // Exactly `65536 mod n` values are drawn again, and every kept value
++        // maps below n. Rejecting more wastes draws; rejecting fewer leaves
++        // bias, which `every_16_bit_value_maps_evenly` catches.
++        for n in [10u32, 94, 7776, 1 << 16] {
++            let kept: Vec<u32> = (0..=u16::MAX).filter_map(|v| reduce(v, n)).collect();
++            assert_eq!(65536 - kept.len() as u32, (1u32 << 16) % n, "n = {n}");
++            assert!(kept.iter().all(|&i| i < n), "n = {n}");
++        }
++    }
++
++    #[test]
++    fn draws_are_uniform() {
++        let mut fill = stream(1);
++        let mut source = Source::new(&mut fill);
++        let draws = 1_000_000;
++        let mut counts = [0u32; 94];
++        for _ in 0..draws {
++            counts[below(94, &mut source).unwrap()] += 1;
++        }
++        let expected = draws as f64 / 94.0;
++        let sd = (expected * (1.0 - 1.0 / 94.0)).sqrt();
++        for (i, &c) in counts.iter().enumerate() {
++            assert!((c as f64 - expected).abs() < 5.0 * sd, "index {i}: {c}");
++        }
++    }
++
++    #[test]
++    fn masked_reads_match_plain_indexing() {
++        let table: Vec<u8> = (0..=255).collect();
++        for i in 0..256 {
++            assert_eq!(pick(&table, i), i as u8);
++        }
++        let (rows, lens) = word_table();
++        for (i, word) in EFF_LARGE.lines().enumerate() {
++            let (row, len) = pick_word(&rows, &lens, i);
++            assert_eq!(&row[..len], word.as_bytes(), "index {i}");
++        }
++    }
++
++    #[test]
++    fn eff_list_is_the_published_one() {
++        // The EFF's file with the dice numbers and tabs removed. A changed
++        // list would make the strength line wrong.
++        assert_eq!(
++            Sha256::digest(EFF_LARGE.as_bytes()).to_vec(),
++            hex("6d557f0693958fb5e650b68b5bee585eb82cf4da32965505c789e924743bc522")
++        );
++        let words: Vec<&str> = EFF_LARGE.lines().collect();
++        assert_eq!(words.len(), 7776);
++        let distinct: std::collections::BTreeSet<&str> = words.iter().copied().collect();
++        assert_eq!(distinct.len(), 7776);
++        assert!(words.iter().all(|w| {
++            w.starts_with(|c: char| c.is_ascii_lowercase())
++                && w.bytes().all(|b| b.is_ascii_lowercase() || b == b'-')
++        }));
++        assert_eq!(words.iter().map(|w| w.len()).max(), Some(WORD_WIDTH));
++    }
++
++    #[test]
++    fn counts_passwords_that_meet_requirements() {
++        // Four characters over {a, 1} with both required: 16 minus aaaa and
++        // 1111.
++        let chars = Chars {
++            length: 4,
++            ..sets(&[b"a", b"1"])
++        };
++        assert!((entropy(&Recipe::Chars(chars)) - 14f64.log2()).abs() < 1e-9);
++    }
++
++    #[test]
++    fn counts_match_brute_force() {
++        // Every string over a small alphabet, checked by hand against the
++        // requirements and the run limit.
++        let cells: [&[u8]; 4] = [b"ABC", b"de", b"45", b"!"];
++        for limit in [None, Some(1), Some(2)] {
++            let chars = Chars {
++                length: 4,
++                max_consecutive: limit,
++                ..sets(&cells)
++            };
++            let alphabet: Vec<u8> = cells.concat();
++            let mut count = 0u32;
++            for n in 0..alphabet.len().pow(4) {
++                let s: Vec<u8> = (0..4)
++                    .map(|k| alphabet[n / alphabet.len().pow(k) % alphabet.len()])
++                    .collect();
++                let all_sets = cells.iter().all(|cell| s.iter().any(|b| cell.contains(b)));
++                let mut longest = 1;
++                let mut run = 1;
++                for k in 1..4 {
++                    run = if s[k] == s[k - 1] { run + 1 } else { 1 };
++                    longest = longest.max(run);
++                }
++                if all_sets && limit.is_none_or(|l| longest <= l) {
++                    count += 1;
++                }
++            }
++            let expected = (count as f64).log2();
++            assert!(
++                (entropy(&Recipe::Chars(chars)) - expected).abs() < 1e-9,
++                "limit {limit:?}: {count}"
++            );
++        }
++    }
++
++    #[test]
++    fn counts_runs() {
++        // Three characters over {a, b} with at most two in a row: 8 minus
++        // aaa and bbb.
++        let chars = Chars {
++            cells: vec![Cell {
++                chars: b"ab".to_vec(),
++                satisfies: 0,
++            }],
++            requirements: 0,
++            length: 3,
++            max_consecutive: Some(2),
++        };
++        assert!((entropy(&Recipe::Chars(chars.clone())) - 6f64.log2()).abs() < 1e-9);
++        let mut fill = stream(2);
++        let recipe = Recipe::Chars(Chars {
++            length: 12,
++            ..chars
++        });
++        for _ in 0..10_000 {
++            let s = draw(&recipe, &mut fill);
++            assert!(!s.contains("aaa") && !s.contains("bbb"), "{s}");
++        }
++    }
++
++    #[test]
++    fn states_the_plans_strengths() {
++        assert_eq!(bits(&Recipe::Chars(default_chars(20))), "130.9");
++        let words = |separator, capitalize| {
++            Recipe::Words(Words {
++                count: 5,
++                separator,
++                capitalize,
++            })
++        };
++        assert_eq!(
++            bits(&words(Separator::Fixed(b'-'), Capitalize::None)),
++            "64.6"
++        );
++        assert_eq!(bits(&words(Separator::Digit, Capitalize::One)), "80.2");
++        assert_eq!(bits(&Recipe::Pin { length: 6 }), "19.9");
++        // The plan's rules example: 16 characters, lower, upper, and digits
++        // required, four symbols allowed, at most two in a row.
++        let rules = Chars {
++            cells: vec![
++                Cell {
++                    chars: LOWERCASE.to_vec(),
++                    satisfies: 1,
++                },
++                Cell {
++                    chars: UPPERCASE.to_vec(),
++                    satisfies: 2,
++                },
++                Cell {
++                    chars: DIGITS.to_vec(),
++                    satisfies: 4,
++                },
++                Cell {
++                    chars: b"-!#$".to_vec(),
++                    satisfies: 0,
++                },
++            ],
++            requirements: 3,
++            length: 16,
++            max_consecutive: Some(2),
++        };
++        assert_eq!(bits(&Recipe::Chars(rules)), "96.6");
++    }
++
++    #[test]
++    fn redraws_about_one_in_nine_default_passwords() {
++        let missed = 1.0 - acceptance(&default_chars(20));
++        assert!((0.10..0.12).contains(&missed), "{missed}");
++    }
++
++    #[test]
++    fn random_passwords_hold_every_required_set() {
++        let mut fill = stream(3);
++        let recipe = Recipe::Chars(default_chars(4));
++        for _ in 0..2000 {
++            let s = draw(&recipe, &mut fill);
++            assert_eq!(s.len(), 4);
++            for set in [UPPERCASE, LOWERCASE, DIGITS, SYMBOLS] {
++                assert!(s.bytes().any(|b| set.contains(&b)), "{s}");
++            }
++        }
++    }
++
++    #[test]
++    fn memorable_passwords_join_listed_words() {
++        let mut fill = stream(4);
++        let list: std::collections::BTreeSet<&str> = EFF_LARGE.lines().collect();
++        for (separator, capitalize) in [
++            (Separator::Fixed(b' '), Capitalize::None),
++            (Separator::Digit, Capitalize::First),
++            (Separator::DigitOrSymbol, Capitalize::One),
++        ] {
++            let recipe = Recipe::Words(Words {
++                count: 5,
++                separator,
++                capitalize,
++            });
++            for _ in 0..200 {
++                let s = draw(&recipe, &mut fill);
++                // Words hold only letters and hyphens. A separator can be a
++                // hyphen too, so split on the gaps' known positions instead:
++                // each word is the longest run of letters and inner hyphens
++                // that the list holds.
++                let parts = split_words(&s, &list);
++                assert_eq!(parts.len(), 5, "{s}");
++                let capitals = parts
++                    .iter()
++                    .filter(|w| w.starts_with(|c: char| c.is_ascii_uppercase()))
++                    .count();
++                let expected = match capitalize {
++                    Capitalize::None => 0,
++                    Capitalize::First => 5,
++                    Capitalize::One => 1,
++                };
++                assert_eq!(capitals, expected, "{s}");
++                for part in parts {
++                    assert!(list.contains(part.to_ascii_lowercase().as_str()), "{s}");
++                }
++            }
++        }
++    }
++
++    /// Splits a memorable password back into its words, trying the longest
++    /// listed word at each position, so a hyphen inside `t-shirt` and a
++    /// hyphen separator are told apart.
++    fn split_words<'a>(s: &'a str, list: &std::collections::BTreeSet<&str>) -> Vec<&'a str> {
++        let mut parts = Vec::new();
++        let mut rest = s;
++        while !rest.is_empty() {
++            let end = (1..=rest.len().min(WORD_WIDTH))
++                .rev()
++                .find(|&n| list.contains(rest[..n].to_ascii_lowercase().as_str()))
++                .unwrap_or_else(|| panic!("no word starts {rest:?} in {s:?}"));
++            parts.push(&rest[..end]);
++            // Skip the one separator character after the word.
++            rest = rest.get(end + 1..).unwrap_or("");
++        }
++        parts
++    }
++
++    #[test]
++    fn pins_are_digits() {
++        let mut fill = stream(5);
++        let s = draw(&Recipe::Pin { length: 6 }, &mut fill);
++        assert_eq!(s.len(), 6);
++        assert!(s.bytes().all(|b| b.is_ascii_digit()), "{s}");
++    }
++}
+diff --git a/src/crypto/mod.rs b/src/crypto/mod.rs
+index 29b7aad..5000bdf 100644
+--- a/src/crypto/mod.rs
++++ b/src/crypto/mod.rs
+@@ -8,6 +8,7 @@
+ pub mod base32;
+ pub mod base64;
+ pub mod chacha20poly1305;
++pub mod generate;
+ pub mod hmac;
+ pub mod hotp;
+ pub mod random;
+diff --git a/src/crypto/wordlist/eff_large.txt b/src/crypto/wordlist/eff_large.txt
+new file mode 100644
+index 0000000..caf71f5
+--- /dev/null
++++ b/src/crypto/wordlist/eff_large.txt
+@@ -0,0 +1,7776 @@
++abacus
++abdomen
++abdominal
++abide
++abiding
++ability
++ablaze
++able
++abnormal
++abrasion
++abrasive
++abreast
++abridge
++abroad
++abruptly
++absence
++absentee
++absently
++absinthe
++absolute
++absolve
++abstain
++abstract
++absurd
++accent
++acclaim
++acclimate
++accompany
++account
++accuracy
++accurate
++accustom
++acetone
++achiness
++aching
++acid
++acorn
++acquaint
++acquire
++acre
++acrobat
++acronym
++acting
++action
++activate
++activator
++active
++activism
++activist
++activity
++actress
++acts
++acutely
++acuteness
++aeration
++aerobics
++aerosol
++aerospace
++afar
++affair
++affected
++affecting
++affection
++affidavit
++affiliate
++affirm
++affix
++afflicted
++affluent
++afford
++affront
++aflame
++afloat
++aflutter
++afoot
++afraid
++afterglow
++afterlife
++aftermath
++aftermost
++afternoon
++aged
++ageless
++agency
++agenda
++agent
++aggregate
++aghast
++agile
++agility
++aging
++agnostic
++agonize
++agonizing
++agony
++agreeable
++agreeably
++agreed
++agreeing
++agreement
++aground
++ahead
++ahoy
++aide
++aids
++aim
++ajar
++alabaster
++alarm
++albatross
++album
++alfalfa
++algebra
++algorithm
++alias
++alibi
++alienable
++alienate
++aliens
++alike
++alive
++alkaline
++alkalize
++almanac
++almighty
++almost
++aloe
++aloft
++aloha
++alone
++alongside
++aloof
++alphabet
++alright
++although
++altitude
++alto
++aluminum
++alumni
++always
++amaretto
++amaze
++amazingly
++amber
++ambiance
++ambiguity
++ambiguous
++ambition
++ambitious
++ambulance
++ambush
++amendable
++amendment
++amends
++amenity
++amiable
++amicably
++amid
++amigo
++amino
++amiss
++ammonia
++ammonium
++amnesty
++amniotic
++among
++amount
++amperage
++ample
++amplifier
++amplify
++amply
++amuck
++amulet
++amusable
++amused
++amusement
++amuser
++amusing
++anaconda
++anaerobic
++anagram
++anatomist
++anatomy
++anchor
++anchovy
++ancient
++android
++anemia
++anemic
++aneurism
++anew
++angelfish
++angelic
++anger
++angled
++angler
++angles
++angling
++angrily
++angriness
++anguished
++angular
++animal
++animate
++animating
++animation
++animator
++anime
++animosity
++ankle
++annex
++annotate
++announcer
++annoying
++annually
++annuity
++anointer
++another
++answering
++antacid
++antarctic
++anteater
++antelope
++antennae
++anthem
++anthill
++anthology
++antibody
++antics
++antidote
++antihero
++antiquely
++antiques
++antiquity
++antirust
++antitoxic
++antitrust
++antiviral
++antivirus
++antler
++antonym
++antsy
++anvil
++anybody
++anyhow
++anymore
++anyone
++anyplace
++anything
++anytime
++anyway
++anywhere
++aorta
++apache
++apostle
++appealing
++appear
++appease
++appeasing
++appendage
++appendix
++appetite
++appetizer
++applaud
++applause
++apple
++appliance
++applicant
++applied
++apply
++appointee
++appraisal
++appraiser
++apprehend
++approach
++approval
++approve
++apricot
++april
++apron
++aptitude
++aptly
++aqua
++aqueduct
++arbitrary
++arbitrate
++ardently
++area
++arena
++arguable
++arguably
++argue
++arise
++armadillo
++armband
++armchair
++armed
++armful
++armhole
++arming
++armless
++armoire
++armored
++armory
++armrest
++army
++aroma
++arose
++around
++arousal
++arrange
++array
++arrest
++arrival
++arrive
++arrogance
++arrogant
++arson
++art
++ascend
++ascension
++ascent
++ascertain
++ashamed
++ashen
++ashes
++ashy
++aside
++askew
++asleep
++asparagus
++aspect
++aspirate
++aspire
++aspirin
++astonish
++astound
++astride
++astrology
++astronaut
++astronomy
++astute
++atlantic
++atlas
++atom
++atonable
++atop
++atrium
++atrocious
++atrophy
++attach
++attain
++attempt
++attendant
++attendee
++attention
++attentive
++attest
++attic
++attire
++attitude
++attractor
++attribute
++atypical
++auction
++audacious
++audacity
++audible
++audibly
++audience
++audio
++audition
++augmented
++august
++authentic
++author
++autism
++autistic
++autograph
++automaker
++automated
++automatic
++autopilot
++available
++avalanche
++avatar
++avenge
++avenging
++avenue
++average
++aversion
++avert
++aviation
++aviator
++avid
++avoid
++await
++awaken
++award
++aware
++awhile
++awkward
++awning
++awoke
++awry
++axis
++babble
++babbling
++babied
++baboon
++backache
++backboard
++backboned
++backdrop
++backed
++backer
++backfield
++backfire
++backhand
++backing
++backlands
++backlash
++backless
++backlight
++backlit
++backlog
++backpack
++backpedal
++backrest
++backroom
++backshift
++backside
++backslid
++backspace
++backspin
++backstab
++backstage
++backtalk
++backtrack
++backup
++backward
++backwash
++backwater
++backyard
++bacon
++bacteria
++bacterium
++badass
++badge
++badland
++badly
++badness
++baffle
++baffling
++bagel
++bagful
++baggage
++bagged
++baggie
++bagginess
++bagging
++baggy
++bagpipe
++baguette
++baked
++bakery
++bakeshop
++baking
++balance
++balancing
++balcony
++balmy
++balsamic
++bamboo
++banana
++banish
++banister
++banjo
++bankable
++bankbook
++banked
++banker
++banking
++banknote
++bankroll
++banner
++bannister
++banshee
++banter
++barbecue
++barbed
++barbell
++barber
++barcode
++barge
++bargraph
++barista
++baritone
++barley
++barmaid
++barman
++barn
++barometer
++barrack
++barracuda
++barrel
++barrette
++barricade
++barrier
++barstool
++bartender
++barterer
++bash
++basically
++basics
++basil
++basin
++basis
++basket
++batboy
++batch
++bath
++baton
++bats
++battalion
++battered
++battering
++battery
++batting
++battle
++bauble
++bazooka
++blabber
++bladder
++blade
++blah
++blame
++blaming
++blanching
++blandness
++blank
++blaspheme
++blasphemy
++blast
++blatancy
++blatantly
++blazer
++blazing
++bleach
++bleak
++bleep
++blemish
++blend
++bless
++blighted
++blimp
++bling
++blinked
++blinker
++blinking
++blinks
++blip
++blissful
++blitz
++blizzard
++bloated
++bloating
++blob
++blog
++bloomers
++blooming
++blooper
++blot
++blouse
++blubber
++bluff
++bluish
++blunderer
++blunt
++blurb
++blurred
++blurry
++blurt
++blush
++blustery
++boaster
++boastful
++boasting
++boat
++bobbed
++bobbing
++bobble
++bobcat
++bobsled
++bobtail
++bodacious
++body
++bogged
++boggle
++bogus
++boil
++bok
++bolster
++bolt
++bonanza
++bonded
++bonding
++bondless
++boned
++bonehead
++boneless
++bonelike
++boney
++bonfire
++bonnet
++bonsai
++bonus
++bony
++boogeyman
++boogieman
++book
++boondocks
++booted
++booth
++bootie
++booting
++bootlace
++bootleg
++boots
++boozy
++borax
++boring
++borough
++borrower
++borrowing
++boss
++botanical
++botanist
++botany
++botch
++both
++bottle
++bottling
++bottom
++bounce
++bouncing
++bouncy
++bounding
++boundless
++bountiful
++bovine
++boxcar
++boxer
++boxing
++boxlike
++boxy
++breach
++breath
++breeches
++breeching
++breeder
++breeding
++breeze
++breezy
++brethren
++brewery
++brewing
++briar
++bribe
++brick
++bride
++bridged
++brigade
++bright
++brilliant
++brim
++bring
++brink
++brisket
++briskly
++briskness
++bristle
++brittle
++broadband
++broadcast
++broaden
++broadly
++broadness
++broadside
++broadways
++broiler
++broiling
++broken
++broker
++bronchial
++bronco
++bronze
++bronzing
++brook
++broom
++brought
++browbeat
++brownnose
++browse
++browsing
++bruising
++brunch
++brunette
++brunt
++brush
++brussels
++brute
++brutishly
++bubble
++bubbling
++bubbly
++buccaneer
++bucked
++bucket
++buckle
++buckshot
++buckskin
++bucktooth
++buckwheat
++buddhism
++buddhist
++budding
++buddy
++budget
++buffalo
++buffed
++buffer
++buffing
++buffoon
++buggy
++bulb
++bulge
++bulginess
++bulgur
++bulk
++bulldog
++bulldozer
++bullfight
++bullfrog
++bullhorn
++bullion
++bullish
++bullpen
++bullring
++bullseye
++bullwhip
++bully
++bunch
++bundle
++bungee
++bunion
++bunkbed
++bunkhouse
++bunkmate
++bunny
++bunt
++busboy
++bush
++busily
++busload
++bust
++busybody
++buzz
++cabana
++cabbage
++cabbie
++cabdriver
++cable
++caboose
++cache
++cackle
++cacti
++cactus
++caddie
++caddy
++cadet
++cadillac
++cadmium
++cage
++cahoots
++cake
++calamari
++calamity
++calcium
++calculate
++calculus
++caliber
++calibrate
++calm
++caloric
++calorie
++calzone
++camcorder
++cameo
++camera
++camisole
++camper
++campfire
++camping
++campsite
++campus
++canal
++canary
++cancel
++candied
++candle
++candy
++cane
++canine
++canister
++cannabis
++canned
++canning
++cannon
++cannot
++canola
++canon
++canopener
++canopy
++canteen
++canyon
++capable
++capably
++capacity
++cape
++capillary
++capital
++capitol
++capped
++capricorn
++capsize
++capsule
++caption
++captivate
++captive
++captivity
++capture
++caramel
++carat
++caravan
++carbon
++cardboard
++carded
++cardiac
++cardigan
++cardinal
++cardstock
++carefully
++caregiver
++careless
++caress
++caretaker
++cargo
++caring
++carless
++carload
++carmaker
++carnage
++carnation
++carnival
++carnivore
++carol
++carpenter
++carpentry
++carpool
++carport
++carried
++carrot
++carrousel
++carry
++cartel
++cartload
++carton
++cartoon
++cartridge
++cartwheel
++carve
++carving
++carwash
++cascade
++case
++cash
++casing
++casino
++casket
++cassette
++casually
++casualty
++catacomb
++catalog
++catalyst
++catalyze
++catapult
++cataract
++catatonic
++catcall
++catchable
++catcher
++catching
++catchy
++caterer
++catering
++catfight
++catfish
++cathedral
++cathouse
++catlike
++catnap
++catnip
++catsup
++cattail
++cattishly
++cattle
++catty
++catwalk
++caucasian
++caucus
++causal
++causation
++cause
++causing
++cauterize
++caution
++cautious
++cavalier
++cavalry
++caviar
++cavity
++cedar
++celery
++celestial
++celibacy
++celibate
++celtic
++cement
++census
++ceramics
++ceremony
++certainly
++certainty
++certified
++certify
++cesarean
++cesspool
++chafe
++chaffing
++chain
++chair
++chalice
++challenge
++chamber
++chamomile
++champion
++chance
++change
++channel
++chant
++chaos
++chaperone
++chaplain
++chapped
++chaps
++chapter
++character
++charbroil
++charcoal
++charger
++charging
++chariot
++charity
++charm
++charred
++charter
++charting
++chase
++chasing
++chaste
++chastise
++chastity
++chatroom
++chatter
++chatting
++chatty
++cheating
++cheddar
++cheek
++cheer
++cheese
++cheesy
++chef
++chemicals
++chemist
++chemo
++cherisher
++cherub
++chess
++chest
++chevron
++chevy
++chewable
++chewer
++chewing
++chewy
++chief
++chihuahua
++childcare
++childhood
++childish
++childless
++childlike
++chili
++chill
++chimp
++chip
++chirping
++chirpy
++chitchat
++chivalry
++chive
++chloride
++chlorine
++choice
++chokehold
++choking
++chomp
++chooser
++choosing
++choosy
++chop
++chosen
++chowder
++chowtime
++chrome
++chubby
++chuck
++chug
++chummy
++chump
++chunk
++churn
++chute
++cider
++cilantro
++cinch
++cinema
++cinnamon
++circle
++circling
++circular
++circulate
++circus
++citable
++citadel
++citation
++citizen
++citric
++citrus
++city
++civic
++civil
++clad
++claim
++clambake
++clammy
++clamor
++clamp
++clamshell
++clang
++clanking
++clapped
++clapper
++clapping
++clarify
++clarinet
++clarity
++clash
++clasp
++class
++clatter
++clause
++clavicle
++claw
++clay
++clean
++clear
++cleat
++cleaver
++cleft
++clench
++clergyman
++clerical
++clerk
++clever
++clicker
++client
++climate
++climatic
++cling
++clinic
++clinking
++clip
++clique
++cloak
++clobber
++clock
++clone
++cloning
++closable
++closure
++clothes
++clothing
++cloud
++clover
++clubbed
++clubbing
++clubhouse
++clump
++clumsily
++clumsy
++clunky
++clustered
++clutch
++clutter
++coach
++coagulant
++coastal
++coaster
++coasting
++coastland
++coastline
++coat
++coauthor
++cobalt
++cobbler
++cobweb
++cocoa
++coconut
++cod
++coeditor
++coerce
++coexist
++coffee
++cofounder
++cognition
++cognitive
++cogwheel
++coherence
++coherent
++cohesive
++coil
++coke
++cola
++cold
++coleslaw
++coliseum
++collage
++collapse
++collar
++collected
++collector
++collide
++collie
++collision
++colonial
++colonist
++colonize
++colony
++colossal
++colt
++coma
++come
++comfort
++comfy
++comic
++coming
++comma
++commence
++commend
++comment
++commerce
++commode
++commodity
++commodore
++common
++commotion
++commute
++commuting
++compacted
++compacter
++compactly
++compactor
++companion
++company
++compare
++compel
++compile
++comply
++component
++composed
++composer
++composite
++compost
++composure
++compound
++compress
++comprised
++computer
++computing
++comrade
++concave
++conceal
++conceded
++concept
++concerned
++concert
++conch
++concierge
++concise
++conclude
++concrete
++concur
++condense
++condiment
++condition
++condone
++conducive
++conductor
++conduit
++cone
++confess
++confetti
++confidant
++confident
++confider
++confiding
++configure
++confined
++confining
++confirm
++conflict
++conform
++confound
++confront
++confused
++confusing
++confusion
++congenial
++congested
++congrats
++congress
++conical
++conjoined
++conjure
++conjuror
++connected
++connector
++consensus
++consent
++console
++consoling
++consonant
++constable
++constant
++constrain
++constrict
++construct
++consult
++consumer
++consuming
++contact
++container
++contempt
++contend
++contented
++contently
++contents
++contest
++context
++contort
++contour
++contrite
++control
++contusion
++convene
++convent
++copartner
++cope
++copied
++copier
++copilot
++coping
++copious
++copper
++copy
++coral
++cork
++cornball
++cornbread
++corncob
++cornea
++corned
++corner
++cornfield
++cornflake
++cornhusk
++cornmeal
++cornstalk
++corny
++coronary
++coroner
++corporal
++corporate
++corral
++correct
++corridor
++corrode
++corroding
++corrosive
++corsage
++corset
++cortex
++cosigner
++cosmetics
++cosmic
++cosmos
++cosponsor
++cost
++cottage
++cotton
++couch
++cough
++could
++countable
++countdown
++counting
++countless
++country
++county
++courier
++covenant
++cover
++coveted
++coveting
++coyness
++cozily
++coziness
++cozy
++crabbing
++crabgrass
++crablike
++crabmeat
++cradle
++cradling
++crafter
++craftily
++craftsman
++craftwork
++crafty
++cramp
++cranberry
++crane
++cranial
++cranium
++crank
++crate
++crave
++craving
++crawfish
++crawlers
++crawling
++crayfish
++crayon
++crazed
++crazily
++craziness
++crazy
++creamed
++creamer
++creamlike
++crease
++creasing
++creatable
++create
++creation
++creative
++creature
++credible
++credibly
++credit
++creed
++creme
++creole
++crepe
++crept
++crescent
++crested
++cresting
++crestless
++crevice
++crewless
++crewman
++crewmate
++crib
++cricket
++cried
++crier
++crimp
++crimson
++cringe
++cringing
++crinkle
++crinkly
++crisped
++crisping
++crisply
++crispness
++crispy
++criteria
++critter
++croak
++crock
++crook
++croon
++crop
++cross
++crouch
++crouton
++crowbar
++crowd
++crown
++crucial
++crudely
++crudeness
++cruelly
++cruelness
++cruelty
++crumb
++crummiest
++crummy
++crumpet
++crumpled
++cruncher
++crunching
++crunchy
++crusader
++crushable
++crushed
++crusher
++crushing
++crust
++crux
++crying
++cryptic
++crystal
++cubbyhole
++cube
++cubical
++cubicle
++cucumber
++cuddle
++cuddly
++cufflink
++culinary
++culminate
++culpable
++culprit
++cultivate
++cultural
++culture
++cupbearer
++cupcake
++cupid
++cupped
++cupping
++curable
++curator
++curdle
++cure
++curfew
++curing
++curled
++curler
++curliness
++curling
++curly
++curry
++curse
++cursive
++cursor
++curtain
++curtly
++curtsy
++curvature
++curve
++curvy
++cushy
++cusp
++cussed
++custard
++custodian
++custody
++customary
++customer
++customize
++customs
++cut
++cycle
++cyclic
++cycling
++cyclist
++cylinder
++cymbal
++cytoplasm
++cytoplast
++dab
++dad
++daffodil
++dagger
++daily
++daintily
++dainty
++dairy
++daisy
++dallying
++dance
++dancing
++dandelion
++dander
++dandruff
++dandy
++danger
++dangle
++dangling
++daredevil
++dares
++daringly
++darkened
++darkening
++darkish
++darkness
++darkroom
++darling
++darn
++dart
++darwinism
++dash
++dastardly
++data
++datebook
++dating
++daughter
++daunting
++dawdler
++dawn
++daybed
++daybreak
++daycare
++daydream
++daylight
++daylong
++dayroom
++daytime
++dazzler
++dazzling
++deacon
++deafening
++deafness
++dealer
++dealing
++dealmaker
++dealt
++dean
++debatable
++debate
++debating
++debit
++debrief
++debtless
++debtor
++debug
++debunk
++decade
++decaf
++decal
++decathlon
++decay
++deceased
++deceit
++deceiver
++deceiving
++december
++decency
++decent
++deception
++deceptive
++decibel
++decidable
++decimal
++decimeter
++decipher
++deck
++declared
++decline
++decode
++decompose
++decorated
++decorator
++decoy
++decrease
++decree
++dedicate
++dedicator
++deduce
++deduct
++deed
++deem
++deepen
++deeply
++deepness
++deface
++defacing
++defame
++default
++defeat
++defection
++defective
++defendant
++defender
++defense
++defensive
++deferral
++deferred
++defiance
++defiant
++defile
++defiling
++define
++definite
++deflate
++deflation
++deflator
++deflected
++deflector
++defog
++deforest
++defraud
++defrost
++deftly
++defuse
++defy
++degraded
++degrading
++degrease
++degree
++dehydrate
++deity
++dejected
++delay
++delegate
++delegator
++delete
++deletion
++delicacy
++delicate
++delicious
++delighted
++delirious
++delirium
++deliverer
++delivery
++delouse
++delta
++deluge
++delusion
++deluxe
++demanding
++demeaning
++demeanor
++demise
++democracy
++democrat
++demote
++demotion
++demystify
++denatured
++deniable
++denial
++denim
++denote
++dense
++density
++dental
++dentist
++denture
++deny
++deodorant
++deodorize
++departed
++departure
++depict
++deplete
++depletion
++deplored
++deploy
++deport
++depose
++depraved
++depravity
++deprecate
++depress
++deprive
++depth
++deputize
++deputy
++derail
++deranged
++derby
++derived
++desecrate
++deserve
++deserving
++designate
++designed
++designer
++designing
++deskbound
++desktop
++deskwork
++desolate
++despair
++despise
++despite
++destiny
++destitute
++destruct
++detached
++detail
++detection
++detective
++detector
++detention
++detergent
++detest
++detonate
++detonator
++detoxify
++detract
++deuce
++devalue
++deviancy
++deviant
++deviate
++deviation
++deviator
++device
++devious
++devotedly
++devotee
++devotion
++devourer
++devouring
++devoutly
++dexterity
++dexterous
++diabetes
++diabetic
++diabolic
++diagnoses
++diagnosis
++diagram
++dial
++diameter
++diaper
++diaphragm
++diary
++dice
++dicing
++dictate
++dictation
++dictator
++difficult
++diffused
++diffuser
++diffusion
++diffusive
++dig
++dilation
++diligence
++diligent
++dill
++dilute
++dime
++diminish
++dimly
++dimmed
++dimmer
++dimness
++dimple
++diner
++dingbat
++dinghy
++dinginess
++dingo
++dingy
++dining
++dinner
++diocese
++dioxide
++diploma
++dipped
++dipper
++dipping
++directed
++direction
++directive
++directly
++directory
++direness
++dirtiness
++disabled
++disagree
++disallow
++disarm
++disarray
++disaster
++disband
++disbelief
++disburse
++discard
++discern
++discharge
++disclose
++discolor
++discount
++discourse
++discover
++discuss
++disdain
++disengage
++disfigure
++disgrace
++dish
++disinfect
++disjoin
++disk
++dislike
++disliking
++dislocate
++dislodge
++disloyal
++dismantle
++dismay
++dismiss
++dismount
++disobey
++disorder
++disown
++disparate
++disparity
++dispatch
++dispense
++dispersal
++dispersed
++disperser
++displace
++display
++displease
++disposal
++dispose
++disprove
++dispute
++disregard
++disrupt
++dissuade
++distance
++distant
++distaste
++distill
++distinct
++distort
++distract
++distress
++district
++distrust
++ditch
++ditto
++ditzy
++dividable
++divided
++dividend
++dividers
++dividing
++divinely
++diving
++divinity
++divisible
++divisibly
++division
++divisive
++divorcee
++dizziness
++dizzy
++doable
++docile
++dock
++doctrine
++document
++dodge
++dodgy
++doily
++doing
++dole
++dollar
++dollhouse
++dollop
++dolly
++dolphin
++domain
++domelike
++domestic
++dominion
++dominoes
++donated
++donation
++donator
++donor
++donut
++doodle
++doorbell
++doorframe
++doorknob
++doorman
++doormat
++doornail
++doorpost
++doorstep
++doorstop
++doorway
++doozy
++dork
++dormitory
++dorsal
++dosage
++dose
++dotted
++doubling
++douche
++dove
++down
++dowry
++doze
++drab
++dragging
++dragonfly
++dragonish
++dragster
++drainable
++drainage
++drained
++drainer
++drainpipe
++dramatic
++dramatize
++drank
++drapery
++drastic
++draw
++dreaded
++dreadful
++dreadlock
++dreamboat
++dreamily
++dreamland
++dreamless
++dreamlike
++dreamt
++dreamy
++drearily
++dreary
++drench
++dress
++drew
++dribble
++dried
++drier
++drift
++driller
++drilling
++drinkable
++drinking
++dripping
++drippy
++drivable
++driven
++driver
++driveway
++driving
++drizzle
++drizzly
++drone
++drool
++droop
++drop-down
++dropbox
++dropkick
++droplet
++dropout
++dropper
++drove
++drown
++drowsily
++drudge
++drum
++dry
++dubbed
++dubiously
++duchess
++duckbill
++ducking
++duckling
++ducktail
++ducky
++duct
++dude
++duffel
++dugout
++duh
++duke
++duller
++dullness
++duly
++dumping
++dumpling
++dumpster
++duo
++dupe
++duplex
++duplicate
++duplicity
++durable
++durably
++duration
++duress
++during
++dusk
++dust
++dutiful
++duty
++duvet
++dwarf
++dweeb
++dwelled
++dweller
++dwelling
++dwindle
++dwindling
++dynamic
++dynamite
++dynasty
++dyslexia
++dyslexic
++each
++eagle
++earache
++eardrum
++earflap
++earful
++earlobe
++early
++earmark
++earmuff
++earphone
++earpiece
++earplugs
++earring
++earshot
++earthen
++earthlike
++earthling
++earthly
++earthworm
++earthy
++earwig
++easeful
++easel
++easiest
++easily
++easiness
++easing
++eastbound
++eastcoast
++easter
++eastward
++eatable
++eaten
++eatery
++eating
++eats
++ebay
++ebony
++ebook
++ecard
++eccentric
++echo
++eclair
++eclipse
++ecologist
++ecology
++economic
++economist
++economy
++ecosphere
++ecosystem
++edge
++edginess
++edging
++edgy
++edition
++editor
++educated
++education
++educator
++eel
++effective
++effects
++efficient
++effort
++eggbeater
++egging
++eggnog
++eggplant
++eggshell
++egomaniac
++egotism
++egotistic
++either
++eject
++elaborate
++elastic
++elated
++elbow
++eldercare
++elderly
++eldest
++electable
++election
++elective
++elephant
++elevate
++elevating
++elevation
++elevator
++eleven
++elf
++eligible
++eligibly
++eliminate
++elite
++elitism
++elixir
++elk
++ellipse
++elliptic
++elm
++elongated
++elope
++eloquence
++eloquent
++elsewhere
++elude
++elusive
++elves
++email
++embargo
++embark
++embassy
++embattled
++embellish
++ember
++embezzle
++emblaze
++emblem
++embody
++embolism
++emboss
++embroider
++emcee
++emerald
++emergency
++emission
++emit
++emote
++emoticon
++emotion
++empathic
++empathy
++emperor
++emphases
++emphasis
++emphasize
++emphatic
++empirical
++employed
++employee
++employer
++emporium
++empower
++emptier
++emptiness
++empty
++emu
++enable
++enactment
++enamel
++enchanted
++enchilada
++encircle
++enclose
++enclosure
++encode
++encore
++encounter
++encourage
++encroach
++encrust
++encrypt
++endanger
++endeared
++endearing
++ended
++ending
++endless
++endnote
++endocrine
++endorphin
++endorse
++endowment
++endpoint
++endurable
++endurance
++enduring
++energetic
++energize
++energy
++enforced
++enforcer
++engaged
++engaging
++engine
++engorge
++engraved
++engraver
++engraving
++engross
++engulf
++enhance
++enigmatic
++enjoyable
++enjoyably
++enjoyer
++enjoying
++enjoyment
++enlarged
++enlarging
++enlighten
++enlisted
++enquirer
++enrage
++enrich
++enroll
++enslave
++ensnare
++ensure
++entail
++entangled
++entering
++entertain
++enticing
++entire
++entitle
++entity
++entomb
++entourage
++entrap
++entree
++entrench
++entrust
++entryway
++entwine
++enunciate
++envelope
++enviable
++enviably
++envious
++envision
++envoy
++envy
++enzyme
++epic
++epidemic
++epidermal
++epidermis
++epidural
++epilepsy
++epileptic
++epilogue
++epiphany
++episode
++equal
++equate
++equation
++equator
++equinox
++equipment
++equity
++equivocal
++eradicate
++erasable
++erased
++eraser
++erasure
++ergonomic
++errand
++errant
++erratic
++error
++erupt
++escalate
++escalator
++escapable
++escapade
++escapist
++escargot
++eskimo
++esophagus
++espionage
++espresso
++esquire
++essay
++essence
++essential
++establish
++estate
++esteemed
++estimate
++estimator
++estranged
++estrogen
++etching
++eternal
++eternity
++ethanol
++ether
++ethically
++ethics
++euphemism
++evacuate
++evacuee
++evade
++evaluate
++evaluator
++evaporate
++evasion
++evasive
++even
++everglade
++evergreen
++everybody
++everyday
++everyone
++evict
++evidence
++evident
++evil
++evoke
++evolution
++evolve
++exact
++exalted
++example
++excavate
++excavator
++exceeding
++exception
++excess
++exchange
++excitable
++exciting
++exclaim
++exclude
++excluding
++exclusion
++exclusive
++excretion
++excretory
++excursion
++excusable
++excusably
++excuse
++exemplary
++exemplify
++exemption
++exerciser
++exert
++exes
++exfoliate
++exhale
++exhaust
++exhume
++exile
++existing
++exit
++exodus
++exonerate
++exorcism
++exorcist
++expand
++expanse
++expansion
++expansive
++expectant
++expedited
++expediter
++expel
++expend
++expenses
++expensive
++expert
++expire
++expiring
++explain
++expletive
++explicit
++explode
++exploit
++explore
++exploring
++exponent
++exporter
++exposable
++expose
++exposure
++express
++expulsion
++exquisite
++extended
++extending
++extent
++extenuate
++exterior
++external
++extinct
++extortion
++extradite
++extras
++extrovert
++extrude
++extruding
++exuberant
++fable
++fabric
++fabulous
++facebook
++facecloth
++facedown
++faceless
++facelift
++faceplate
++faceted
++facial
++facility
++facing
++facsimile
++faction
++factoid
++factor
++factsheet
++factual
++faculty
++fade
++fading
++failing
++falcon
++fall
++false
++falsify
++fame
++familiar
++family
++famine
++famished
++fanatic
++fancied
++fanciness
++fancy
++fanfare
++fang
++fanning
++fantasize
++fantastic
++fantasy
++fascism
++fastball
++faster
++fasting
++fastness
++faucet
++favorable
++favorably
++favored
++favoring
++favorite
++fax
++feast
++federal
++fedora
++feeble
++feed
++feel
++feisty
++feline
++felt-tip
++feminine
++feminism
++feminist
++feminize
++femur
++fence
++fencing
++fender
++ferment
++fernlike
++ferocious
++ferocity
++ferret
++ferris
++ferry
++fervor
++fester
++festival
++festive
++festivity
++fetal
++fetch
++fever
++fiber
++fiction
++fiddle
++fiddling
++fidelity
++fidgeting
++fidgety
++fifteen
++fifth
++fiftieth
++fifty
++figment
++figure
++figurine
++filing
++filled
++filler
++filling
++film
++filter
++filth
++filtrate
++finale
++finalist
++finalize
++finally
++finance
++financial
++finch
++fineness
++finer
++finicky
++finished
++finisher
++finishing
++finite
++finless
++finlike
++fiscally
++fit
++five
++flaccid
++flagman
++flagpole
++flagship
++flagstick
++flagstone
++flail
++flakily
++flaky
++flame
++flammable
++flanked
++flanking
++flannels
++flap
++flaring
++flashback
++flashbulb
++flashcard
++flashily
++flashing
++flashy
++flask
++flatbed
++flatfoot
++flatly
++flatness
++flatten
++flattered
++flatterer
++flattery
++flattop
++flatware
++flatworm
++flavored
++flavorful
++flavoring
++flaxseed
++fled
++fleshed
++fleshy
++flick
++flier
++flight
++flinch
++fling
++flint
++flip
++flirt
++float
++flock
++flogging
++flop
++floral
++florist
++floss
++flounder
++flyable
++flyaway
++flyer
++flying
++flyover
++flypaper
++foam
++foe
++fog
++foil
++folic
++folk
++follicle
++follow
++fondling
++fondly
++fondness
++fondue
++font
++food
++fool
++footage
++football
++footbath
++footboard
++footer
++footgear
++foothill
++foothold
++footing
++footless
++footman
++footnote
++footpad
++footpath
++footprint
++footrest
++footsie
++footsore
++footwear
++footwork
++fossil
++foster
++founder
++founding
++fountain
++fox
++foyer
++fraction
++fracture
++fragile
++fragility
++fragment
++fragrance
++fragrant
++frail
++frame
++framing
++frantic
++fraternal
++frayed
++fraying
++frays
++freckled
++freckles
++freebase
++freebee
++freebie
++freedom
++freefall
++freehand
++freeing
++freeload
++freely
++freemason
++freeness
++freestyle
++freeware
++freeway
++freewill
++freezable
++freezing
++freight
++french
++frenzied
++frenzy
++frequency
++frequent
++fresh
++fretful
++fretted
++friction
++friday
++fridge
++fried
++friend
++frighten
++frightful
++frigidity
++frigidly
++frill
++fringe
++frisbee
++frisk
++fritter
++frivolous
++frolic
++from
++front
++frostbite
++frosted
++frostily
++frosting
++frostlike
++frosty
++froth
++frown
++frozen
++fructose
++frugality
++frugally
++fruit
++frustrate
++frying
++gab
++gaffe
++gag
++gainfully
++gaining
++gains
++gala
++gallantly
++galleria
++gallery
++galley
++gallon
++gallows
++gallstone
++galore
++galvanize
++gambling
++game
++gaming
++gamma
++gander
++gangly
++gangrene
++gangway
++gap
++garage
++garbage
++garden
++gargle
++garland
++garlic
++garment
++garnet
++garnish
++garter
++gas
++gatherer
++gathering
++gating
++gauging
++gauntlet
++gauze
++gave
++gawk
++gazing
++gear
++gecko
++geek
++geiger
++gem
++gender
++generic
++generous
++genetics
++genre
++gentile
++gentleman
++gently
++gents
++geography
++geologic
++geologist
++geology
++geometric
++geometry
++geranium
++gerbil
++geriatric
++germicide
++germinate
++germless
++germproof
++gestate
++gestation
++gesture
++getaway
++getting
++getup
++giant
++gibberish
++giblet
++giddily
++giddiness
++giddy
++gift
++gigabyte
++gigahertz
++gigantic
++giggle
++giggling
++giggly
++gigolo
++gilled
++gills
++gimmick
++girdle
++giveaway
++given
++giver
++giving
++gizmo
++gizzard
++glacial
++glacier
++glade
++gladiator
++gladly
++glamorous
++glamour
++glance
++glancing
++glandular
++glare
++glaring
++glass
++glaucoma
++glazing
++gleaming
++gleeful
++glider
++gliding
++glimmer
++glimpse
++glisten
++glitch
++glitter
++glitzy
++gloater
++gloating
++gloomily
++gloomy
++glorified
++glorifier
++glorify
++glorious
++glory
++gloss
++glove
++glowing
++glowworm
++glucose
++glue
++gluten
++glutinous
++glutton
++gnarly
++gnat
++goal
++goatskin
++goes
++goggles
++going
++goldfish
++goldmine
++goldsmith
++golf
++goliath
++gonad
++gondola
++gone
++gong
++good
++gooey
++goofball
++goofiness
++goofy
++google
++goon
++gopher
++gore
++gorged
++gorgeous
++gory
++gosling
++gossip
++gothic
++gotten
++gout
++gown
++grab
++graceful
++graceless
++gracious
++gradation
++graded
++grader
++gradient
++grading
++gradually
++graduate
++graffiti
++grafted
++grafting
++grain
++granddad
++grandkid
++grandly
++grandma
++grandpa
++grandson
++granite
++granny
++granola
++grant
++granular
++grape
++graph
++grapple
++grappling
++grasp
++grass
++gratified
++gratify
++grating
++gratitude
++gratuity
++gravel
++graveness
++graves
++graveyard
++gravitate
++gravity
++gravy
++gray
++grazing
++greasily
++greedily
++greedless
++greedy
++green
++greeter
++greeting
++grew
++greyhound
++grid
++grief
++grievance
++grieving
++grievous
++grill
++grimace
++grimacing
++grime
++griminess
++grimy
++grinch
++grinning
++grip
++gristle
++grit
++groggily
++groggy
++groin
++groom
++groove
++grooving
++groovy
++grope
++ground
++grouped
++grout
++grove
++grower
++growing
++growl
++grub
++grudge
++grudging
++grueling
++gruffly
++grumble
++grumbling
++grumbly
++grumpily
++grunge
++grunt
++guacamole
++guidable
++guidance
++guide
++guiding
++guileless
++guise
++gulf
++gullible
++gully
++gulp
++gumball
++gumdrop
++gumminess
++gumming
++gummy
++gurgle
++gurgling
++guru
++gush
++gusto
++gusty
++gutless
++guts
++gutter
++guy
++guzzler
++gyration
++habitable
++habitant
++habitat
++habitual
++hacked
++hacker
++hacking
++hacksaw
++had
++haggler
++haiku
++half
++halogen
++halt
++halved
++halves
++hamburger
++hamlet
++hammock
++hamper
++hamster
++hamstring
++handbag
++handball
++handbook
++handbrake
++handcart
++handclap
++handclasp
++handcraft
++handcuff
++handed
++handful
++handgrip
++handgun
++handheld
++handiness
++handiwork
++handlebar
++handled
++handler
++handling
++handmade
++handoff
++handpick
++handprint
++handrail
++handsaw
++handset
++handsfree
++handshake
++handstand
++handwash
++handwork
++handwoven
++handwrite
++handyman
++hangnail
++hangout
++hangover
++hangup
++hankering
++hankie
++hanky
++haphazard
++happening
++happier
++happiest
++happily
++happiness
++happy
++harbor
++hardcopy
++hardcore
++hardcover
++harddisk
++hardened
++hardener
++hardening
++hardhat
++hardhead
++hardiness
++hardly
++hardness
++hardship
++hardware
++hardwired
++hardwood
++hardy
++harmful
++harmless
++harmonica
++harmonics
++harmonize
++harmony
++harness
++harpist
++harsh
++harvest
++hash
++hassle
++haste
++hastily
++hastiness
++hasty
++hatbox
++hatchback
++hatchery
++hatchet
++hatching
++hatchling
++hate
++hatless
++hatred
++haunt
++haven
++hazard
++hazelnut
++hazily
++haziness
++hazing
++hazy
++headache
++headband
++headboard
++headcount
++headdress
++headed
++header
++headfirst
++headgear
++heading
++headlamp
++headless
++headlock
++headphone
++headpiece
++headrest
++headroom
++headscarf
++headset
++headsman
++headstand
++headstone
++headway
++headwear
++heap
++heat
++heave
++heavily
++heaviness
++heaving
++hedge
++hedging
++heftiness
++hefty
++helium
++helmet
++helper
++helpful
++helping
++helpless
++helpline
++hemlock
++hemstitch
++hence
++henchman
++henna
++herald
++herbal
++herbicide
++herbs
++heritage
++hermit
++heroics
++heroism
++herring
++herself
++hertz
++hesitancy
++hesitant
++hesitate
++hexagon
++hexagram
++hubcap
++huddle
++huddling
++huff
++hug
++hula
++hulk
++hull
++human
++humble
++humbling
++humbly
++humid
++humiliate
++humility
++humming
++hummus
++humongous
++humorist
++humorless
++humorous
++humpback
++humped
++humvee
++hunchback
++hundredth
++hunger
++hungrily
++hungry
++hunk
++hunter
++hunting
++huntress
++huntsman
++hurdle
++hurled
++hurler
++hurling
++hurray
++hurricane
++hurried
++hurry
++hurt
++husband
++hush
++husked
++huskiness
++hut
++hybrid
++hydrant
++hydrated
++hydration
++hydrogen
++hydroxide
++hyperlink
++hypertext
++hyphen
++hypnoses
++hypnosis
++hypnotic
++hypnotism
++hypnotist
++hypnotize
++hypocrisy
++hypocrite
++ibuprofen
++ice
++iciness
++icing
++icky
++icon
++icy
++idealism
++idealist
++idealize
++ideally
++idealness
++identical
++identify
++identity
++ideology
++idiocy
++idiom
++idly
++igloo
++ignition
++ignore
++iguana
++illicitly
++illusion
++illusive
++image
++imaginary
++imagines
++imaging
++imbecile
++imitate
++imitation
++immature
++immerse
++immersion
++imminent
++immobile
++immodest
++immorally
++immortal
++immovable
++immovably
++immunity
++immunize
++impaired
++impale
++impart
++impatient
++impeach
++impeding
++impending
++imperfect
++imperial
++impish
++implant
++implement
++implicate
++implicit
++implode
++implosion
++implosive
++imply
++impolite
++important
++importer
++impose
++imposing
++impotence
++impotency
++impotent
++impound
++imprecise
++imprint
++imprison
++impromptu
++improper
++improve
++improving
++improvise
++imprudent
++impulse
++impulsive
++impure
++impurity
++iodine
++iodize
++ion
++ipad
++iphone
++ipod
++irate
++irk
++iron
++irregular
++irrigate
++irritable
++irritably
++irritant
++irritate
++islamic
++islamist
++isolated
++isolating
++isolation
++isotope
++issue
++issuing
++italicize
++italics
++item
++itinerary
++itunes
++ivory
++ivy
++jab
++jackal
++jacket
++jackknife
++jackpot
++jailbird
++jailbreak
++jailer
++jailhouse
++jalapeno
++jam
++janitor
++january
++jargon
++jarring
++jasmine
++jaundice
++jaunt
++java
++jawed
++jawless
++jawline
++jaws
++jaybird
++jaywalker
++jazz
++jeep
++jeeringly
++jellied
++jelly
++jersey
++jester
++jet
++jiffy
++jigsaw
++jimmy
++jingle
++jingling
++jinx
++jitters
++jittery
++job
++jockey
++jockstrap
++jogger
++jogging
++john
++joining
++jokester
++jokingly
++jolliness
++jolly
++jolt
++jot
++jovial
++joyfully
++joylessly
++joyous
++joyride
++joystick
++jubilance
++jubilant
++judge
++judgingly
++judicial
++judiciary
++judo
++juggle
++juggling
++jugular
++juice
++juiciness
++juicy
++jujitsu
++jukebox
++july
++jumble
++jumbo
++jump
++junction
++juncture
++june
++junior
++juniper
++junkie
++junkman
++junkyard
++jurist
++juror
++jury
++justice
++justifier
++justify
++justly
++justness
++juvenile
++kabob
++kangaroo
++karaoke
++karate
++karma
++kebab
++keenly
++keenness
++keep
++keg
++kelp
++kennel
++kept
++kerchief
++kerosene
++kettle
++kick
++kiln
++kilobyte
++kilogram
++kilometer
++kilowatt
++kilt
++kimono
++kindle
++kindling
++kindly
++kindness
++kindred
++kinetic
++kinfolk
++king
++kinship
++kinsman
++kinswoman
++kissable
++kisser
++kissing
++kitchen
++kite
++kitten
++kitty
++kiwi
++kleenex
++knapsack
++knee
++knelt
++knickers
++knoll
++koala
++kooky
++kosher
++krypton
++kudos
++kung
++labored
++laborer
++laboring
++laborious
++labrador
++ladder
++ladies
++ladle
++ladybug
++ladylike
++lagged
++lagging
++lagoon
++lair
++lake
++lance
++landed
++landfall
++landfill
++landing
++landlady
++landless
++landline
++landlord
++landmark
++landmass
++landmine
++landowner
++landscape
++landside
++landslide
++language
++lankiness
++lanky
++lantern
++lapdog
++lapel
++lapped
++lapping
++laptop
++lard
++large
++lark
++lash
++lasso
++last
++latch
++late
++lather
++latitude
++latrine
++latter
++latticed
++launch
++launder
++laundry
++laurel
++lavender
++lavish
++laxative
++lazily
++laziness
++lazy
++lecturer
++left
++legacy
++legal
++legend
++legged
++leggings
++legible
++legibly
++legislate
++lego
++legroom
++legume
++legwarmer
++legwork
++lemon
++lend
++length
++lens
++lent
++leotard
++lesser
++letdown
++lethargic
++lethargy
++letter
++lettuce
++level
++leverage
++levers
++levitate
++levitator
++liability
++liable
++liberty
++librarian
++library
++licking
++licorice
++lid
++life
++lifter
++lifting
++liftoff
++ligament
++likely
++likeness
++likewise
++liking
++lilac
++lilly
++lily
++limb
++limeade
++limelight
++limes
++limit
++limping
++limpness
++line
++lingo
++linguini
++linguist
++lining
++linked
++linoleum
++linseed
++lint
++lion
++lip
++liquefy
++liqueur
++liquid
++lisp
++list
++litigate
++litigator
++litmus
++litter
++little
++livable
++lived
++lively
++liver
++livestock
++lividly
++living
++lizard
++lubricant
++lubricate
++lucid
++luckily
++luckiness
++luckless
++lucrative
++ludicrous
++lugged
++lukewarm
++lullaby
++lumber
++luminance
++luminous
++lumpiness
++lumping
++lumpish
++lunacy
++lunar
++lunchbox
++luncheon
++lunchroom
++lunchtime
++lung
++lurch
++lure
++luridness
++lurk
++lushly
++lushness
++luster
++lustfully
++lustily
++lustiness
++lustrous
++lusty
++luxurious
++luxury
++lying
++lyrically
++lyricism
++lyricist
++lyrics
++macarena
++macaroni
++macaw
++mace
++machine
++machinist
++magazine
++magenta
++maggot
++magical
++magician
++magma
++magnesium
++magnetic
++magnetism
++magnetize
++magnifier
++magnify
++magnitude
++magnolia
++mahogany
++maimed
++majestic
++majesty
++majorette
++majority
++makeover
++maker
++makeshift
++making
++malformed
++malt
++mama
++mammal
++mammary
++mammogram
++manager
++managing
++manatee
++mandarin
++mandate
++mandatory
++mandolin
++manger
++mangle
++mango
++mangy
++manhandle
++manhole
++manhood
++manhunt
++manicotti
++manicure
++manifesto
++manila
++mankind
++manlike
++manliness
++manly
++manmade
++manned
++mannish
++manor
++manpower
++mantis
++mantra
++manual
++many
++map
++marathon
++marauding
++marbled
++marbles
++marbling
++march
++mardi
++margarine
++margarita
++margin
++marigold
++marina
++marine
++marital
++maritime
++marlin
++marmalade
++maroon
++married
++marrow
++marry
++marshland
++marshy
++marsupial
++marvelous
++marxism
++mascot
++masculine
++mashed
++mashing
++massager
++masses
++massive
++mastiff
++matador
++matchbook
++matchbox
++matcher
++matching
++matchless
++material
++maternal
++maternity
++math
++mating
++matriarch
++matrimony
++matrix
++matron
++matted
++matter
++maturely
++maturing
++maturity
++mauve
++maverick
++maximize
++maximum
++maybe
++mayday
++mayflower
++moaner
++moaning
++mobile
++mobility
++mobilize
++mobster
++mocha
++mocker
++mockup
++modified
++modify
++modular
++modulator
++module
++moisten
++moistness
++moisture
++molar
++molasses
++mold
++molecular
++molecule
++molehill
++mollusk
++mom
++monastery
++monday
++monetary
++monetize
++moneybags
++moneyless
++moneywise
++mongoose
++mongrel
++monitor
++monkhood
++monogamy
++monogram
++monologue
++monopoly
++monorail
++monotone
++monotype
++monoxide
++monsieur
++monsoon
++monstrous
++monthly
++monument
++moocher
++moodiness
++moody
++mooing
++moonbeam
++mooned
++moonlight
++moonlike
++moonlit
++moonrise
++moonscape
++moonshine
++moonstone
++moonwalk
++mop
++morale
++morality
++morally
++morbidity
++morbidly
++morphine
++morphing
++morse
++mortality
++mortally
++mortician
++mortified
++mortify
++mortuary
++mosaic
++mossy
++most
++mothball
++mothproof
++motion
++motivate
++motivator
++motive
++motocross
++motor
++motto
++mountable
++mountain
++mounted
++mounting
++mourner
++mournful
++mouse
++mousiness
++moustache
++mousy
++mouth
++movable
++move
++movie
++moving
++mower
++mowing
++much
++muck
++mud
++mug
++mulberry
++mulch
++mule
++mulled
++mullets
++multiple
++multiply
++multitask
++multitude
++mumble
++mumbling
++mumbo
++mummified
++mummify
++mummy
++mumps
++munchkin
++mundane
++municipal
++muppet
++mural
++murkiness
++murky
++murmuring
++muscular
++museum
++mushily
++mushiness
++mushroom
++mushy
++music
++musket
++muskiness
++musky
++mustang
++mustard
++muster
++mustiness
++musty
++mutable
++mutate
++mutation
++mute
++mutilated
++mutilator
++mutiny
++mutt
++mutual
++muzzle
++myself
++myspace
++mystified
++mystify
++myth
++nacho
++nag
++nail
++name
++naming
++nanny
++nanometer
++nape
++napkin
++napped
++napping
++nappy
++narrow
++nastily
++nastiness
++national
++native
++nativity
++natural
++nature
++naturist
++nautical
++navigate
++navigator
++navy
++nearby
++nearest
++nearly
++nearness
++neatly
++neatness
++nebula
++nebulizer
++nectar
++negate
++negation
++negative
++neglector
++negligee
++negligent
++negotiate
++nemeses
++nemesis
++neon
++nephew
++nerd
++nervous
++nervy
++nest
++net
++neurology
++neuron
++neurosis
++neurotic
++neuter
++neutron
++never
++next
++nibble
++nickname
++nicotine
++niece
++nifty
++nimble
++nimbly
++nineteen
++ninetieth
++ninja
++nintendo
++ninth
++nuclear
++nuclei
++nucleus
++nugget
++nullify
++number
++numbing
++numbly
++numbness
++numeral
++numerate
++numerator
++numeric
++numerous
++nuptials
++nursery
++nursing
++nurture
++nutcase
++nutlike
++nutmeg
++nutrient
++nutshell
++nuttiness
++nutty
++nuzzle
++nylon
++oaf
++oak
++oasis
++oat
++obedience
++obedient
++obituary
++object
++obligate
++obliged
++oblivion
++oblivious
++oblong
++obnoxious
++oboe
++obscure
++obscurity
++observant
++observer
++observing
++obsessed
++obsession
++obsessive
++obsolete
++obstacle
++obstinate
++obstruct
++obtain
++obtrusive
++obtuse
++obvious
++occultist
++occupancy
++occupant
++occupier
++occupy
++ocean
++ocelot
++octagon
++octane
++october
++octopus
++ogle
++oil
++oink
++ointment
++okay
++old
++olive
++olympics
++omega
++omen
++ominous
++omission
++omit
++omnivore
++onboard
++oncoming
++ongoing
++onion
++online
++onlooker
++only
++onscreen
++onset
++onshore
++onslaught
++onstage
++onto
++onward
++onyx
++oops
++ooze
++oozy
++opacity
++opal
++open
++operable
++operate
++operating
++operation
++operative
++operator
++opium
++opossum
++opponent
++oppose
++opposing
++opposite
++oppressed
++oppressor
++opt
++opulently
++osmosis
++other
++otter
++ouch
++ought
++ounce
++outage
++outback
++outbid
++outboard
++outbound
++outbreak
++outburst
++outcast
++outclass
++outcome
++outdated
++outdoors
++outer
++outfield
++outfit
++outflank
++outgoing
++outgrow
++outhouse
++outing
++outlast
++outlet
++outline
++outlook
++outlying
++outmatch
++outmost
++outnumber
++outplayed
++outpost
++outpour
++output
++outrage
++outrank
++outreach
++outright
++outscore
++outsell
++outshine
++outshoot
++outsider
++outskirts
++outsmart
++outsource
++outspoken
++outtakes
++outthink
++outward
++outweigh
++outwit
++oval
++ovary
++oven
++overact
++overall
++overarch
++overbid
++overbill
++overbite
++overblown
++overboard
++overbook
++overbuilt
++overcast
++overcoat
++overcome
++overcook
++overcrowd
++overdraft
++overdrawn
++overdress
++overdrive
++overdue
++overeager
++overeater
++overexert
++overfed
++overfeed
++overfill
++overflow
++overfull
++overgrown
++overhand
++overhang
++overhaul
++overhead
++overhear
++overheat
++overhung
++overjoyed
++overkill
++overlabor
++overlaid
++overlap
++overlay
++overload
++overlook
++overlord
++overlying
++overnight
++overpass
++overpay
++overplant
++overplay
++overpower
++overprice
++overrate
++overreach
++overreact
++override
++overripe
++overrule
++overrun
++overshoot
++overshot
++oversight
++oversized
++oversleep
++oversold
++overspend
++overstate
++overstay
++overstep
++overstock
++overstuff
++oversweet
++overtake
++overthrow
++overtime
++overtly
++overtone
++overture
++overturn
++overuse
++overvalue
++overview
++overwrite
++owl
++oxford
++oxidant
++oxidation
++oxidize
++oxidizing
++oxygen
++oxymoron
++oyster
++ozone
++paced
++pacemaker
++pacific
++pacifier
++pacifism
++pacifist
++pacify
++padded
++padding
++paddle
++paddling
++padlock
++pagan
++pager
++paging
++pajamas
++palace
++palatable
++palm
++palpable
++palpitate
++paltry
++pampered
++pamperer
++pampers
++pamphlet
++panama
++pancake
++pancreas
++panda
++pandemic
++pang
++panhandle
++panic
++panning
++panorama
++panoramic
++panther
++pantomime
++pantry
++pants
++pantyhose
++paparazzi
++papaya
++paper
++paprika
++papyrus
++parabola
++parachute
++parade
++paradox
++paragraph
++parakeet
++paralegal
++paralyses
++paralysis
++paralyze
++paramedic
++parameter
++paramount
++parasail
++parasite
++parasitic
++parcel
++parched
++parchment
++pardon
++parish
++parka
++parking
++parkway
++parlor
++parmesan
++parole
++parrot
++parsley
++parsnip
++partake
++parted
++parting
++partition
++partly
++partner
++partridge
++party
++passable
++passably
++passage
++passcode
++passenger
++passerby
++passing
++passion
++passive
++passivism
++passover
++passport
++password
++pasta
++pasted
++pastel
++pastime
++pastor
++pastrami
++pasture
++pasty
++patchwork
++patchy
++paternal
++paternity
++path
++patience
++patient
++patio
++patriarch
++patriot
++patrol
++patronage
++patronize
++pauper
++pavement
++paver
++pavestone
++pavilion
++paving
++pawing
++payable
++payback
++paycheck
++payday
++payee
++payer
++paying
++payment
++payphone
++payroll
++pebble
++pebbly
++pecan
++pectin
++peculiar
++peddling
++pediatric
++pedicure
++pedigree
++pedometer
++pegboard
++pelican
++pellet
++pelt
++pelvis
++penalize
++penalty
++pencil
++pendant
++pending
++penholder
++penknife
++pennant
++penniless
++penny
++penpal
++pension
++pentagon
++pentagram
++pep
++perceive
++percent
++perch
++percolate
++perennial
++perfected
++perfectly
++perfume
++periscope
++perish
++perjurer
++perjury
++perkiness
++perky
++perm
++peroxide
++perpetual
++perplexed
++persecute
++persevere
++persuaded
++persuader
++pesky
++peso
++pessimism
++pessimist
++pester
++pesticide
++petal
++petite
++petition
++petri
++petroleum
++petted
++petticoat
++pettiness
++petty
++petunia
++phantom
++phobia
++phoenix
++phonebook
++phoney
++phonics
++phoniness
++phony
++phosphate
++photo
++phrase
++phrasing
++placard
++placate
++placidly
++plank
++planner
++plant
++plasma
++plaster
++plastic
++plated
++platform
++plating
++platinum
++platonic
++platter
++platypus
++plausible
++plausibly
++playable
++playback
++player
++playful
++playgroup
++playhouse
++playing
++playlist
++playmaker
++playmate
++playoff
++playpen
++playroom
++playset
++plaything
++playtime
++plaza
++pleading
++pleat
++pledge
++plentiful
++plenty
++plethora
++plexiglas
++pliable
++plod
++plop
++plot
++plow
++ploy
++pluck
++plug
++plunder
++plunging
++plural
++plus
++plutonium
++plywood
++poach
++pod
++poem
++poet
++pogo
++pointed
++pointer
++pointing
++pointless
++pointy
++poise
++poison
++poker
++poking
++polar
++police
++policy
++polio
++polish
++politely
++polka
++polo
++polyester
++polygon
++polygraph
++polymer
++poncho
++pond
++pony
++popcorn
++pope
++poplar
++popper
++poppy
++popsicle
++populace
++popular
++populate
++porcupine
++pork
++porous
++porridge
++portable
++portal
++portfolio
++porthole
++portion
++portly
++portside
++poser
++posh
++posing
++possible
++possibly
++possum
++postage
++postal
++postbox
++postcard
++posted
++poster
++posting
++postnasal
++posture
++postwar
++pouch
++pounce
++pouncing
++pound
++pouring
++pout
++powdered
++powdering
++powdery
++power
++powwow
++pox
++praising
++prance
++prancing
++pranker
++prankish
++prankster
++prayer
++praying
++preacher
++preaching
++preachy
++preamble
++precinct
++precise
++precision
++precook
++precut
++predator
++predefine
++predict
++preface
++prefix
++preflight
++preformed
++pregame
++pregnancy
++pregnant
++preheated
++prelaunch
++prelaw
++prelude
++premiere
++premises
++premium
++prenatal
++preoccupy
++preorder
++prepaid
++prepay
++preplan
++preppy
++preschool
++prescribe
++preseason
++preset
++preshow
++president
++presoak
++press
++presume
++presuming
++preteen
++pretended
++pretender
++pretense
++pretext
++pretty
++pretzel
++prevail
++prevalent
++prevent
++preview
++previous
++prewar
++prewashed
++prideful
++pried
++primal
++primarily
++primary
++primate
++primer
++primp
++princess
++print
++prior
++prism
++prison
++prissy
++pristine
++privacy
++private
++privatize
++prize
++proactive
++probable
++probably
++probation
++probe
++probing
++probiotic
++problem
++procedure
++process
++proclaim
++procreate
++procurer
++prodigal
++prodigy
++produce
++product
++profane
++profanity
++professed
++professor
++profile
++profound
++profusely
++progeny
++prognosis
++program
++progress
++projector
++prologue
++prolonged
++promenade
++prominent
++promoter
++promotion
++prompter
++promptly
++prone
++prong
++pronounce
++pronto
++proofing
++proofread
++proofs
++propeller
++properly
++property
++proponent
++proposal
++propose
++props
++prorate
++protector
++protegee
++proton
++prototype
++protozoan
++protract
++protrude
++proud
++provable
++proved
++proven
++provided
++provider
++providing
++province
++proving
++provoke
++provoking
++provolone
++prowess
++prowler
++prowling
++proximity
++proxy
++prozac
++prude
++prudishly
++prune
++pruning
++pry
++psychic
++public
++publisher
++pucker
++pueblo
++pug
++pull
++pulmonary
++pulp
++pulsate
++pulse
++pulverize
++puma
++pumice
++pummel
++punch
++punctual
++punctuate
++punctured
++pungent
++punisher
++punk
++pupil
++puppet
++puppy
++purchase
++pureblood
++purebred
++purely
++pureness
++purgatory
++purge
++purging
++purifier
++purify
++purist
++puritan
++purity
++purple
++purplish
++purposely
++purr
++purse
++pursuable
++pursuant
++pursuit
++purveyor
++pushcart
++pushchair
++pusher
++pushiness
++pushing
++pushover
++pushpin
++pushup
++pushy
++putdown
++putt
++puzzle
++puzzling
++pyramid
++pyromania
++python
++quack
++quadrant
++quail
++quaintly
++quake
++quaking
++qualified
++qualifier
++qualify
++quality
++qualm
++quantum
++quarrel
++quarry
++quartered
++quarterly
++quarters
++quartet
++quench
++query
++quicken
++quickly
++quickness
++quicksand
++quickstep
++quiet
++quill
++quilt
++quintet
++quintuple
++quirk
++quit
++quiver
++quizzical
++quotable
++quotation
++quote
++rabid
++race
++racing
++racism
++rack
++racoon
++radar
++radial
++radiance
++radiantly
++radiated
++radiation
++radiator
++radio
++radish
++raffle
++raft
++rage
++ragged
++raging
++ragweed
++raider
++railcar
++railing
++railroad
++railway
++raisin
++rake
++raking
++rally
++ramble
++rambling
++ramp
++ramrod
++ranch
++rancidity
++random
++ranged
++ranger
++ranging
++ranked
++ranking
++ransack
++ranting
++rants
++rare
++rarity
++rascal
++rash
++rasping
++ravage
++raven
++ravine
++raving
++ravioli
++ravishing
++reabsorb
++reach
++reacquire
++reaction
++reactive
++reactor
++reaffirm
++ream
++reanalyze
++reappear
++reapply
++reappoint
++reapprove
++rearrange
++rearview
++reason
++reassign
++reassure
++reattach
++reawake
++rebalance
++rebate
++rebel
++rebirth
++reboot
++reborn
++rebound
++rebuff
++rebuild
++rebuilt
++reburial
++rebuttal
++recall
++recant
++recapture
++recast
++recede
++recent
++recess
++recharger
++recipient
++recital
++recite
++reckless
++reclaim
++recliner
++reclining
++recluse
++reclusive
++recognize
++recoil
++recollect
++recolor
++reconcile
++reconfirm
++reconvene
++recopy
++record
++recount
++recoup
++recovery
++recreate
++rectal
++rectangle
++rectified
++rectify
++recycled
++recycler
++recycling
++reemerge
++reenact
++reenter
++reentry
++reexamine
++referable
++referee
++reference
++refill
++refinance
++refined
++refinery
++refining
++refinish
++reflected
++reflector
++reflex
++reflux
++refocus
++refold
++reforest
++reformat
++reformed
++reformer
++reformist
++refract
++refrain
++refreeze
++refresh
++refried
++refueling
++refund
++refurbish
++refurnish
++refusal
++refuse
++refusing
++refutable
++refute
++regain
++regalia
++regally
++reggae
++regime
++region
++register
++registrar
++registry
++regress
++regretful
++regroup
++regular
++regulate
++regulator
++rehab
++reheat
++rehire
++rehydrate
++reimburse
++reissue
++reiterate
++rejoice
++rejoicing
++rejoin
++rekindle
++relapse
++relapsing
++relatable
++related
++relation
++relative
++relax
++relay
++relearn
++release
++relenting
++reliable
++reliably
++reliance
++reliant
++relic
++relieve
++relieving
++relight
++relish
++relive
++reload
++relocate
++relock
++reluctant
++rely
++remake
++remark
++remarry
++rematch
++remedial
++remedy
++remember
++reminder
++remindful
++remission
++remix
++remnant
++remodeler
++remold
++remorse
++remote
++removable
++removal
++removed
++remover
++removing
++rename
++renderer
++rendering
++rendition
++renegade
++renewable
++renewably
++renewal
++renewed
++renounce
++renovate
++renovator
++rentable
++rental
++rented
++renter
++reoccupy
++reoccur
++reopen
++reorder
++repackage
++repacking
++repaint
++repair
++repave
++repaying
++repayment
++repeal
++repeated
++repeater
++repent
++rephrase
++replace
++replay
++replica
++reply
++reporter
++repose
++repossess
++repost
++repressed
++reprimand
++reprint
++reprise
++reproach
++reprocess
++reproduce
++reprogram
++reps
++reptile
++reptilian
++repugnant
++repulsion
++repulsive
++repurpose
++reputable
++reputably
++request
++require
++requisite
++reroute
++rerun
++resale
++resample
++rescuer
++reseal
++research
++reselect
++reseller
++resemble
++resend
++resent
++reset
++reshape
++reshoot
++reshuffle
++residence
++residency
++resident
++residual
++residue
++resigned
++resilient
++resistant
++resisting
++resize
++resolute
++resolved
++resonant
++resonate
++resort
++resource
++respect
++resubmit
++result
++resume
++resupply
++resurface
++resurrect
++retail
++retainer
++retaining
++retake
++retaliate
++retention
++rethink
++retinal
++retired
++retiree
++retiring
++retold
++retool
++retorted
++retouch
++retrace
++retract
++retrain
++retread
++retreat
++retrial
++retrieval
++retriever
++retry
++return
++retying
++retype
++reunion
++reunite
++reusable
++reuse
++reveal
++reveler
++revenge
++revenue
++reverb
++revered
++reverence
++reverend
++reversal
++reverse
++reversing
++reversion
++revert
++revisable
++revise
++revision
++revisit
++revivable
++revival
++reviver
++reviving
++revocable
++revoke
++revolt
++revolver
++revolving
++reward
++rewash
++rewind
++rewire
++reword
++rework
++rewrap
++rewrite
++rhyme
++ribbon
++ribcage
++rice
++riches
++richly
++richness
++rickety
++ricotta
++riddance
++ridden
++ride
++riding
++rifling
++rift
++rigging
++rigid
++rigor
++rimless
++rimmed
++rind
++rink
++rinse
++rinsing
++riot
++ripcord
++ripeness
++ripening
++ripping
++ripple
++rippling
++riptide
++rise
++rising
++risk
++risotto
++ritalin
++ritzy
++rival
++riverbank
++riverbed
++riverboat
++riverside
++riveter
++riveting
++roamer
++roaming
++roast
++robbing
++robe
++robin
++robotics
++robust
++rockband
++rocker
++rocket
++rockfish
++rockiness
++rocking
++rocklike
++rockslide
++rockstar
++rocky
++rogue
++roman
++romp
++rope
++roping
++roster
++rosy
++rotten
++rotting
++rotunda
++roulette
++rounding
++roundish
++roundness
++roundup
++roundworm
++routine
++routing
++rover
++roving
++royal
++rubbed
++rubber
++rubbing
++rubble
++rubdown
++ruby
++ruckus
++rudder
++rug
++ruined
++rule
++rumble
++rumbling
++rummage
++rumor
++runaround
++rundown
++runner
++running
++runny
++runt
++runway
++rupture
++rural
++ruse
++rush
++rust
++rut
++sabbath
++sabotage
++sacrament
++sacred
++sacrifice
++sadden
++saddlebag
++saddled
++saddling
++sadly
++sadness
++safari
++safeguard
++safehouse
++safely
++safeness
++saffron
++saga
++sage
++sagging
++saggy
++said
++saint
++sake
++salad
++salami
++salaried
++salary
++saline
++salon
++saloon
++salsa
++salt
++salutary
++salute
++salvage
++salvaging
++salvation
++same
++sample
++sampling
++sanction
++sanctity
++sanctuary
++sandal
++sandbag
++sandbank
++sandbar
++sandblast
++sandbox
++sanded
++sandfish
++sanding
++sandlot
++sandpaper
++sandpit
++sandstone
++sandstorm
++sandworm
++sandy
++sanitary
++sanitizer
++sank
++santa
++sapling
++sappiness
++sappy
++sarcasm
++sarcastic
++sardine
++sash
++sasquatch
++sassy
++satchel
++satiable
++satin
++satirical
++satisfied
++satisfy
++saturate
++saturday
++sauciness
++saucy
++sauna
++savage
++savanna
++saved
++savings
++savior
++savor
++saxophone
++say
++scabbed
++scabby
++scalded
++scalding
++scale
++scaling
++scallion
++scallop
++scalping
++scam
++scandal
++scanner
++scanning
++scant
++scapegoat
++scarce
++scarcity
++scarecrow
++scared
++scarf
++scarily
++scariness
++scarring
++scary
++scavenger
++scenic
++schedule
++schematic
++scheme
++scheming
++schilling
++schnapps
++scholar
++science
++scientist
++scion
++scoff
++scolding
++scone
++scoop
++scooter
++scope
++scorch
++scorebook
++scorecard
++scored
++scoreless
++scorer
++scoring
++scorn
++scorpion
++scotch
++scoundrel
++scoured
++scouring
++scouting
++scouts
++scowling
++scrabble
++scraggly
++scrambled
++scrambler
++scrap
++scratch
++scrawny
++screen
++scribble
++scribe
++scribing
++scrimmage
++script
++scroll
++scrooge
++scrounger
++scrubbed
++scrubber
++scruffy
++scrunch
++scrutiny
++scuba
++scuff
++sculptor
++sculpture
++scurvy
++scuttle
++secluded
++secluding
++seclusion
++second
++secrecy
++secret
++sectional
++sector
++secular
++securely
++security
++sedan
++sedate
++sedation
++sedative
++sediment
++seduce
++seducing
++segment
++seismic
++seizing
++seldom
++selected
++selection
++selective
++selector
++self
++seltzer
++semantic
++semester
++semicolon
++semifinal
++seminar
++semisoft
++semisweet
++senate
++senator
++send
++senior
++senorita
++sensation
++sensitive
++sensitize
++sensually
++sensuous
++sepia
++september
++septic
++septum
++sequel
++sequence
++sequester
++series
++sermon
++serotonin
++serpent
++serrated
++serve
++service
++serving
++sesame
++sessions
++setback
++setting
++settle
++settling
++setup
++sevenfold
++seventeen
++seventh
++seventy
++severity
++shabby
++shack
++shaded
++shadily
++shadiness
++shading
++shadow
++shady
++shaft
++shakable
++shakily
++shakiness
++shaking
++shaky
++shale
++shallot
++shallow
++shame
++shampoo
++shamrock
++shank
++shanty
++shape
++shaping
++share
++sharpener
++sharper
++sharpie
++sharply
++sharpness
++shawl
++sheath
++shed
++sheep
++sheet
++shelf
++shell
++shelter
++shelve
++shelving
++sherry
++shield
++shifter
++shifting
++shiftless
++shifty
++shimmer
++shimmy
++shindig
++shine
++shingle
++shininess
++shining
++shiny
++ship
++shirt
++shivering
++shock
++shone
++shoplift
++shopper
++shopping
++shoptalk
++shore
++shortage
++shortcake
++shortcut
++shorten
++shorter
++shorthand
++shortlist
++shortly
++shortness
++shorts
++shortwave
++shorty
++shout
++shove
++showbiz
++showcase
++showdown
++shower
++showgirl
++showing
++showman
++shown
++showoff
++showpiece
++showplace
++showroom
++showy
++shrank
++shrapnel
++shredder
++shredding
++shrewdly
++shriek
++shrill
++shrimp
++shrine
++shrink
++shrivel
++shrouded
++shrubbery
++shrubs
++shrug
++shrunk
++shucking
++shudder
++shuffle
++shuffling
++shun
++shush
++shut
++shy
++siamese
++siberian
++sibling
++siding
++sierra
++siesta
++sift
++sighing
++silenced
++silencer
++silent
++silica
++silicon
++silk
++silliness
++silly
++silo
++silt
++silver
++similarly
++simile
++simmering
++simple
++simplify
++simply
++sincere
++sincerity
++singer
++singing
++single
++singular
++sinister
++sinless
++sinner
++sinuous
++sip
++siren
++sister
++sitcom
++sitter
++sitting
++situated
++situation
++sixfold
++sixteen
++sixth
++sixties
++sixtieth
++sixtyfold
++sizable
++sizably
++size
++sizing
++sizzle
++sizzling
++skater
++skating
++skedaddle
++skeletal
++skeleton
++skeptic
++sketch
++skewed
++skewer
++skid
++skied
++skier
++skies
++skiing
++skilled
++skillet
++skillful
++skimmed
++skimmer
++skimming
++skimpily
++skincare
++skinhead
++skinless
++skinning
++skinny
++skintight
++skipper
++skipping
++skirmish
++skirt
++skittle
++skydiver
++skylight
++skyline
++skype
++skyrocket
++skyward
++slab
++slacked
++slacker
++slacking
++slackness
++slacks
++slain
++slam
++slander
++slang
++slapping
++slapstick
++slashed
++slashing
++slate
++slather
++slaw
++sled
++sleek
++sleep
++sleet
++sleeve
++slept
++sliceable
++sliced
++slicer
++slicing
++slick
++slider
++slideshow
++sliding
++slighted
++slighting
++slightly
++slimness
++slimy
++slinging
++slingshot
++slinky
++slip
++slit
++sliver
++slobbery
++slogan
++sloped
++sloping
++sloppily
++sloppy
++slot
++slouching
++slouchy
++sludge
++slug
++slum
++slurp
++slush
++sly
++small
++smartly
++smartness
++smasher
++smashing
++smashup
++smell
++smelting
++smile
++smilingly
++smirk
++smite
++smith
++smitten
++smock
++smog
++smoked
++smokeless
++smokiness
++smoking
++smoky
++smolder
++smooth
++smother
++smudge
++smudgy
++smuggler
++smuggling
++smugly
++smugness
++snack
++snagged
++snaking
++snap
++snare
++snarl
++snazzy
++sneak
++sneer
++sneeze
++sneezing
++snide
++sniff
++snippet
++snipping
++snitch
++snooper
++snooze
++snore
++snoring
++snorkel
++snort
++snout
++snowbird
++snowboard
++snowbound
++snowcap
++snowdrift
++snowdrop
++snowfall
++snowfield
++snowflake
++snowiness
++snowless
++snowman
++snowplow
++snowshoe
++snowstorm
++snowsuit
++snowy
++snub
++snuff
++snuggle
++snugly
++snugness
++speak
++spearfish
++spearhead
++spearman
++spearmint
++species
++specimen
++specked
++speckled
++specks
++spectacle
++spectator
++spectrum
++speculate
++speech
++speed
++spellbind
++speller
++spelling
++spendable
++spender
++spending
++spent
++spew
++sphere
++spherical
++sphinx
++spider
++spied
++spiffy
++spill
++spilt
++spinach
++spinal
++spindle
++spinner
++spinning
++spinout
++spinster
++spiny
++spiral
++spirited
++spiritism
++spirits
++spiritual
++splashed
++splashing
++splashy
++splatter
++spleen
++splendid
++splendor
++splice
++splicing
++splinter
++splotchy
++splurge
++spoilage
++spoiled
++spoiler
++spoiling
++spoils
++spoken
++spokesman
++sponge
++spongy
++sponsor
++spoof
++spookily
++spooky
++spool
++spoon
++spore
++sporting
++sports
++sporty
++spotless
++spotlight
++spotted
++spotter
++spotting
++spotty
++spousal
++spouse
++spout
++sprain
++sprang
++sprawl
++spray
++spree
++sprig
++spring
++sprinkled
++sprinkler
++sprint
++sprite
++sprout
++spruce
++sprung
++spry
++spud
++spur
++sputter
++spyglass
++squabble
++squad
++squall
++squander
++squash
++squatted
++squatter
++squatting
++squeak
++squealer
++squealing
++squeamish
++squeegee
++squeeze
++squeezing
++squid
++squiggle
++squiggly
++squint
++squire
++squirt
++squishier
++squishy
++stability
++stabilize
++stable
++stack
++stadium
++staff
++stage
++staging
++stagnant
++stagnate
++stainable
++stained
++staining
++stainless
++stalemate
++staleness
++stalling
++stallion
++stamina
++stammer
++stamp
++stand
++stank
++staple
++stapling
++starboard
++starch
++stardom
++stardust
++starfish
++stargazer
++staring
++stark
++starless
++starlet
++starlight
++starlit
++starring
++starry
++starship
++starter
++starting
++startle
++startling
++startup
++starved
++starving
++stash
++state
++static
++statistic
++statue
++stature
++status
++statute
++statutory
++staunch
++stays
++steadfast
++steadier
++steadily
++steadying
++steam
++steed
++steep
++steerable
++steering
++steersman
++stegosaur
++stellar
++stem
++stench
++stencil
++step
++stereo
++sterile
++sterility
++sterilize
++sterling
++sternness
++sternum
++stew
++stick
++stiffen
++stiffly
++stiffness
++stifle
++stifling
++stillness
++stilt
++stimulant
++stimulate
++stimuli
++stimulus
++stinger
++stingily
++stinging
++stingray
++stingy
++stinking
++stinky
++stipend
++stipulate
++stir
++stitch
++stock
++stoic
++stoke
++stole
++stomp
++stonewall
++stoneware
++stonework
++stoning
++stony
++stood
++stooge
++stool
++stoop
++stoplight
++stoppable
++stoppage
++stopped
++stopper
++stopping
++stopwatch
++storable
++storage
++storeroom
++storewide
++storm
++stout
++stove
++stowaway
++stowing
++straddle
++straggler
++strained
++strainer
++straining
++strangely
++stranger
++strangle
++strategic
++strategy
++stratus
++straw
++stray
++streak
++stream
++street
++strength
++strenuous
++strep
++stress
++stretch
++strewn
++stricken
++strict
++stride
++strife
++strike
++striking
++strive
++striving
++strobe
++strode
++stroller
++strongbox
++strongly
++strongman
++struck
++structure
++strudel
++struggle
++strum
++strung
++strut
++stubbed
++stubble
++stubbly
++stubborn
++stucco
++stuck
++student
++studied
++studio
++study
++stuffed
++stuffing
++stuffy
++stumble
++stumbling
++stump
++stung
++stunned
++stunner
++stunning
++stunt
++stupor
++sturdily
++sturdy
++styling
++stylishly
++stylist
++stylized
++stylus
++suave
++subarctic
++subatomic
++subdivide
++subdued
++subduing
++subfloor
++subgroup
++subheader
++subject
++sublease
++sublet
++sublevel
++sublime
++submarine
++submerge
++submersed
++submitter
++subpanel
++subpar
++subplot
++subprime
++subscribe
++subscript
++subsector
++subside
++subsiding
++subsidize
++subsidy
++subsoil
++subsonic
++substance
++subsystem
++subtext
++subtitle
++subtly
++subtotal
++subtract
++subtype
++suburb
++subway
++subwoofer
++subzero
++succulent
++such
++suction
++sudden
++sudoku
++suds
++sufferer
++suffering
++suffice
++suffix
++suffocate
++suffrage
++sugar
++suggest
++suing
++suitable
++suitably
++suitcase
++suitor
++sulfate
++sulfide
++sulfite
++sulfur
++sulk
++sullen
++sulphate
++sulphuric
++sultry
++superbowl
++superglue
++superhero
++superior
++superjet
++superman
++supermom
++supernova
++supervise
++supper
++supplier
++supply
++support
++supremacy
++supreme
++surcharge
++surely
++sureness
++surface
++surfacing
++surfboard
++surfer
++surgery
++surgical
++surging
++surname
++surpass
++surplus
++surprise
++surreal
++surrender
++surrogate
++surround
++survey
++survival
++survive
++surviving
++survivor
++sushi
++suspect
++suspend
++suspense
++sustained
++sustainer
++swab
++swaddling
++swagger
++swampland
++swan
++swapping
++swarm
++sway
++swear
++sweat
++sweep
++swell
++swept
++swerve
++swifter
++swiftly
++swiftness
++swimmable
++swimmer
++swimming
++swimsuit
++swimwear
++swinger
++swinging
++swipe
++swirl
++switch
++swivel
++swizzle
++swooned
++swoop
++swoosh
++swore
++sworn
++swung
++sycamore
++sympathy
++symphonic
++symphony
++symptom
++synapse
++syndrome
++synergy
++synopses
++synopsis
++synthesis
++synthetic
++syrup
++system
++t-shirt
++tabasco
++tabby
++tableful
++tables
++tablet
++tableware
++tabloid
++tackiness
++tacking
++tackle
++tackling
++tacky
++taco
++tactful
++tactical
++tactics
++tactile
++tactless
++tadpole
++taekwondo
++tag
++tainted
++take
++taking
++talcum
++talisman
++tall
++talon
++tamale
++tameness
++tamer
++tamper
++tank
++tanned
++tannery
++tanning
++tantrum
++tapeless
++tapered
++tapering
++tapestry
++tapioca
++tapping
++taps
++tarantula
++target
++tarmac
++tarnish
++tarot
++tartar
++tartly
++tartness
++task
++tassel
++taste
++tastiness
++tasting
++tasty
++tattered
++tattle
++tattling
++tattoo
++taunt
++tavern
++thank
++that
++thaw
++theater
++theatrics
++thee
++theft
++theme
++theology
++theorize
++thermal
++thermos
++thesaurus
++these
++thesis
++thespian
++thicken
++thicket
++thickness
++thieving
++thievish
++thigh
++thimble
++thing
++think
++thinly
++thinner
++thinness
++thinning
++thirstily
++thirsting
++thirsty
++thirteen
++thirty
++thong
++thorn
++those
++thousand
++thrash
++thread
++threaten
++threefold
++thrift
++thrill
++thrive
++thriving
++throat
++throbbing
++throng
++throttle
++throwaway
++throwback
++thrower
++throwing
++thud
++thumb
++thumping
++thursday
++thus
++thwarting
++thyself
++tiara
++tibia
++tidal
++tidbit
++tidiness
++tidings
++tidy
++tiger
++tighten
++tightly
++tightness
++tightrope
++tightwad
++tigress
++tile
++tiling
++till
++tilt
++timid
++timing
++timothy
++tinderbox
++tinfoil
++tingle
++tingling
++tingly
++tinker
++tinkling
++tinsel
++tinsmith
++tint
++tinwork
++tiny
++tipoff
++tipped
++tipper
++tipping
++tiptoeing
++tiptop
++tiring
++tissue
++trace
++tracing
++track
++traction
++tractor
++trade
++trading
++tradition
++traffic
++tragedy
++trailing
++trailside
++train
++traitor
++trance
++tranquil
++transfer
++transform
++translate
++transpire
++transport
++transpose
++trapdoor
++trapeze
++trapezoid
++trapped
++trapper
++trapping
++traps
++trash
++travel
++traverse
++travesty
++tray
++treachery
++treading
++treadmill
++treason
++treat
++treble
++tree
++trekker
++tremble
++trembling
++tremor
++trench
++trend
++trespass
++triage
++trial
++triangle
++tribesman
++tribunal
++tribune
++tributary
++tribute
++triceps
++trickery
++trickily
++tricking
++trickle
++trickster
++tricky
++tricolor
++tricycle
++trident
++tried
++trifle
++trifocals
++trillion
++trilogy
++trimester
++trimmer
++trimming
++trimness
++trinity
++trio
++tripod
++tripping
++triumph
++trivial
++trodden
++trolling
++trombone
++trophy
++tropical
++tropics
++trouble
++troubling
++trough
++trousers
++trout
++trowel
++truce
++truck
++truffle
++trump
++trunks
++trustable
++trustee
++trustful
++trusting
++trustless
++truth
++try
++tubby
++tubeless
++tubular
++tucking
++tuesday
++tug
++tuition
++tulip
++tumble
++tumbling
++tummy
++turban
++turbine
++turbofan
++turbojet
++turbulent
++turf
++turkey
++turmoil
++turret
++turtle
++tusk
++tutor
++tutu
++tux
++tweak
++tweed
++tweet
++tweezers
++twelve
++twentieth
++twenty
++twerp
++twice
++twiddle
++twiddling
++twig
++twilight
++twine
++twins
++twirl
++twistable
++twisted
++twister
++twisting
++twisty
++twitch
++twitter
++tycoon
++tying
++tyke
++udder
++ultimate
++ultimatum
++ultra
++umbilical
++umbrella
++umpire
++unabashed
++unable
++unadorned
++unadvised
++unafraid
++unaired
++unaligned
++unaltered
++unarmored
++unashamed
++unaudited
++unawake
++unaware
++unbaked
++unbalance
++unbeaten
++unbend
++unbent
++unbiased
++unbitten
++unblended
++unblessed
++unblock
++unbolted
++unbounded
++unboxed
++unbraided
++unbridle
++unbroken
++unbuckled
++unbundle
++unburned
++unbutton
++uncanny
++uncapped
++uncaring
++uncertain
++unchain
++unchanged
++uncharted
++uncheck
++uncivil
++unclad
++unclaimed
++unclamped
++unclasp
++uncle
++unclip
++uncloak
++unclog
++unclothed
++uncoated
++uncoiled
++uncolored
++uncombed
++uncommon
++uncooked
++uncork
++uncorrupt
++uncounted
++uncouple
++uncouth
++uncover
++uncross
++uncrown
++uncrushed
++uncured
++uncurious
++uncurled
++uncut
++undamaged
++undated
++undaunted
++undead
++undecided
++undefined
++underage
++underarm
++undercoat
++undercook
++undercut
++underdog
++underdone
++underfed
++underfeed
++underfoot
++undergo
++undergrad
++underhand
++underline
++underling
++undermine
++undermost
++underpaid
++underpass
++underpay
++underrate
++undertake
++undertone
++undertook
++undertow
++underuse
++underwear
++underwent
++underwire
++undesired
++undiluted
++undivided
++undocked
++undoing
++undone
++undrafted
++undress
++undrilled
++undusted
++undying
++unearned
++unearth
++unease
++uneasily
++uneasy
++uneatable
++uneaten
++unedited
++unelected
++unending
++unengaged
++unenvied
++unequal
++unethical
++uneven
++unexpired
++unexposed
++unfailing
++unfair
++unfasten
++unfazed
++unfeeling
++unfiled
++unfilled
++unfitted
++unfitting
++unfixable
++unfixed
++unflawed
++unfocused
++unfold
++unfounded
++unframed
++unfreeze
++unfrosted
++unfrozen
++unfunded
++unglazed
++ungloved
++unglue
++ungodly
++ungraded
++ungreased
++unguarded
++unguided
++unhappily
++unhappy
++unharmed
++unhealthy
++unheard
++unhearing
++unheated
++unhelpful
++unhidden
++unhinge
++unhitched
++unholy
++unhook
++unicorn
++unicycle
++unified
++unifier
++uniformed
++uniformly
++unify
++unimpeded
++uninjured
++uninstall
++uninsured
++uninvited
++union
++uniquely
++unisexual
++unison
++unissued
++unit
++universal
++universe
++unjustly
++unkempt
++unkind
++unknotted
++unknowing
++unknown
++unlaced
++unlatch
++unlawful
++unleaded
++unlearned
++unleash
++unless
++unleveled
++unlighted
++unlikable
++unlimited
++unlined
++unlinked
++unlisted
++unlit
++unlivable
++unloaded
++unloader
++unlocked
++unlocking
++unlovable
++unloved
++unlovely
++unloving
++unluckily
++unlucky
++unmade
++unmanaged
++unmanned
++unmapped
++unmarked
++unmasked
++unmasking
++unmatched
++unmindful
++unmixable
++unmixed
++unmolded
++unmoral
++unmovable
++unmoved
++unmoving
++unnamable
++unnamed
++unnatural
++unneeded
++unnerve
++unnerving
++unnoticed
++unopened
++unopposed
++unpack
++unpadded
++unpaid
++unpainted
++unpaired
++unpaved
++unpeeled
++unpicked
++unpiloted
++unpinned
++unplanned
++unplanted
++unpleased
++unpledged
++unplowed
++unplug
++unpopular
++unproven
++unquote
++unranked
++unrated
++unraveled
++unreached
++unread
++unreal
++unreeling
++unrefined
++unrelated
++unrented
++unrest
++unretired
++unrevised
++unrigged
++unripe
++unrivaled
++unroasted
++unrobed
++unroll
++unruffled
++unruly
++unrushed
++unsaddle
++unsafe
++unsaid
++unsalted
++unsaved
++unsavory
++unscathed
++unscented
++unscrew
++unsealed
++unseated
++unsecured
++unseeing
++unseemly
++unseen
++unselect
++unselfish
++unsent
++unsettled
++unshackle
++unshaken
++unshaved
++unshaven
++unsheathe
++unshipped
++unsightly
++unsigned
++unskilled
++unsliced
++unsmooth
++unsnap
++unsocial
++unsoiled
++unsold
++unsolved
++unsorted
++unspoiled
++unspoken
++unstable
++unstaffed
++unstamped
++unsteady
++unsterile
++unstirred
++unstitch
++unstopped
++unstuck
++unstuffed
++unstylish
++unsubtle
++unsubtly
++unsuited
++unsure
++unsworn
++untagged
++untainted
++untaken
++untamed
++untangled
++untapped
++untaxed
++unthawed
++unthread
++untidy
++untie
++until
++untimed
++untimely
++untitled
++untoasted
++untold
++untouched
++untracked
++untrained
++untreated
++untried
++untrimmed
++untrue
++untruth
++unturned
++untwist
++untying
++unusable
++unused
++unusual
++unvalued
++unvaried
++unvarying
++unveiled
++unveiling
++unvented
++unviable
++unvisited
++unvocal
++unwanted
++unwarlike
++unwary
++unwashed
++unwatched
++unweave
++unwed
++unwelcome
++unwell
++unwieldy
++unwilling
++unwind
++unwired
++unwitting
++unwomanly
++unworldly
++unworn
++unworried
++unworthy
++unwound
++unwoven
++unwrapped
++unwritten
++unzip
++upbeat
++upchuck
++upcoming
++upcountry
++update
++upfront
++upgrade
++upheaval
++upheld
++uphill
++uphold
++uplifted
++uplifting
++upload
++upon
++upper
++upright
++uprising
++upriver
++uproar
++uproot
++upscale
++upside
++upstage
++upstairs
++upstart
++upstate
++upstream
++upstroke
++upswing
++uptake
++uptight
++uptown
++upturned
++upward
++upwind
++uranium
++urban
++urchin
++urethane
++urgency
++urgent
++urging
++urologist
++urology
++usable
++usage
++useable
++used
++uselessly
++user
++usher
++usual
++utensil
++utility
++utilize
++utmost
++utopia
++utter
++vacancy
++vacant
++vacate
++vacation
++vagabond
++vagrancy
++vagrantly
++vaguely
++vagueness
++valiant
++valid
++valium
++valley
++valuables
++value
++vanilla
++vanish
++vanity
++vanquish
++vantage
++vaporizer
++variable
++variably
++varied
++variety
++various
++varmint
++varnish
++varsity
++varying
++vascular
++vaseline
++vastly
++vastness
++veal
++vegan
++veggie
++vehicular
++velcro
++velocity
++velvet
++vendetta
++vending
++vendor
++veneering
++vengeful
++venomous
++ventricle
++venture
++venue
++venus
++verbalize
++verbally
++verbose
++verdict
++verify
++verse
++version
++versus
++vertebrae
++vertical
++vertigo
++very
++vessel
++vest
++veteran
++veto
++vexingly
++viability
++viable
++vibes
++vice
++vicinity
++victory
++video
++viewable
++viewer
++viewing
++viewless
++viewpoint
++vigorous
++village
++villain
++vindicate
++vineyard
++vintage
++violate
++violation
++violator
++violet
++violin
++viper
++viral
++virtual
++virtuous
++virus
++visa
++viscosity
++viscous
++viselike
++visible
++visibly
++vision
++visiting
++visitor
++visor
++vista
++vitality
++vitalize
++vitally
++vitamins
++vivacious
++vividly
++vividness
++vixen
++vocalist
++vocalize
++vocally
++vocation
++voice
++voicing
++void
++volatile
++volley
++voltage
++volumes
++voter
++voting
++voucher
++vowed
++vowel
++voyage
++wackiness
++wad
++wafer
++waffle
++waged
++wager
++wages
++waggle
++wagon
++wake
++waking
++walk
++walmart
++walnut
++walrus
++waltz
++wand
++wannabe
++wanted
++wanting
++wasabi
++washable
++washbasin
++washboard
++washbowl
++washcloth
++washday
++washed
++washer
++washhouse
++washing
++washout
++washroom
++washstand
++washtub
++wasp
++wasting
++watch
++water
++waviness
++waving
++wavy
++whacking
++whacky
++wham
++wharf
++wheat
++whenever
++whiff
++whimsical
++whinny
++whiny
++whisking
++whoever
++whole
++whomever
++whoopee
++whooping
++whoops
++why
++wick
++widely
++widen
++widget
++widow
++width
++wieldable
++wielder
++wife
++wifi
++wikipedia
++wildcard
++wildcat
++wilder
++wildfire
++wildfowl
++wildland
++wildlife
++wildly
++wildness
++willed
++willfully
++willing
++willow
++willpower
++wilt
++wimp
++wince
++wincing
++wind
++wing
++winking
++winner
++winnings
++winter
++wipe
++wired
++wireless
++wiring
++wiry
++wisdom
++wise
++wish
++wisplike
++wispy
++wistful
++wizard
++wobble
++wobbling
++wobbly
++wok
++wolf
++wolverine
++womanhood
++womankind
++womanless
++womanlike
++womanly
++womb
++woof
++wooing
++wool
++woozy
++word
++work
++worried
++worrier
++worrisome
++worry
++worsening
++worshiper
++worst
++wound
++woven
++wow
++wrangle
++wrath
++wreath
++wreckage
++wrecker
++wrecking
++wrench
++wriggle
++wriggly
++wrinkle
++wrinkly
++wrist
++writing
++written
++wrongdoer
++wronged
++wrongful
++wrongly
++wrongness
++wrought
++xbox
++xerox
++yahoo
++yam
++yanking
++yapping
++yard
++yarn
++yeah
++yearbook
++yearling
++yearly
++yearning
++yeast
++yelling
++yelp
++yen
++yesterday
++yiddish
++yield
++yin
++yippee
++yo-yo
++yodel
++yoga
++yogurt
++yonder
++yoyo
++yummy
++zap
++zealous
++zebra
++zen
++zeppelin
++zero
++zestfully
++zesty
++zigzagged
++zipfile
++zipping
++zippy
++zips
++zit
++zodiac
++zombie
++zone
++zoning
++zookeeper
++zoologist
++zoology
++zoom
+diff --git a/src/generator.rs b/src/generator.rs
+new file mode 100644
+index 0000000..4600aec
+--- /dev/null
++++ b/src/generator.rs
+@@ -0,0 +1,413 @@
++//! The command line's password options: turning them into a
++//! `crypto::generate::Recipe`, describing the recipe's strength, and turning
++//! a drawn password into text.
++
++use crate::crypto::generate::{
++    self, Capitalize, Cell, Chars, DIGITS, LOWERCASE, Recipe, SYMBOLS, Separator, UPPERCASE, Words,
++};
++
++/// Characters that are easy to misread for one another.
++const LOOKALIKES: &[u8] = b"0Oo1lI|";
++/// Below this strength the line warns, because a password an attacker can
++/// guess offline at full speed needs at least this much.
++const WEAK_BITS: f64 = 64.0;
++/// A recipe whose draws are kept less often than this would loop for a long
++/// time, so it is refused as too narrow.
++const MIN_ACCEPTANCE: f64 = 1e-6;
++
++/// The options as given. Each is `None` or `false` when absent, so errors
++/// can name the option that does not fit.
++#[derive(Debug, Default, Clone, PartialEq)]
++pub struct Options {
++    pub length: Option<usize>,
++    pub no_uppercase: bool,
++    pub no_lowercase: bool,
++    pub no_digits: bool,
++    pub no_symbols: bool,
++    pub symbols: Option<String>,
++    pub exclude: Option<String>,
++    pub no_lookalikes: bool,
++    /// `Some(None)` for `--words` without a count.
++    pub words: Option<Option<usize>>,
++    pub separator: Option<String>,
++    pub capitalize: Option<String>,
++    /// `Some(None)` for `--pin` without a length.
++    pub pin: Option<Option<usize>>,
++}
++
++impl Options {
++    pub fn is_empty(&self) -> bool {
++        *self == Options::default()
++    }
++
++    /// The options for random characters that were given, by name.
++    fn random_flags(&self) -> Vec<&'static str> {
++        [
++            (self.length.is_some(), "--length"),
++            (self.no_uppercase, "--no-uppercase"),
++            (self.no_lowercase, "--no-lowercase"),
++            (self.no_digits, "--no-digits"),
++            (self.no_symbols, "--no-symbols"),
++            (self.symbols.is_some(), "--symbols"),
++            (self.exclude.is_some(), "--exclude"),
++            (self.no_lookalikes, "--no-lookalikes"),
++        ]
++        .into_iter()
++        .filter_map(|(given, flag)| given.then_some(flag))
++        .collect()
++    }
++
++    fn word_flags(&self) -> Vec<&'static str> {
++        [
++            (self.separator.is_some(), "--separator"),
++            (self.capitalize.is_some(), "--capitalize"),
++        ]
++        .into_iter()
++        .filter_map(|(given, flag)| given.then_some(flag))
++        .collect()
++    }
++
++    pub fn recipe(&self) -> Result<Recipe, String> {
++        if self.words.is_some() && self.pin.is_some() {
++            return Err("--words and --pin cannot be used together".into());
++        }
++        let kind = if self.words.is_some() {
++            Some("--words")
++        } else if self.pin.is_some() {
++            Some("--pin")
++        } else {
++            None
++        };
++        if let (Some(kind), Some(flag)) = (kind, self.random_flags().first()) {
++            return Err(format!("{flag} applies to random characters, not {kind}"));
++        }
++        if self.words.is_none()
++            && let Some(flag) = self.word_flags().first()
++        {
++            return Err(format!("{flag} needs --words"));
++        }
++        let recipe = if let Some(count) = self.words {
++            self.words_recipe(count.unwrap_or(5))?
++        } else if let Some(length) = self.pin {
++            let length = length.unwrap_or(6);
++            in_range("--pin", length, 4, 64)?;
++            Recipe::Pin { length }
++        } else {
++            self.chars_recipe()?
++        };
++        if let Recipe::Chars(chars) = &recipe
++            && generate::acceptance(chars) < MIN_ACCEPTANCE
++        {
++            return Err("these options leave too few passwords to draw from".into());
++        }
++        Ok(recipe)
++    }
++
++    fn words_recipe(&self, count: usize) -> Result<Recipe, String> {
++        in_range("--words", count, 3, 15)?;
++        let separator = match self.separator.as_deref().unwrap_or("hyphen") {
++            "hyphen" => Separator::Fixed(b'-'),
++            "space" => Separator::Fixed(b' '),
++            "period" => Separator::Fixed(b'.'),
++            "comma" => Separator::Fixed(b','),
++            "underscore" => Separator::Fixed(b'_'),
++            "digit" => Separator::Digit,
++            "digit-or-symbol" => Separator::DigitOrSymbol,
++            other => {
++                return Err(format!(
++                    "unknown separator {other}; use hyphen, space, period, comma, underscore, digit or digit-or-symbol"
++                ));
++            }
++        };
++        let capitalize = match self.capitalize.as_deref().unwrap_or("none") {
++            "none" => Capitalize::None,
++            "first" => Capitalize::First,
++            "one" => Capitalize::One,
++            other => {
++                return Err(format!(
++                    "unknown --capitalize value {other}; use none, first or one"
++                ));
++            }
++        };
++        Ok(Recipe::Words(Words {
++            count,
++            separator,
++            capitalize,
++        }))
++    }
++
++    fn chars_recipe(&self) -> Result<Recipe, String> {
++        let length = self.length.unwrap_or(20);
++        in_range("--length", length, 4, 128)?;
++        let symbols = match &self.symbols {
++            Some(_) if self.no_symbols => {
++                return Err("--symbols and --no-symbols cannot be used together".into());
++            }
++            Some(chars) => {
++                if chars.is_empty() || !chars.bytes().all(|b| SYMBOLS.contains(&b)) {
++                    return Err("--symbols takes ASCII punctuation only".into());
++                }
++                chars.as_bytes().to_vec()
++            }
++            None => SYMBOLS.to_vec(),
++        };
++        let mut excluded: Vec<u8> = self.exclude.as_deref().unwrap_or("").bytes().collect();
++        if self.no_lookalikes {
++            excluded.extend_from_slice(LOOKALIKES);
++        }
++        let sets = [
++            (!self.no_uppercase, UPPERCASE, "uppercase letters"),
++            (!self.no_lowercase, LOWERCASE, "lowercase letters"),
++            (!self.no_digits, DIGITS, "digits"),
++            (!self.no_symbols, &symbols[..], "symbols"),
++        ];
++        let mut cells = Vec::new();
++        for (on, chars, what) in sets {
++            if !on {
++                continue;
++            }
++            let mut kept = Vec::new();
++            for &b in chars {
++                if !excluded.contains(&b) && !kept.contains(&b) {
++                    kept.push(b);
++                }
++            }
++            if kept.is_empty() {
++                return Err(format!(
++                    "the excluded characters leave no {what}; leave the set out instead"
++                ));
++            }
++            cells.push(Cell {
++                chars: kept,
++                satisfies: 1 << cells.len(),
++            });
++        }
++        if cells.is_empty() {
++            return Err(
++                "at least one of uppercase, lowercase, digits and symbols must remain".into(),
++            );
++        }
++        Ok(Recipe::Chars(Chars {
++            requirements: cells.len() as u32,
++            cells,
++            length,
++            max_consecutive: None,
++        }))
++    }
++}
++
++fn in_range(flag: &str, value: usize, min: usize, max: usize) -> Result<(), String> {
++    if (min..=max).contains(&value) {
++        Ok(())
++    } else {
++        Err(format!("{flag} must be from {min} to {max}"))
++    }
++}
++
++/// Draws a password and returns it as text.
++pub fn password(recipe: &Recipe) -> Result<String, String> {
++    let drawn =
++        generate::password(recipe).map_err(|e| format!("could not read random bytes: {e}"))?;
++    String::from_utf8(drawn.bytes[..drawn.len].to_vec())
++        .map_err(|_| "the generator made a password that is not ASCII".into())
++}
++
++/// The strength line, such as `random characters, 20 from 94, each set
++/// present: 130.9 bits`. It depends only on the recipe, so it reveals nothing
++/// about the password.
++pub fn strength(recipe: &Recipe) -> String {
++    let what = match recipe {
++        Recipe::Chars(chars) => {
++            let alphabet: usize = chars.cells.iter().map(|cell| cell.chars.len()).sum();
++            format!(
++                "random characters, {} from {alphabet}, each set present",
++                chars.length
++            )
++        }
++        Recipe::Words(words) => {
++            let separator = match words.separator {
++                Separator::Fixed(b'-') => "hyphens",
++                Separator::Fixed(b' ') => "spaces",
++                Separator::Fixed(b'.') => "periods",
++                Separator::Fixed(b',') => "commas",
++                Separator::Fixed(b'_') => "underscores",
++                Separator::Fixed(_) => "a separator",
++                Separator::Digit => "digits",
++                Separator::DigitOrSymbol => "digits or symbols",
++            };
++            let capitalize = match words.capitalize {
++                Capitalize::None => "",
++                Capitalize::First => ", each capitalized",
++                Capitalize::One => ", one capitalized",
++            };
++            format!(
++                "memorable, {} words from {} with {separator}{capitalize}",
++                words.count,
++                thousands(generate::word_count())
++            )
++        }
++        Recipe::Pin { length } => format!("PIN, {length} digits"),
++    };
++    let bits = generate::entropy(recipe);
++    let weak = if bits < WEAK_BITS {
++        " -- weak for a password you cannot rate-limit"
++    } else {
++        ""
++    };
++    format!("{what}: {bits:.1} bits{weak}")
++}
++
++fn thousands(n: usize) -> String {
++    let digits = n.to_string();
++    let mut out = String::new();
++    for (i, c) in digits.chars().enumerate() {
++        if i > 0 && (digits.len() - i) % 3 == 0 {
++            out.push(',');
++        }
++        out.push(c);
++    }
++    out
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn strength_of(options: Options) -> String {
++        strength(&options.recipe().unwrap())
++    }
++
++    #[test]
++    fn describes_the_plans_examples() {
++        assert_eq!(
++            strength_of(Options::default()),
++            "random characters, 20 from 94, each set present: 130.9 bits"
++        );
++        assert_eq!(
++            strength_of(Options {
++                words: Some(Some(5)),
++                ..Options::default()
++            }),
++            "memorable, 5 words from 7,776 with hyphens: 64.6 bits"
++        );
++        assert_eq!(
++            strength_of(Options {
++                words: Some(None),
++                separator: Some("digit".into()),
++                capitalize: Some("one".into()),
++                ..Options::default()
++            }),
++            "memorable, 5 words from 7,776 with digits, one capitalized: 80.2 bits"
++        );
++        assert_eq!(
++            strength_of(Options {
++                pin: Some(None),
++                ..Options::default()
++            }),
++            "PIN, 6 digits: 19.9 bits -- weak for a password you cannot rate-limit"
++        );
++    }
++
++    #[test]
++    fn narrows_the_character_sets() {
++        let recipe = Options {
++            no_symbols: true,
++            exclude: Some("xyz".into()),
++            no_lookalikes: true,
++            length: Some(16),
++            ..Options::default()
++        }
++        .recipe()
++        .unwrap();
++        let Recipe::Chars(chars) = recipe else {
++            panic!("{recipe:?}")
++        };
++        let all: Vec<u8> = chars.cells.iter().flat_map(|c| c.chars.clone()).collect();
++        // 62 letters and digits, minus x, y and z, minus 0, O, o, 1, l and I.
++        assert_eq!(all.len(), 62 - 3 - 6);
++        assert!(!all.iter().any(|b| b"xyz0Oo1lI|".contains(b)));
++        assert_eq!(chars.cells.len(), 3);
++        assert_eq!(chars.length, 16);
++    }
++
++    #[test]
++    fn rejects_options_that_do_not_fit() {
++        let err = |options: Options| options.recipe().unwrap_err();
++        assert_eq!(
++            err(Options {
++                length: Some(3),
++                ..Options::default()
++            }),
++            "--length must be from 4 to 128"
++        );
++        assert_eq!(
++            err(Options {
++                separator: Some("space".into()),
++                ..Options::default()
++            }),
++            "--separator needs --words"
++        );
++        assert_eq!(
++            err(Options {
++                words: Some(None),
++                length: Some(10),
++                ..Options::default()
++            }),
++            "--length applies to random characters, not --words"
++        );
++        assert_eq!(
++            err(Options {
++                words: Some(None),
++                pin: Some(None),
++                ..Options::default()
++            }),
++            "--words and --pin cannot be used together"
++        );
++        assert_eq!(
++            err(Options {
++                no_uppercase: true,
++                no_lowercase: true,
++                no_digits: true,
++                no_symbols: true,
++                ..Options::default()
++            }),
++            "at least one of uppercase, lowercase, digits and symbols must remain"
++        );
++        assert_eq!(
++            err(Options {
++                symbols: Some("!a".into()),
++                ..Options::default()
++            }),
++            "--symbols takes ASCII punctuation only"
++        );
++        assert_eq!(
++            err(Options {
++                no_digits: false,
++                exclude: Some("0123456789".into()),
++                ..Options::default()
++            }),
++            "the excluded characters leave no digits; leave the set out instead"
++        );
++        assert_eq!(
++            err(Options {
++                words: Some(Some(2)),
++                ..Options::default()
++            }),
++            "--words must be from 3 to 15"
++        );
++        assert_eq!(
++            err(Options {
++                pin: Some(Some(3)),
++                ..Options::default()
++            }),
++            "--pin must be from 4 to 64"
++        );
++    }
++
++    #[test]
++    fn draws_text_of_the_recipes_length() {
++        let pin = password(&Recipe::Pin { length: 8 }).unwrap();
++        assert_eq!(pin.len(), 8);
++        assert!(pin.bytes().all(|b| b.is_ascii_digit()));
++    }
++}
+diff --git a/src/main.rs b/src/main.rs
+index 5e25505..9f1431d 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,6 +1,7 @@
+ mod age;
+ mod clipboard;
+ mod crypto;
++mod generator;
+ mod otp;
+ mod store;
+ mod tty;
+@@ -10,6 +11,7 @@ use std::path::{Path, PathBuf};
+ use std::process::ExitCode;
+ use std::time::{SystemTime, UNIX_EPOCH};
+ 
++use crypto::generate::Recipe;
+ use otp::Otp;
+ use store::{Entry, Store};
+ 
+@@ -26,6 +28,10 @@ Commands:
+     --notes <value>
+     --force             Replace the entry's secret, username and notes if it
+                         already exists, keeping its one-time password
++    --generate          Make a new password for the secret instead of reading
++                        one, taking the password options below. It is never
++                        printed
++      --clip            Also copy it to the clipboard, for 30 seconds
+   get <name>            Print one field of an entry, by default its secret
+     --field <field>     secret, username, notes or otp
+     --clip              Copy it to the clipboard instead, for 30 seconds
+@@ -36,10 +42,27 @@ Commands:
+                         prompt otherwise. Creates the entry if needed
+       --force           Replace the entry's one-time password if it has one
+     --clear             Remove the entry's one-time password
++  generate              Print a new password, by default 20 random characters,
++                        without storing it. Its strength goes to stderr
++    --clip              Copy it to the clipboard instead, for 30 seconds
+   list                  List entry names, one per line
+   rm <name>             Remove an entry
+   passwd                Change the store's passphrase
+ 
++Password options, for generate and add --generate:
++  --length <n>          Random characters, from 4 to 128 [default: 20]
++  --no-uppercase, --no-lowercase, --no-digits, --no-symbols
++                        Leave a set out. Each set left in appears at least once
++  --symbols <chars>     The symbols to use [default: all ASCII punctuation]
++  --exclude <chars>     Characters never to use
++  --no-lookalikes       Leave out 0 O o 1 l I and |
++  --words [<n>]         Memorable words instead, from 3 to 15 [default: 5]
++    --separator <sep>   hyphen, space, period, comma, underscore, digit or
++                        digit-or-symbol [default: hyphen]
++    --capitalize <how>  none, first (every word) or one (one word)
++                        [default: none]
++  --pin [<n>]           A PIN instead, from 4 to 64 digits [default: 6]
++
+ Options:
+   --store <path>        The store file, or $MULTIPASS_STORE
+                         [default: ~/.multipass/store.age]
+@@ -55,6 +78,12 @@ enum Command {
+         username: Option<String>,
+         notes: Option<String>,
+         force: bool,
++        generate: Option<Recipe>,
++        clip: bool,
++    },
++    Generate {
++        recipe: Recipe,
++        clip: bool,
+     },
+     Get {
+         name: String,
+@@ -144,6 +173,28 @@ fn take_value(
+     }
+ }
+ 
++fn number(flag: &str, value: &str) -> Result<usize> {
++    value
++        .parse()
++        .map_err(|_| format!("{flag} needs a whole number, not {value}"))
++}
++
++/// The count after `--words` or `--pin`, which may be left out: an inline
++/// value, or the next argument when it is a number.
++fn optional_number(
++    flag: &str,
++    inline: Option<String>,
++    args: &mut std::iter::Peekable<impl Iterator<Item = String>>,
++) -> Result<Option<usize>> {
++    if let Some(value) = inline {
++        return number(flag, &value).map(Some);
++    }
++    match args.next_if(|next| next.parse::<usize>().is_ok()) {
++        Some(value) => number(flag, &value).map(Some),
++        None => Ok(None),
++    }
++}
++
+ fn parse(args: Vec<String>) -> Result<Parsed> {
+     let mut store = None;
+     let mut username = None;
+@@ -152,9 +203,11 @@ fn parse(args: Vec<String>) -> Result<Parsed> {
+     let mut force = false;
+     let mut clip = false;
+     let mut otp_action = None;
++    let mut generate = false;
++    let mut options = generator::Options::default();
+     let mut positional = Vec::new();
+ 
+-    let mut args = args.into_iter();
++    let mut args = args.into_iter().peekable();
+     while let Some(arg) = args.next() {
+         if arg == "--" {
+             positional.extend(args.by_ref());
+@@ -189,6 +242,27 @@ fn parse(args: Vec<String>) -> Result<Parsed> {
+                     }
+                 })
+             }
++            "--length" => {
++                options.length = Some(number(&flag, &take_value(&flag, inline, &mut args)?)?)
++            }
++            "--words" => options.words = Some(optional_number(&flag, inline, &mut args)?),
++            "--pin" => options.pin = Some(optional_number(&flag, inline, &mut args)?),
++            "--symbols" => options.symbols = Some(take_value(&flag, inline, &mut args)?),
++            "--exclude" => options.exclude = Some(take_value(&flag, inline, &mut args)?),
++            "--separator" => options.separator = Some(take_value(&flag, inline, &mut args)?),
++            "--capitalize" => options.capitalize = Some(take_value(&flag, inline, &mut args)?),
++            "--generate" | "--no-uppercase" | "--no-lowercase" | "--no-digits" | "--no-symbols"
++            | "--no-lookalikes"
++                if inline.is_some() =>
++            {
++                return Err(format!("{flag} takes no value"));
++            }
++            "--generate" => generate = true,
++            "--no-uppercase" => options.no_uppercase = true,
++            "--no-lowercase" => options.no_lowercase = true,
++            "--no-digits" => options.no_digits = true,
++            "--no-symbols" => options.no_symbols = true,
++            "--no-lookalikes" => options.no_lookalikes = true,
+             "--force" if inline.is_none() => force = true,
+             "--clip" if inline.is_none() => clip = true,
+             "--clip" => return Err("--clip takes no value".into()),
+@@ -230,11 +304,27 @@ fn parse(args: Vec<String>) -> Result<Parsed> {
+         "init" => Command::Init,
+         "list" => Command::List,
+         "passwd" => Command::Passwd,
+-        "add" => Command::Add {
+-            name: name()?,
+-            username: username.take(),
+-            notes: notes.take(),
+-            force: std::mem::take(&mut force),
++        "add" => {
++            let name = name()?;
++            let generate = if std::mem::take(&mut generate) {
++                Some(std::mem::take(&mut options).recipe()?)
++            } else if clip {
++                return Err("--clip on add needs --generate".into());
++            } else {
++                None
++            };
++            Command::Add {
++                name,
++                username: username.take(),
++                notes: notes.take(),
++                force: std::mem::take(&mut force),
++                generate,
++                clip: std::mem::take(&mut clip),
++            }
++        }
++        "generate" => Command::Generate {
++            recipe: std::mem::take(&mut options).recipe()?,
++            clip: std::mem::take(&mut clip),
+         },
+         "get" => Command::Get {
+             name: name()?,
+@@ -269,15 +359,30 @@ fn parse(args: Vec<String>) -> Result<Parsed> {
+         return Err("--field only applies to get".into());
+     }
+     if clip {
+-        return Err("--clip only applies to get, and to otp without --set or --clear".into());
++        return Err(
++            "--clip only applies to get, generate, add --generate, and otp without --set or --clear"
++                .into(),
++        );
+     }
+     if otp_action.is_some() {
+         return Err("--set and --clear only apply to otp".into());
+     }
++    if generate {
++        return Err("--generate only applies to add".into());
++    }
++    if !options.is_empty() {
++        return Err("password options only apply to generate and add --generate".into());
++    }
+     Ok(Parsed::Run { store, command })
+ }
+ 
+ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
++    if let Command::Generate { recipe, clip } = &command {
++        let password = generator::password(recipe)?;
++        deliver(&password, *clip)?;
++        eprintln!("multipass: {}", generator::strength(recipe));
++        return Ok(());
++    }
+     let path = match store.or_else(|| std::env::var_os("MULTIPASS_STORE").map(PathBuf::from)) {
+         Some(path) => path,
+         None => default_store_path()?,
+@@ -301,6 +406,8 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
+             username,
+             notes,
+             force,
++            generate,
++            clip,
+         } => {
+             let (mut store, passphrase) = open(&path)?;
+             let existing = store.get(&name);
+@@ -308,18 +415,28 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
+                 return Err(format!("{name} already exists; pass --force to replace it"));
+             }
+             let otp = existing.and_then(|entry| entry.otp.clone());
+-            let secret = read_hidden(&format!("Secret for {name}: "), "secret")?;
++            let secret = match &generate {
++                Some(recipe) => generator::password(recipe)?,
++                None => read_hidden(&format!("Secret for {name}: "), "secret")?,
++            };
+             store.insert(
+                 name,
+                 Entry {
+-                    secret: Some(secret),
++                    secret: Some(secret.clone()),
+                     username,
+                     notes,
+                     otp,
+                 },
+             );
+             save(&store, &passphrase)?;
++            if let Some(recipe) = &generate {
++                eprintln!("multipass: {}", generator::strength(recipe));
++                if clip {
++                    deliver(&secret, true)?;
++                }
++            }
+         }
++        Command::Generate { .. } => unreachable!("generate opens no store"),
+         Command::Get { name, field, clip } => {
+             let (store, _) = open(&path)?;
+             let entry = store
+@@ -540,6 +657,8 @@ mod tests {
+                 username: Some("octocat".into()),
+                 notes: None,
+                 force: true,
++                generate: None,
++                clip: false,
+             }
+         );
+         assert_eq!(
+@@ -549,6 +668,8 @@ mod tests {
+                 username: None,
+                 notes: Some("hi".into()),
+                 force: false,
++                generate: None,
++                clip: false,
+             }
+         );
+         assert_eq!(
+@@ -624,6 +745,79 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn parses_password_options() {
++        let recipe = |options: generator::Options| options.recipe().unwrap();
++        assert_eq!(
++            run_of("generate"),
++            Command::Generate {
++                recipe: recipe(generator::Options::default()),
++                clip: false,
++            }
++        );
++        assert_eq!(
++            run_of("generate --words --separator=digit --clip"),
++            Command::Generate {
++                recipe: recipe(generator::Options {
++                    words: Some(None),
++                    separator: Some("digit".into()),
++                    ..Default::default()
++                }),
++                clip: true,
++            }
++        );
++        // A count after --words or --pin is taken; anything else is not.
++        assert_eq!(
++            run_of("generate --pin 8"),
++            Command::Generate {
++                recipe: recipe(generator::Options {
++                    pin: Some(Some(8)),
++                    ..Default::default()
++                }),
++                clip: false,
++            }
++        );
++        assert_eq!(
++            run_of("add x --generate --words 6 --capitalize one --clip"),
++            Command::Add {
++                name: "x".into(),
++                username: None,
++                notes: None,
++                force: false,
++                generate: Some(recipe(generator::Options {
++                    words: Some(Some(6)),
++                    capitalize: Some("one".into()),
++                    ..Default::default()
++                })),
++                clip: true,
++            }
++        );
++        assert_eq!(
++            run_of("add --pin x --generate"),
++            Command::Add {
++                name: "x".into(),
++                username: None,
++                notes: None,
++                force: false,
++                generate: Some(Recipe::Pin { length: 6 }),
++                clip: false,
++            }
++        );
++        assert_eq!(
++            run_of("generate --length 32 --no-symbols --exclude abc --no-lookalikes"),
++            Command::Generate {
++                recipe: recipe(generator::Options {
++                    length: Some(32),
++                    no_symbols: true,
++                    exclude: Some("abc".into()),
++                    no_lookalikes: true,
++                    ..Default::default()
++                }),
++                clip: false,
++            }
++        );
++    }
++
+     #[test]
+     fn rejects_bad_arguments() {
+         for bad in [
+@@ -656,6 +850,19 @@ mod tests {
+             "otp x --set --force=yes",
+             "get x --force",
+             "rm x --force",
++            "add x --length 10",
++            "add x --words",
++            "get x --generate",
++            "generate --generate",
++            "list --pin",
++            "otp x --no-symbols",
++            "generate --length",
++            "generate --length ten",
++            "generate --no-digits=yes",
++            "generate --words 5 extra",
++            "generate --separator space",
++            "generate --words --pin",
++            "generate --length 3",
+         ] {
+             assert!(parse(args(bad)).is_err(), "{bad:?} parsed");
+         }
