@@ -119,3 +119,55 @@ pub fn with_pool<T>(f: impl FnOnce() -> T) -> T {
     unsafe { objc_autoreleasePoolPop(pool) };
     result
 }
+
+/// `BLOCK_IS_GLOBAL` from the block ABI: the runtime never copies or frees
+/// the block, which suits one that captures nothing and lives forever.
+const BLOCK_IS_GLOBAL: i32 = 1 << 28;
+
+unsafe extern "C" {
+    /// The block runtime's class for global blocks; only its address is used.
+    static _NSConcreteGlobalBlock: *const c_void;
+}
+
+#[repr(C)]
+struct BlockDescriptor {
+    reserved: usize,
+    size: usize,
+}
+
+/// A block literal laid out as the block ABI defines it, for a block that
+/// takes a `BOOL` and an `NSError *`, as completion handlers often do.
+#[repr(C)]
+pub struct Block {
+    isa: *const c_void,
+    flags: i32,
+    reserved: i32,
+    invoke: unsafe extern "C" fn(*const Block, u8, Id),
+    descriptor: *const BlockDescriptor,
+}
+
+/// A global block that calls `invoke`, leaked so it outlives every call to
+/// it, as a global block must. It captures nothing, so `invoke` finds its
+/// state elsewhere, such as in a static.
+pub fn global_block(invoke: unsafe extern "C" fn(*const Block, u8, Id)) -> *const Block {
+    static DESCRIPTOR: BlockDescriptor = BlockDescriptor {
+        reserved: 0,
+        size: std::mem::size_of::<Block>(),
+    };
+    Box::leak(Box::new(Block {
+        isa: (&raw const _NSConcreteGlobalBlock).cast(),
+        flags: BLOCK_IS_GLOBAL,
+        reserved: 0,
+        invoke,
+        descriptor: &DESCRIPTOR,
+    }))
+}
+
+/// The code of an `NSError`, or 0 for null. `error` must be null or a valid
+/// `NSError` for the length of the call.
+pub unsafe fn error_code(error: Id) -> isize {
+    if error.is_null() {
+        return 0;
+    }
+    unsafe { send(error, c"code") }
+}

@@ -1,15 +1,23 @@
 mod age;
+mod agent;
 mod clipboard;
 mod crypto;
 #[cfg(target_os = "macos")]
 mod objc;
 mod otp;
 mod store;
+mod sys;
+#[cfg(target_os = "macos")]
+mod touch_id;
+#[cfg(not(target_os = "macos"))]
+#[path = "touch_id_other.rs"]
+mod touch_id;
 mod tty;
 mod vault;
 
+use std::cell::RefCell;
 use std::io::{self, IsTerminal, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -52,6 +60,14 @@ Commands:
                         password
   passwd                Change the store's passphrase, and replace its vault key
   rekey                 Replace the vault key now, as for a suspected leak
+  status                Say whether the store is unlocked, and until when
+  lock                  End the session, so the next command asks for the
+                        passphrase
+
+After a command asks for the passphrase, the store stays unlocked until
+its vault key expires, and each later command asks only for Touch ID or
+an Apple Watch. Set MULTIPASS_NO_AGENT=1 to be asked for the passphrase
+every time.
 
 Options:
   --store <path>        The store package, or $MULTIPASS_STORE
@@ -91,6 +107,9 @@ enum Command {
     },
     Passwd,
     Rekey,
+    Status,
+    Lock,
+    Agent,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -262,6 +281,9 @@ fn parse(args: Vec<String>) -> Result<Parsed> {
         "list" => Command::List,
         "passwd" => Command::Passwd,
         "rekey" => Command::Rekey,
+        "status" => Command::Status,
+        "lock" => Command::Lock,
+        agent::COMMAND => Command::Agent,
         "add" => Command::Add {
             name: name()?,
             username: username.take(),
@@ -325,7 +347,7 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
     let place =
         package_path(store.or_else(|| std::env::var_os("MULTIPASS_STORE").map(PathBuf::from)))?;
     let path = place.package;
-    if place.named_old && path.exists() {
+    if place.named_old && path.exists() && command != Command::Agent {
         if let Some(old) = &place.old {
             eprintln!(
                 "note: {} moved to {}; update MULTIPASS_STORE or --store",
@@ -334,9 +356,18 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
             );
         }
     }
-    let vault = Vault::new(&path, age::DEFAULT_WORK_FACTOR).with_old(place.old.clone());
-    let now = now_ms()?;
-    let save = |session: &mut Session| session.save(&vault, now).map_err(|e| e.to_string());
+    let ctx = Ctx {
+        vault: Vault::new(&path, age::DEFAULT_WORK_FACTOR).with_old(place.old.clone()),
+        agent: agent_paths(&path),
+        use_agent: agent::enabled(
+            std::env::var("MULTIPASS_NO_AGENT").ok().as_deref(),
+            std::env::var("SSH_CONNECTION").ok().as_deref(),
+        ),
+        now: now_ms()?,
+        start: RefCell::new(None),
+        path,
+    };
+    let (path, now) = (&ctx.path, ctx.now);
 
     match command {
         Command::Init => {
@@ -350,7 +381,7 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
                     path.display()
                 ));
             }
-            vault
+            ctx.vault
                 .init(&new_passphrase()?, now)
                 .map_err(|e| e.to_string())?;
             eprintln!("Created {}", path.display());
@@ -361,8 +392,8 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
             notes,
             force,
         } => {
-            let mut session = open_writable(&vault, now)?;
-            let store = &mut session.store;
+            let mut change = ctx.open_change(&name)?;
+            let store = &mut change.store;
             let existing = store.get(&name);
             if existing.is_some() && !force {
                 return Err(format!("{name} already exists; pass --force to replace it"));
@@ -380,7 +411,7 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
                 },
                 stamp,
             );
-            save(&mut session)?;
+            ctx.commit(change)?;
         }
         Command::Get {
             name,
@@ -388,10 +419,9 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
             clip,
             previous,
         } => {
-            let session = open(&vault, now, true)?;
-            let store = &session.store;
+            let store = ctx.read_entry(&name)?;
             let value = match previous {
-                Some(n) => previous_value(store, &name, field, n)?,
+                Some(n) => previous_value(&store, &name, field, n)?,
                 None => {
                     let entry = store
                         .get(&name)
@@ -408,31 +438,29 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
             deliver(value, clip)?;
         }
         Command::History { name } => {
-            let session = open(&vault, now, true)?;
-            let version = session
-                .store
+            let store = ctx.read_entry(&name)?;
+            let version = store
                 .version(&name)
                 .ok_or_else(|| format!("no entry named {name}"))?;
             print!("{}", history_text(version));
         }
         Command::List => {
-            let session = open(&vault, now, true)?;
-            for name in session.store.names() {
+            for name in ctx.read_names()? {
                 println!("{name}");
             }
         }
         Command::Rm { name } => {
-            let mut session = open_writable(&vault, now)?;
-            let stamp = stamp(&session.store, now);
-            session
+            let mut change = ctx.open_change(&name)?;
+            let stamp = stamp(&change.store, now);
+            change
                 .store
                 .remove(&name, stamp)
                 .ok_or_else(|| format!("no entry named {name}"))?;
-            save(&mut session)?;
+            ctx.commit(change)?;
         }
         Command::Restore { name } => {
-            let mut session = open_writable(&vault, now)?;
-            let store = &mut session.store;
+            let mut change = ctx.open_change(&name)?;
+            let store = &mut change.store;
             let version = store
                 .version(&name)
                 .ok_or_else(|| format!("no removed entry named {name}"))?;
@@ -443,97 +471,285 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
             store.restore(&name, stamp).ok_or_else(|| {
                 format!("{name} was removed more than 30 days ago and cannot be restored")
             })?;
-            save(&mut session)?;
+            ctx.commit(change)?;
         }
-        Command::Otp { name, action } => {
-            let mut session = match action {
-                OtpAction::Show { .. } => open(&vault, now, true)?,
-                _ => open_writable(&vault, now)?,
-            };
-            let store = &mut session.store;
-            match action {
-                OtpAction::Show { clip } => {
-                    let uri = store
-                        .get(&name)
-                        .ok_or_else(|| format!("no entry named {name}"))?
-                        .otp
-                        .as_ref()
-                        .ok_or_else(|| format!("{name} has no one-time password"))?;
-                    let otp = Otp::parse(uri).map_err(|e| e.to_string())?;
-                    let now = now / 1000;
-                    deliver(&otp.code(now), clip)?;
-                    if io::stderr().is_terminal() {
-                        eprintln!("expires in {}s", otp.seconds_left(now));
-                    }
-                }
-                OtpAction::Set { force } => {
-                    refuse_otp_replacement(store, &name, force)?;
-                    let key = read_hidden(&format!("Setup key for {name}: "), "setup key")?;
-                    let uri = otp::setup_uri(&key, &name).map_err(|e| e.to_string())?;
-                    let entry = match store.get(&name) {
-                        Some(entry) => Entry {
-                            otp: Some(uri),
-                            ..entry.clone()
-                        },
-                        None => Entry {
-                            secret: None,
-                            username: None,
-                            notes: None,
-                            otp: Some(uri),
-                        },
-                    };
-                    let stamp = stamp(store, now);
-                    store.insert(name, entry, stamp);
-                    save(&mut session)?;
-                }
-                OtpAction::Clear => {
-                    let entry = store
-                        .get(&name)
-                        .ok_or_else(|| format!("no entry named {name}"))?;
-                    if entry.otp.is_none() {
-                        return Err(format!("{name} has no one-time password"));
-                    }
-                    if entry.secret.is_none() {
-                        return Err(format!(
-                            "{name} holds only a one-time password; use rm to remove the entry"
-                        ));
-                    }
-                    let entry = Entry {
-                        otp: None,
-                        ..entry.clone()
-                    };
-                    let stamp = stamp(store, now);
-                    store.insert(name, entry, stamp);
-                    save(&mut session)?;
-                }
+        Command::Otp {
+            name,
+            action: OtpAction::Show { clip },
+        } => {
+            let store = ctx.read_entry(&name)?;
+            let uri = store
+                .get(&name)
+                .ok_or_else(|| format!("no entry named {name}"))?
+                .otp
+                .as_ref()
+                .ok_or_else(|| format!("{name} has no one-time password"))?;
+            let otp = Otp::parse(uri).map_err(|e| e.to_string())?;
+            let now = now / 1000;
+            deliver(&otp.code(now), clip)?;
+            if io::stderr().is_terminal() {
+                eprintln!("expires in {}s", otp.seconds_left(now));
             }
         }
+        Command::Otp {
+            name,
+            action: OtpAction::Set { force },
+        } => {
+            let mut change = ctx.open_change(&name)?;
+            let store = &mut change.store;
+            refuse_otp_replacement(store, &name, force)?;
+            let key = read_hidden(&format!("Setup key for {name}: "), "setup key")?;
+            let uri = otp::setup_uri(&key, &name).map_err(|e| e.to_string())?;
+            let entry = match store.get(&name) {
+                Some(entry) => Entry {
+                    otp: Some(uri),
+                    ..entry.clone()
+                },
+                None => Entry {
+                    secret: None,
+                    username: None,
+                    notes: None,
+                    otp: Some(uri),
+                },
+            };
+            let stamp = stamp(store, now);
+            store.insert(name, entry, stamp);
+            ctx.commit(change)?;
+        }
+        Command::Otp {
+            name,
+            action: OtpAction::Clear,
+        } => {
+            let mut change = ctx.open_change(&name)?;
+            let store = &mut change.store;
+            let entry = store
+                .get(&name)
+                .ok_or_else(|| format!("no entry named {name}"))?;
+            if entry.otp.is_none() {
+                return Err(format!("{name} has no one-time password"));
+            }
+            if entry.secret.is_none() {
+                return Err(format!(
+                    "{name} holds only a one-time password; use rm to remove the entry"
+                ));
+            }
+            let entry = Entry {
+                otp: None,
+                ..entry.clone()
+            };
+            let stamp = stamp(store, now);
+            store.insert(name, entry, stamp);
+            ctx.commit(change)?;
+        }
         Command::Passwd => {
-            let mut session = open_writable_unsettled(&vault, now)?;
+            let mut session = ctx.open_prompting(false)?;
+            session.writable().map_err(|e| e.to_string())?;
             let new = new_passphrase()?;
             session
-                .rotate(&vault, now, Some(new))
+                .rotate(&ctx.vault, now, Some(new))
                 .map_err(|e| e.to_string())?;
+            ctx.replace_agent(&session);
             eprintln!("Passphrase changed, and the vault key replaced");
         }
         Command::Rekey => {
-            let mut session = open_writable_unsettled(&vault, now)?;
+            let mut session = ctx.open_prompting(false)?;
+            session.writable().map_err(|e| e.to_string())?;
             session
-                .rotate(&vault, now, None)
+                .rotate(&ctx.vault, now, None)
                 .map_err(|e| e.to_string())?;
+            ctx.replace_agent(&session);
             eprintln!("Replaced the vault key");
         }
+        Command::Status => println!("{}", ctx.status()),
+        Command::Lock => {
+            let locked = ctx.client_any().is_some_and(agent::Client::lock);
+            eprintln!("{}", if locked { "Locked" } else { "Not unlocked" });
+        }
+        Command::Agent => {
+            let paths = ctx.agent.clone().ok_or("HOME is not set")?;
+            return agent::run_agent(Vault::new(path, age::DEFAULT_WORK_FACTOR), paths);
+        }
+    }
+    if let Some((keys, deadline)) = ctx.start.take() {
+        agent::start(&ctx.path, &keys, deadline);
     }
     Ok(())
+}
+
+/// The message for a request the agent's sheet did not approve.
+const NOT_APPROVED: &str = "the request was not approved";
+
+/// What a command needs to reach the store: its package and vault, and the
+/// session agent, which serves the store once a prompt has unlocked it.
+struct Ctx {
+    path: PathBuf,
+    vault: Vault,
+    /// Where this store's agent listens, when `HOME` is set.
+    agent: Option<agent::Paths>,
+    /// False with `MULTIPASS_NO_AGENT` or over SSH: no agent is asked or
+    /// started, so every command prompts.
+    use_agent: bool,
+    now: u64,
+    /// The keys and deadline of an agent to start once the command
+    /// succeeds, set when it prompted.
+    start: RefCell<Option<(String, u64)>>,
+}
+
+/// A store a command changes, and where the change goes.
+struct Change {
+    store: Store,
+    saver: Saver,
+}
+
+enum Saver {
+    /// The agent sent one entry and waits for it back.
+    Agent(agent::Editing),
+    /// The command prompted and holds the whole store.
+    Local(Box<Session>),
+}
+
+/// `~/.multipass/agent`, where every store's agent listens.
+fn agent_paths(package: &Path) -> Option<agent::Paths> {
+    let home = std::env::var_os("HOME")?;
+    let dir = PathBuf::from(home).join(".multipass").join("agent");
+    Some(agent::Paths::new(&dir, package))
+}
+
+impl Ctx {
+    /// The store's agent, when one may be used and one answers. A directory
+    /// that fails its check is named, and the command prompts instead.
+    fn client(&self) -> Option<agent::Client> {
+        if !self.use_agent {
+            return None;
+        }
+        self.client_any()
+    }
+
+    /// The store's agent, whatever the settings say, for `status` and `lock`.
+    fn client_any(&self) -> Option<agent::Client> {
+        match agent::connect(self.agent.as_ref()?) {
+            Ok(client) => client,
+            Err(refused) => {
+                eprintln!("multipass: {refused}");
+                None
+            }
+        }
+    }
+
+    /// Opens the store with the passphrase, and, when commands may use an
+    /// agent, arranges to start one holding this session's keys once the
+    /// command succeeds.
+    fn open_prompting(&self, settle: bool) -> Result<Session> {
+        let reason = match (&self.agent, self.use_agent) {
+            (Some(paths), true) => agent::prompt_reason(paths),
+            _ => None,
+        };
+        let session = open(&self.vault, self.now, settle, &agent::prompt_text(reason))?;
+        if self.use_agent && self.agent.is_some() && session.writable().is_ok() {
+            *self.start.borrow_mut() = Some((session.agent_keys(), session.session_deadline()));
+        }
+        Ok(session)
+    }
+
+    /// The store, or the part of it holding `name`, for a command that only
+    /// reads one entry.
+    fn read_entry(&self, name: &str) -> Result<Store> {
+        if let Some(client) = self.client() {
+            match client.read(name)? {
+                agent::Answer::Entry(store) => return Ok(store),
+                agent::Answer::Missing => return Ok(Store::new()),
+                agent::Answer::Denied => return Err(NOT_APPROVED.into()),
+                _ => {}
+            }
+        }
+        Ok(self.open_prompting(true)?.store)
+    }
+
+    /// The live entry names.
+    fn read_names(&self) -> Result<Vec<String>> {
+        if let Some(client) = self.client() {
+            match client.list()? {
+                agent::Answer::Names(names) => return Ok(names),
+                agent::Answer::Denied => return Err(NOT_APPROVED.into()),
+                _ => {}
+            }
+        }
+        let session = self.open_prompting(true)?;
+        Ok(session.store.names().map(String::from).collect())
+    }
+
+    /// Opens the store to change the entry named `name`. Through the agent,
+    /// the store holds only that entry.
+    fn open_change(&self, name: &str) -> Result<Change> {
+        if let Some(client) = self.client() {
+            match client.edit(name)? {
+                (agent::Answer::Entry(store), editing) => {
+                    return Ok(Change {
+                        store,
+                        saver: Saver::Agent(editing),
+                    });
+                }
+                (agent::Answer::Missing, editing) => {
+                    return Ok(Change {
+                        store: Store::new(),
+                        saver: Saver::Agent(editing),
+                    });
+                }
+                (agent::Answer::Denied, _) => return Err(NOT_APPROVED.into()),
+                _ => {}
+            }
+        }
+        let mut session = self.open_prompting(true)?;
+        session.writable().map_err(|e| e.to_string())?;
+        Ok(Change {
+            store: std::mem::take(&mut session.store),
+            saver: Saver::Local(Box::new(session)),
+        })
+    }
+
+    fn commit(&self, change: Change) -> Result<()> {
+        match change.saver {
+            Saver::Agent(editing) => editing.save(&change.store, self.now),
+            Saver::Local(mut session) => {
+                session.store = change.store;
+                session
+                    .save(&self.vault, self.now)
+                    .map_err(|e| e.to_string())
+            }
+        }
+    }
+
+    /// After `passwd` or `rekey`, ends the agent holding the old key, and
+    /// starts one with the new key once the command succeeds.
+    fn replace_agent(&self, session: &Session) {
+        if let Some(client) = self.client_any() {
+            client.lock();
+        }
+        if self.use_agent && self.agent.is_some() {
+            *self.start.borrow_mut() = Some((session.agent_keys(), session.session_deadline()));
+        }
+    }
+
+    /// `unlocked until …`, or `locked` and the reason the last session
+    /// ended.
+    fn status(&self) -> String {
+        if let Some(deadline) = self.client_any().and_then(agent::Client::status) {
+            return format!("unlocked until {}", utc(deadline * 1000));
+        }
+        match self.agent.as_ref().and_then(agent::end_note) {
+            Some((ended, at)) => format!("locked: {} at {}", ended.reason(), utc(at * 1000)),
+            None => "locked".into(),
+        }
+    }
 }
 
 /// Opens the store package, asking for the passphrase, and, with `settle`,
 /// rotates or compacts as `Session::settle` decides. Prints what the open
 /// left alone.
-fn open(vault: &Vault, now: u64, settle: bool) -> Result<Session> {
+fn open(vault: &Vault, now: u64, settle: bool, prompt: &str) -> Result<Session> {
     let mut ask = |ask: Ask| -> io::Result<Option<String>> {
         match ask {
-            Ask::Passphrase => tty::read_hidden("Passphrase: ").map(Some),
+            Ask::Passphrase => tty::read_hidden(prompt).map(Some),
             Ask::Other(files) => {
                 eprintln!(
                     "multipass: that passphrase does not open {}, which another Mac's \
@@ -560,22 +776,6 @@ fn open(vault: &Vault, now: u64, settle: bool) -> Result<Session> {
     for warning in &session.warnings {
         eprintln!("multipass: {warning}");
     }
-    Ok(session)
-}
-
-/// Opens the store for a command that saves, failing before it asks for
-/// anything more when the store opened read-only.
-fn open_writable(vault: &Vault, now: u64) -> Result<Session> {
-    let session = open(vault, now, true)?;
-    session.writable().map_err(|e| e.to_string())?;
-    Ok(session)
-}
-
-/// Opens the store for `passwd` and `rekey`, which rotate anyway, so it
-/// neither rotates nor compacts first.
-fn open_writable_unsettled(vault: &Vault, now: u64) -> Result<Session> {
-    let session = open(vault, now, false)?;
-    session.writable().map_err(|e| e.to_string())?;
     Ok(session)
 }
 

@@ -319,6 +319,21 @@ impl Store {
             .map(|(name, _)| name.as_str())
     }
 
+    /// Every name the store holds, live or removed, in sorted order.
+    pub fn all_names(&self) -> impl Iterator<Item = &str> {
+        self.versions.keys().map(String::as_str)
+    }
+
+    /// A store holding only the version named `name`, with its history, or
+    /// an empty store when there is none.
+    pub fn only(&self, name: &str) -> Store {
+        let mut store = Store::new();
+        if let Some(version) = self.versions.get(name) {
+            store.versions.insert(name.to_string(), version.clone());
+        }
+        store
+    }
+
     /// The largest `modified` in the store, tombstones included.
     pub fn newest(&self) -> u64 {
         self.versions
@@ -615,7 +630,7 @@ fn parse_stamp(s: &str) -> Option<u64> {
     canonical.then(|| s.parse().ok()).flatten()
 }
 
-fn escape(s: &str) -> String {
+pub fn escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
@@ -629,7 +644,7 @@ fn escape(s: &str) -> String {
     out
 }
 
-fn unescape(s: &str) -> Option<String> {
+pub fn unescape(s: &str) -> Option<String> {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars();
     while let Some(c) = chars.next() {

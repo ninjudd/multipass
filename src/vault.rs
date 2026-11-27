@@ -49,6 +49,10 @@ const ROTATE_AFTER_DAYS: u64 = 14;
 /// another Mac wrote under it before hearing of the rotation still opens.
 const RETIRED_DAYS: u64 = 90;
 
+/// How long a vault key may serve an unlocked session: 21 days from when it
+/// was made, so every Mac's session for one key ends at the same moment.
+pub const SESSION_DAYS: u64 = 21;
+
 /// How many times `open` lists the package again when a file it was reading
 /// disappears, because another Mac merged and deleted it.
 const ATTEMPTS: usize = 3;
@@ -287,6 +291,9 @@ pub struct Session {
     typed: Vec<String>,
     /// What `open` saw that you should know, such as files it left alone.
     pub warnings: Vec<String>,
+    /// True for a session an agent opened with the keys it holds: it may
+    /// save store files, but never writes a key file.
+    unlocked: bool,
 }
 
 #[derive(Debug)]
@@ -307,6 +314,9 @@ pub enum Error {
     Stopped,
     /// A file disappeared while `open` read it; `open` lists again.
     Vanished,
+    /// The package holds a key file or a store file of a generation the
+    /// keys an agent holds do not cover, because a rotation ran elsewhere.
+    Stale,
 }
 
 impl fmt::Display for Error {
@@ -330,6 +340,7 @@ impl fmt::Display for Error {
             #[cfg(test)]
             Error::Stopped => write!(f, "stopped"),
             Error::Vanished => write!(f, "the store changed while it was being read"),
+            Error::Stale => write!(f, "the vault key changed"),
         }
     }
 }
@@ -708,24 +719,11 @@ impl Vault {
             .expect("a key file opened")
             .clone();
 
-        let mut stores = Vec::new();
-        let mut store_files = Vec::new();
-        for listed in &listing.stores {
-            let Some((key, _)) = known.get(&listed.generation) else {
-                warnings.push(format!(
-                    "left {} alone: no key this passphrase opens is of its generation",
-                    file_name(&listed.path)
-                ));
-                continue;
-            };
-            let bytes = fs::read(&listed.path)?;
-            let mut store = Store::decrypt(&key.text, &bytes)
-                .map_err(|_| Error::Damaged(file_name(&listed.path)))?;
-            // Expire before merging, as a save would, so history a file
-            // still holds past its cutoff cannot join a live entry's.
-            store.expire(cutoffs(&known, now_ms));
-            stores.push(store);
-            store_files.push(listed.path.clone());
+        let (stores, store_files, unkeyed) = read_stores(&listing, &known, now_ms)?;
+        for name in unkeyed {
+            warnings.push(format!(
+                "left {name} alone: no key this passphrase opens is of its generation"
+            ));
         }
         if stores.is_empty() {
             return Err(Error::StillSyncing);
@@ -767,8 +765,91 @@ impl Vault {
             passphrase,
             typed,
             warnings,
+            unlocked: false,
         })
     }
+
+    /// Opens the package with the keys an agent holds, the text
+    /// `Session::agent_keys` gave it, without the passphrase. Fails with
+    /// `Error::Stale` when the package holds a key file or a store file the
+    /// keys do not cover. It changes nothing on disk, and the session it
+    /// returns saves store files but never rotates.
+    pub fn open_with_keys(&self, keys: &str, now_ms: u64) -> Result<Session> {
+        let file = KeyFile::from_text(keys).ok_or(Error::Stale)?;
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            match self.try_open_with_keys(&file, now_ms) {
+                Err(Error::Vanished) if attempt < ATTEMPTS => continue,
+                result => return result,
+            }
+        }
+    }
+
+    fn try_open_with_keys(&self, file: &KeyFile, now_ms: u64) -> Result<Session> {
+        let listing = self.list()?;
+        let current = &file.key;
+        let ours = |l: &Listed| l.generation == current.generation;
+        if !listing.keys.iter().any(ours) || !listing.keys.iter().all(ours) {
+            return Err(Error::Stale);
+        }
+        let now = seconds(now_ms);
+        let mut known: BTreeMap<String, (Key, Option<u64>)> = file
+            .retired
+            .iter()
+            .filter(|r| r.retired + RETIRED_DAYS * DAY >= now)
+            .map(|r| (r.key.generation.clone(), (r.key.clone(), Some(r.retired))))
+            .collect();
+        known.insert(current.generation.clone(), (current.clone(), None));
+        let (stores, store_files, unkeyed) = read_stores(&listing, &known, now_ms)?;
+        if !unkeyed.is_empty() {
+            return Err(Error::Stale);
+        }
+        if stores.is_empty() {
+            return Err(Error::StillSyncing);
+        }
+        let mut store = Store::merge(&stores);
+        store.expire(cutoffs(&known, now_ms));
+        Ok(Session {
+            store,
+            current: current.clone(),
+            known,
+            key_files: listing.keys.into_iter().map(|l| l.path).collect(),
+            store_files,
+            moves: Vec::new(),
+            passphrase: None,
+            typed: Vec::new(),
+            warnings: Vec::new(),
+            unlocked: true,
+        })
+    }
+}
+
+/// Decrypts every store file in `listing` that one of the `known` keys
+/// opens, expiring each before it is merged, as a save would, so history a
+/// file still holds past its cutoff cannot join a live entry's. Returns the
+/// stores, their paths, and the names of the files no known key is of.
+fn read_stores(
+    listing: &Listing,
+    known: &BTreeMap<String, (Key, Option<u64>)>,
+    now_ms: u64,
+) -> Result<(Vec<Store>, Vec<PathBuf>, Vec<String>)> {
+    let mut stores = Vec::new();
+    let mut paths = Vec::new();
+    let mut unkeyed = Vec::new();
+    for listed in &listing.stores {
+        let Some((key, _)) = known.get(&listed.generation) else {
+            unkeyed.push(file_name(&listed.path));
+            continue;
+        };
+        let bytes = fs::read(&listed.path)?;
+        let mut store = Store::decrypt(&key.text, &bytes)
+            .map_err(|_| Error::Damaged(file_name(&listed.path)))?;
+        store.expire(cutoffs(known, now_ms));
+        stores.push(store);
+        paths.push(listed.path.clone());
+    }
+    Ok((stores, paths, unkeyed))
 }
 
 /// Decrypts an old single-file store with the first of `passphrases` that
@@ -837,8 +918,36 @@ impl Session {
     pub fn writable(&self) -> Result<()> {
         match self.passphrase {
             Some(_) => Ok(()),
+            None if self.unlocked => Ok(()),
             None => Err(Error::ReadOnly),
         }
+    }
+
+    /// The keys an agent holds to serve this store: the current vault key
+    /// and the keys it replaced in the last 90 days, as a key file's text.
+    /// It holds keys, so it goes only to a child the command started.
+    pub fn agent_keys(&self) -> String {
+        let retired = self
+            .known
+            .values()
+            .filter(|(key, _)| key.generation != self.current.generation)
+            .map(|(key, at)| Retired {
+                key: key.clone(),
+                retired: at.unwrap_or(self.current.created),
+            })
+            .collect();
+        KeyFile {
+            key: self.current.clone(),
+            passphrase_set: self.passphrase.as_ref().map_or(0, |(_, set)| *set),
+            retired,
+        }
+        .to_text()
+    }
+
+    /// When an agent holding this session's key must end, in Unix seconds:
+    /// the key's creation time plus `SESSION_DAYS`.
+    pub fn session_deadline(&self) -> u64 {
+        self.current.created + SESSION_DAYS * DAY
     }
 
     fn cutoffs(&self, now_ms: u64) -> Cutoffs {
