@@ -176,6 +176,7 @@ curl -fsSL https://github.com/ninjudd/multipass/releases/download/v0.2.0/install
 | `site/vercel.json` | New. The redirects and headers in § 2.9, with no build command and no framework. |
 | `.github/workflows/site.yml` | New. The deploy workflow in § 2.10. |
 | `.github/vercel/package.json`, `.github/vercel/package-lock.json` | New. The Vercel CLI at one exact version, with every package it pulls in pinned by the lock file's integrity hashes. They sit outside `site/` so Vercel never reads `site/` as a Node project. |
+| `tests/site/` | New. The bad `vercel.json` files that `check-site.sh static` must reject, one per case in § 4. |
 | `.github/scripts/check-site.sh` | New. The redirect guard in § 2.10: `check-site.sh static` reads `site/vercel.json`, and `check-site.sh live <url>` reads the responses with `curl -sI`. |
 | `src/upgrade.rs` | New. `upgrade` and `upgrade --check` as § 2.3 describes. It takes the paths of `curl`, `bash`, and `gh` and the base URL as parameters, so tests run it against fake programs in a temporary directory; `main.rs` passes the fixed paths and `https://getmultipass.dev`. |
 | `src/main.rs` | Adds the `upgrade` command, its optional version, and `--check`, and updates `USAGE`. |
