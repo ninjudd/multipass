@@ -1,0 +1,3218 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index 4c6ac27..eb92b5d 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -7,7 +7,7 @@ multipass is a single-user password manager: a Rust CLI over a package of age fi
+ multipass has no dependencies, not even dev-dependencies, and that is a feature people choose it for. CI fails if `cargo tree` shows anything but multipass itself.
+ 
+ - **Do not add a crate**, for code or for tests, without the maintainer's explicit approval in the pull request. Write the code instead.
+-- **Apple's system frameworks count like the standard library.** `src/clipboard.rs` loads AppKit with `dlopen` only when `--clip` needs the clipboard, rather than linking it, so no other command has AppKit in its process. Its calls into AppKit go through `src/objc.rs`, which holds the unsafe Objective-C runtime helpers, and `src/clipboard.rs` wraps them in a safe interface. Those two modules hold the program's only `unsafe` code. Keep any new `unsafe` code in a module like them, behind a safe interface, and say in a comment what each call requires of its arguments.
++- **Apple's system frameworks count like the standard library.** `src/clipboard.rs` loads AppKit with `dlopen` only when `--clip` needs the clipboard, rather than linking it, so no other command has AppKit in its process. `src/touch_id.rs` loads LocalAuthentication the same way, only when a session agent starts. `src/objc.rs` holds the unsafe Objective-C runtime helpers that both call, and `src/clipboard.rs` and `src/touch_id.rs` wrap them in safe interfaces. `src/sys.rs` wraps the libSystem calls the session agent needs in safe functions. Those four modules hold the program's only `unsafe` code. Keep any new `unsafe` code in a module like them, behind a safe interface, and say in a comment what each call requires of its arguments.
+ - **Every primitive lives in `src/crypto`** and is checked against the official test vectors from its specification: FIPS 180-4 for SHA-1, SHA-256 and SHA-512 (with RFC 3174 for SHA-1), RFC 4231 for HMAC, RFC 5869 for HKDF, RFC 7914 for PBKDF2, scrypt and Salsa20/8, RFC 8439 for ChaCha20 and Poly1305, RFC 4226 for HOTP, RFC 6238 for TOTP, and RFC 4648 for base32 and base64. A change to a primitive keeps those tests and adds any vector that covers the changed path.
+ - **In `src/crypto` and `src/age.rs`, never branch on secret data or index memory with it**, apart from scrypt's data-dependent lookups, which the algorithm requires. Compare MACs and tags with `crypto::ct_eq`. `src/age.rs` builds age's format from the primitives: it derives the scrypt key, unwraps the file key, derives the header and payload keys, and checks the header MAC. It may branch on the header's text and on lengths, which are public.
+ - **Outside `src/crypto` and `src/age.rs`, keep secrets as text and do no cryptography on them.** The store's escaping and parsing, its UTF-8 check, `strip_newline`, `otpauth` URI parsing, and `src/vault.rs`'s reading and writing of the key file, which holds vault keys as text, branch on each character of a secret: escaping changes the text's length, and Rust's string handling branches on every byte. So hand a key to `src/crypto` as soon as its text is found, as `src/otp.rs` hands the setup key to `crypto::base32`, and put any computation on key material in `src/crypto`.
+@@ -21,6 +21,8 @@ multipass has no dependencies, not even dev-dependencies, and that is a feature
+ 
+ ## Rules that protect secrets
+ 
++- **The session agent holds the vault key, and gives it to no one.** The key reaches an agent only through the stdin of a child that a prompted command started itself, never over the socket, and no reply carries it. The agent answers a request only after Touch ID or a watch approves that one request, on a sheet that names the entry, and it reads or changes only that entry. `src/agent.rs` holds these rules; keep any new request behind the same approval.
++
+ - **Never put a secret or passphrase in argv, an environment variable, a log line or an error message.** Passphrases come from `/dev/tty` through `tty::read_hidden`; secrets come from a hidden prompt or stdin. Store errors name a line number, never the line.
+ - **Never modify a file in the store package.** Write each file once, under a new name, through `store::write_private_durable`, which writes a temporary file with mode 0600, flushes it, renames it into place, and flushes the directory. Delete only files you read, and only after the file that replaces them is durable, so a file another Mac wrote meanwhile survives.
+ - **Never commit a store or any other encrypted file**, even a test one with fake secrets. Tests build their stores in memory or in a temporary directory. The reference fixtures under `testdata/` are the one exception, as the age section says.
+diff --git a/README.md b/README.md
+index 8b07909..3b2c78c 100644
+--- a/README.md
++++ b/README.md
+@@ -4,7 +4,7 @@ multipass is a minimal password manager with no dependencies and no sharing. It
+ 
+ Use it beside a full password manager, not instead of one. Keep shared and everyday logins in something like 1Password. Keep the few secrets you never want on someone else's server in multipass, such as recovery codes, seed phrases, and the master password itself.
+ 
+-Every line of multipass is in this repository, cryptography included: about 1,000 lines of cryptography and 4,000 of everything else, small enough to read in a day. It uses no third-party crates, so the only code you trust beyond this repository is the Rust toolchain, its standard library, and, when you pass `--clip`, macOS's own AppKit framework, which multipass loads only then.
++Every line of multipass is in this repository, cryptography included: about 1,000 lines of cryptography and 5,800 of everything else, small enough to read in a day. It uses no third-party crates, so the only code you trust beyond this repository is the Rust toolchain, its standard library, and two of macOS's own frameworks, each loaded only when it is needed: AppKit when you pass `--clip`, and LocalAuthentication when a session agent starts, for Touch ID.
+ 
+ > [!WARNING]
+ > multipass is new and has not been audited. Its cryptography is written by hand and checked against the official test vectors and against files from the reference age implementation, but no one outside the project has reviewed it.
+@@ -53,7 +53,7 @@ multipass passwd                                 # change the passphrase
+ multipass rekey                                  # replace the vault key now
+ ```
+ 
+-Every command asks for the passphrase. To use a different store, set `MULTIPASS_STORE` or pass `--store` with the path of its folder.
++The first command asks for the passphrase, and on a Mac with Touch ID or an Apple Watch, later commands ask for a touch instead, as [Stay unlocked between commands](#stay-unlocked-between-commands) describes. To use a different store, set `MULTIPASS_STORE` or pass `--store` with the path of its folder.
+ 
+ The store is a folder, `~/.multipass/store.multipass`, that holds a key file, `key.<generation>.age`, encrypted under your passphrase, and a store file, `store.<generation>.<id>.age`, encrypted under the vault key in the key file. Finder shows it as an ordinary folder. Move or copy the whole folder, never one file out of it, because a store file opens only with the key file of its generation.
+ 
+@@ -63,6 +63,21 @@ When a passphrase prompt finds the vault key 14 or more days old, multipass repl
+ 
+ `--clip` on `get` and `otp` copies the value instead of printing it, and clears the clipboard 30 seconds later, unless you have copied something else since. It marks the value as concealed and as this Mac only, so Universal Clipboard does not send it to your other Apple devices, and clipboard-history apps that honor the marking skip it. Until it clears, any app running on this Mac can still read it: the markings only keep it off your other devices and out of the history apps that honor them. `--clip` works only on macOS. Piping to `pbcopy` also works, but `pbcopy` cannot mark the value, so it syncs and lands in clipboard history.
+ 
++## Stay unlocked between commands
++
++On a Mac with Touch ID or a paired Apple Watch, a command that asks for the passphrase also starts a background agent, `multipass __agent`, that keeps the store unlocked. Each later `get`, `list`, `history`, `otp`, `add`, `rm`, or `restore` asks only for a touch of Touch ID or a press on the watch, on a sheet that names the entry, such as "multipass is trying to read github.com". One touch covers one request, and the agent hands over or changes only the entry the sheet names. `init`, `passwd`, and `rekey` always ask for the passphrase.
++
++```sh
++multipass get github.com     # Passphrase: … and an agent starts
++multipass get github.com     # a Touch ID sheet, then the password
++multipass status             # unlocked until 2026-12-17 14:32:00 UTC
++multipass lock               # Locked: the next command asks for the passphrase
++```
++
++The session ends when the vault key expires, at most 21 days after it was made, on a restart, on `multipass lock`, when you cancel a sheet or leave it for 60 seconds, when another Mac replaces the vault key, and when multipass is upgraded. The next command then asks for the passphrase and says why, such as `Passphrase (you declined a request): `. When neither Touch ID nor a watch can answer, as with the lid closed, a command asks for the passphrase and the session stays. Over SSH no agent is asked or started.
++
++What this trades: a program running as you, an AI coding agent included, still cannot read or change an entry, because each request puts a sheet on your screen that only a finger or the watch can approve. Cancel any sheet you did not expect, which ends the session. A person past your Mac's own lock screen can use the store with an enrolled finger, without the passphrase, until the session ends. The agent holds the vault key in memory for the whole session. It refuses debuggers and leaves no core file, and its own copy of the keys is locked out of swap and wiped when the session ends. The copies it makes to open the store for each request are not wiped. Root or a kernel exploit could copy the key. If you think the Mac was compromised, run `multipass rekey`. Set `MULTIPASS_NO_AGENT=1` to be asked for the passphrase every time.
++
+ ## Get an earlier password back
+ 
+ Each entry keeps the secrets it used to hold, and the one-time password setup keys it used to hold, each with the time it was replaced. `history` lists those times, and never the values. `get --previous <n>` prints or copies one, counting from 1 for the most recently replaced.
+@@ -166,7 +181,6 @@ If you lose the passphrase, no one can recover the store. That is the point.
+ ## Not built yet
+ 
+ - **Export to 1Password.** Send an entry to 1Password with `op item create`, and delete it locally once it lands.
+-- **Session unlock.** Unlock once per session, the way `ssh-agent` does, instead of asking for the passphrase on every command. The vault key is what makes this possible: an agent could hold it without holding the passphrase.
+ - **Memory wiping.** Wipe secrets from memory once a command is done.
+ - **Echo after Ctrl-C.** Restore terminal echo when you press Ctrl-C at a passphrase prompt. Until then, if your terminal stops showing what you type, run `stty echo` or `reset`.
+ 
+diff --git a/docs/projects/passkeys/readme.md b/docs/projects/passkeys/readme.md
+index 7b2fb3a..208e625 100644
+--- a/docs/projects/passkeys/readme.md
++++ b/docs/projects/passkeys/readme.md
+@@ -60,7 +60,7 @@ The item holds the passphrase itself, not the vault key. The vault key rotates a
+ | Access control | `biometryCurrentSet` | Only a Face ID or Touch ID match reads it, and enrolling a new face or fingerprint makes it unreadable |
+ | Accessibility | `whenPasscodeSetThisDeviceOnly` | It never syncs to iCloud Keychain or leaves the device, and it disappears if the device's passcode is removed. Each device keeps its own item. |
+ 
+-After you change the passphrase with `multipass passwd`, the old item no longer opens the package's current key file. The next sign-in falls back to the passphrase field and replaces the item. Until iCloud delivers the deletion of the old key file, or for good if that `passwd` stopped before its last step, the package holds key files under both passphrases, and the item's passphrase still opens the older one. Whenever any key file in the package does not open with the item's passphrase, the extension neither signs nor saves until it has the passphrase that opens it. It asks for it in its own field. With both, it keeps the one whose key files carry the later `passphrase-set`, as the vault-key plan's § 2.3 step 3 does, saves that one to the item, and lets the vault-key code rotate under it. When you cancel the field, the sign-in or registration fails with `multipass needs your other passphrase`, and the next one asks again. The extension never signs read-only from the older lineage, because once the other Mac's rotation and compaction delete that lineage's store files, the older passphrase opens no store, and a sign-in that worked a moment ago would start failing for no visible reason. Refusing every time is simpler and never signs from stale data. The CLI never reads or writes the item; it still asks for the passphrase every time.
++After you change the passphrase with `multipass passwd`, the old item no longer opens the package's current key file. The next sign-in falls back to the passphrase field and replaces the item. Until iCloud delivers the deletion of the old key file, or for good if that `passwd` stopped before its last step, the package holds key files under both passphrases, and the item's passphrase still opens the older one. Whenever any key file in the package does not open with the item's passphrase, the extension neither signs nor saves until it has the passphrase that opens it. It asks for it in its own field. With both, it keeps the one whose key files carry the later `passphrase-set`, as the vault-key plan's § 2.3 step 3 does, saves that one to the item, and lets the vault-key code rotate under it. When you cancel the field, the sign-in or registration fails with `multipass needs your other passphrase`, and the next one asks again. The extension never signs read-only from the older lineage, because once the other Mac's rotation and compaction delete that lineage's store files, the older passphrase opens no store, and a sign-in that worked a moment ago would start failing for no visible reason. Refusing every time is simpler and never signs from stale data. The CLI never reads or writes the item; it asks for the passphrase, or, while a session is unlocked, for a touch, as the session-unlock plan describes.
+ 
+ ### 2.4 Syncing through iCloud Drive
+ 
+diff --git a/docs/projects/session-unlock/readme.md b/docs/projects/session-unlock/readme.md
+index 3df3b11..c9fe3c6 100644
+--- a/docs/projects/session-unlock/readme.md
++++ b/docs/projects/session-unlock/readme.md
+@@ -1,5 +1,5 @@
+ ---
+-status: ready
++status: completed
+ priority: now
+ ---
+ 
+@@ -153,14 +153,14 @@ This table assumes the mergeable-store and vault-key plans have shipped, and tha
+ 
+ | File | Change |
+ | --- | --- |
+-| `src/store.rs` | No new code. The agent builds its one-entry replies with `Store::new`, `insert`, and `to_text(cutoff)`, as the mergeable-store plan's § 2.5 defines them. |
+-| `src/vault.rs` | No new code. The agent lists, merges, compacts, and saves the package through the functions the vault-key plan adds, given the keys it holds. |
++| `src/store.rs` | `Store::only`, which copies one entry's whole version, history and tombstone included, for a one-entry reply, and `Store::all_names`, which lists live and removed names, for the check that a `save` touches only the entry it edited. `escape` and `unescape` become public, for the names in a `list` reply. |
++| `src/vault.rs` | `Vault::open_with_keys`, which opens the package from the key file's text an agent holds, without the passphrase, and fails with the new `Error::Stale` when a key file or a store file belongs to a generation those keys do not cover. `Session::agent_keys` and `Session::session_deadline` give a command what it hands a new agent, and `SESSION_DAYS` is 21. `Session::old_file_changed` tells an agent that an older Mac saved to the old single-file store since its move record. A `read_stores` and a `read_moves` helper are shared with the passphrase open. |
+ | `src/agent.rs` | New. The agent half: reads the start message from stdin, binds the socket, answers `read`, `list`, `edit` and `save`, `status`, and `lock` on a thread per connection, enforces the one-entry rule on `save`, checks its executable's identity on each request, ends the session as § 2.9 says, and writes the end note. It asks for approval through an `Approver` trait, which `touch_id::TouchId` implements and tests replace with a fake. The client half: `read`, `list`, `edit`, `status`, `lock`, `end_note`, and `start`, which spawns an agent and writes the start message. The socket path, the end note's path, and the directory check live here, shared by both halves. |
+-| `src/touch_id.rs` | New `unsafe` module, built from the prototype in `touch-id-prototype/probe.rs` (§ 6.5). Loads `LocalAuthentication.framework` with `dlopen` the first time a command needs approval, as `src/clipboard.rs` loads AppKit, so no other command has it in its process, and wraps `canEvaluatePolicy:error:`, `evaluatePolicy:localizedReason:reply:`, and `invalidate` in a safe `TouchId::available()` and `TouchId::approve(reason, timeout) -> Approval`, where `Approval` is `Approved`, `Denied`, or `Unavailable`. |
++| `src/touch_id.rs` | New `unsafe` module, built from the prototype in `touch-id-prototype/probe.rs` (§ 6.5). Loads `LocalAuthentication.framework` with `dlopen` only when an agent starts, as `src/clipboard.rs` loads AppKit, so no other command has it in its process, and wraps `canEvaluatePolicy:error:`, `evaluatePolicy:localizedReason:reply:`, and `invalidate` in a safe `TouchId::available()` and `TouchId::approve(reason, timeout) -> Approval`, where `Approval` is `Approved`, `Denied`, or `Unavailable`. `Unavailable` comes only from `canEvaluatePolicy` before any sheet shows. Once a sheet has shown, anything but a touch is `Denied` (§ 9). `src/touch_id_other.rs` stands in for it off macOS, where nothing can approve. |
+ | `src/objc.rs` | New `unsafe` module. The typed `objc_msgSend`, class, selector, and `NSString` helpers move here from `src/clipboard.rs`, so the clipboard and Touch ID share one copy, and it adds the global block that carries `evaluatePolicy`'s reply. |
+ | `src/clipboard.rs` | Calls the helpers in `src/objc.rs` instead of defining its own. Its module comment stops calling it the program's only `unsafe` code. |
+-| `src/sys.rs` | New `unsafe` module, built like `src/clipboard.rs`: `unsafe extern "C"` declarations for `getuid`, `getpeereid`, `getsockopt(LOCAL_PEERPID)`, `proc_pidpath`, `setsid`, `ptrace(PT_DENY_ATTACH)`, `setrlimit(RLIMIT_CORE)`, and `mlock`, behind safe wrappers, plus `wipe(&mut [u8])`, which zeroes with volatile writes. All under `#[cfg(target_os = "macos")]`. The standard library offers no stable call for any of them at `rust-version = "1.85"`. |
+-| `src/main.rs` | Adds `status`, `lock`, and the hidden `__agent` command, named like `__clear-clipboard`. `get` and `otp` ask the agent with `read`, and `list` with `list`, unless § 2.4's variables say not to. `add`, `rm`, `otp --set`, and `otp --clear` call a new `open_to_save`, which asks with `edit` and saves with `save`. Both fail on `denied`, and otherwise prompt with the reason from the end note and start an agent once the command succeeds. `init`, `passwd`, and `rekey` always prompt, and `passwd` and `rekey` replace the agent. Updates `USAGE`. |
++| `src/sys.rs` | New `unsafe` module, built like `src/clipboard.rs`: `unsafe extern "C"` declarations for `getuid`, `getpeereid`, `getsockopt(LOCAL_PEERPID)`, `proc_pidpath`, `setsid`, `ptrace(PT_DENY_ATTACH)`, `setrlimit(RLIMIT_CORE)`, and `mlock`, behind safe wrappers, plus `wipe(&mut [u8])`, which zeroes with volatile writes. The calls are macOS-only, with fallbacks elsewhere that report them unsupported, so the crate still builds where no agent starts. The standard library offers no stable call for any of them at `rust-version = "1.85"`. |
++| `src/main.rs` | Adds `status`, `lock`, and the hidden `__agent` command, named like `__clear-clipboard`. `get` and `otp` ask the agent with `read`, and `list` with `list`, unless § 2.4's variables say not to. `add`, `rm`, `restore`, `otp --set`, and `otp --clear` call a new `open_change`, which asks with `edit` and saves with `save`. `history` reads through the agent like `get`. Both fail on `denied`, and otherwise prompt with the reason from the end note and start an agent once the command succeeds. `init`, `passwd`, and `rekey` always prompt, and `passwd` and `rekey` replace the agent. Updates `USAGE`. |
+ | `README.md` | Documents sessions: the touch for each request, when a session ends, `status`, `lock`, `MULTIPASS_NO_AGENT`, and § 2.7's trade in a few sentences, with `rekey` as the remedy for a suspected compromise. Changes "Every command asks for the passphrase" and removes "Session unlock" from "Not built yet". |
+ | `AGENTS.md` | Changes the rule "Apple's system frameworks count like the standard library", which says `src/clipboard.rs` "holds the program's only `unsafe` code", so it names `src/objc.rs`, `src/clipboard.rs`, `src/touch_id.rs`, and `src/sys.rs` as the modules that hold `unsafe` code, each behind a safe interface, with a comment on each call saying what it requires of its arguments. Adds the agent's rules: the vault key reaches an agent only through the stdin of a child the CLI started; the agent answers a request only after an approval for that one request, and only for the entry it names; it never sends the vault key. |
+ | `docs/projects/passkeys/readme.md` | § 2.3's sentence about the CLI changes as § 2.10 says. |
+@@ -339,3 +339,20 @@ The passkeys plan's prototype answers these before this mode is built:
+ 4. Can the CLI start the helper from inside the app bundle and pass it the key file's text on stdin, and does the sandbox allow that?
+ 5. Where can the helper bind its socket so that the unsandboxed CLI can reach it, and can it read the store at `MULTIPASS_STORE`?
+ 6. Does an Apple Watch approval work for the enclave key's access control, or only Touch ID? If only Touch ID, this mode loses the watch, and the plan records whether that is acceptable.
++
++## 9. Outcome
++
++Built in the pull request that completed this project, on top of the vault-key plan's package. The design in § 2 holds, with these departures, each recorded in § 2.11:
++
++- **Replies carry the entry's whole version.** A `read` or `edit` reply holds the entry's history and, for a removed entry, its tombstone, so `history`, `get --previous`, and `restore` work through the agent as they do after a prompt.
++- **A `failed <n>` reply.** It carries a vault error's message, which names files and never a secret, when the agent cannot open or save the package.
++- **The agent's reads never compact.** They never write, as reads after a prompt settle only when the package can be written. A save writes one merged file anyway.
++- **`status` prints the deadline in UTC**, such as `unlocked until 2026-12-18 06:36:34 UTC`, with the formatter `history` already used, rather than as `Dec 10 14:32`.
++- **Pinning memory is best effort.** An agent that cannot `mlock` its copy of the keys still serves. Only that copy is pinned and wiped. The copies it makes to open the store for each request are not, as the README says.
++- **`unavailable` only before a sheet shows.** An early build treated some LocalAuthentication error codes as unavailable, among them -11 (no companion device), which falls back to the passphrase and keeps the session. A cancelled or unanswered sheet must never do that, so once a sheet has shown, only a touch approves.
++- **A changed old store file sends the command to the prompt.** While an older Mac's save to the old single-file store waits to be merged, the agent answers `unavailable`, because only a prompt merges that file.
++- **`status` and `lock` check only the user.** They send nothing, so they reach an agent that another multipass binary started, and a command from another binary ends that agent before it starts its own.
++
++Verified: the tests § 4 names, with a fake `Approver`, and a test that serves an agent from a copy of the test binary to check the executable check. By hand without a sheet, through `expect` against a release build: `MULTIPASS_NO_AGENT`, `SSH_CONNECTION`, `status`, `lock`, the end note's prompt, and a refused 0755 directory. By hand on Touch ID by the owner: one sheet per `get`, `list`, and `add`, two `add`s at once, `lldb -p` failing to attach, `rekey` while unlocked followed by a touch only, and a Cancel that ends the session with `the request was not approved`, which the bare probe showed as `-2 LAErrorUserCancel`.
++
++Deferred until after the merge, by hand: a sheet left for 60 seconds, sleep and wake, a restart, `cargo install` while unlocked, closing the terminal that started the agent, and a real SSH login. Record each result here once it runs.
+diff --git a/src/agent.rs b/src/agent.rs
+new file mode 100644
+index 0000000..8ecfe22
+--- /dev/null
++++ b/src/agent.rs
+@@ -0,0 +1,1532 @@
++//! Session unlock: a background agent that holds the vault key between
++//! commands, so only the first command after it starts asks for the
++//! passphrase.
++//!
++//! A command that had to ask for the passphrase starts `multipass __agent`
++//! as its own child and hands it the vault key over the child's stdin, never
++//! over a socket. The agent then serves one entry per request on a Unix
++//! socket in a 0700 directory, and only after Touch ID or an Apple Watch
++//! approves that one request, on a sheet that names the entry. Declining
++//! ends the session. So a program running as you cannot read or change an
++//! entry without a person at the Mac, and the agent never sends the key.
++//!
++//! The agent ends, writing a note that says why, when the key reaches its
++//! deadline, on `multipass lock`, when a request is declined, when a
++//! rotation elsewhere leaves it holding an old key, and when its executable
++//! changes on disk. The next command then asks for the passphrase and says
++//! why.
++
++use std::fs;
++use std::io::{self, BufRead, BufReader, Read, Write};
++use std::os::fd::AsRawFd;
++use std::os::unix::fs::MetadataExt;
++use std::os::unix::net::{UnixListener, UnixStream};
++use std::path::{Path, PathBuf};
++use std::process::{Command, Stdio};
++use std::sync::atomic::{AtomicBool, Ordering};
++use std::sync::{Arc, Mutex, mpsc};
++use std::time::{Duration, SystemTime, UNIX_EPOCH};
++
++use crate::crypto::sha256;
++use crate::store::{self, Cutoffs, Store};
++use crate::sys;
++use crate::touch_id::{Approval, TouchId};
++use crate::vault::{self, Vault};
++
++/// The hidden command the agent runs, kept out of `--help`.
++pub const COMMAND: &str = "__agent";
++
++/// How long a command waits for a new agent to say `ready`.
++const START_WAIT: Duration = Duration::from_secs(2);
++/// How long a client may take to send each request.
++const REQUEST_WAIT: Duration = Duration::from_secs(2);
++/// How long an `edit` waits for its `save`, while the command asks you for
++/// the new value.
++const SAVE_WAIT: Duration = Duration::from_secs(5 * 60);
++/// How long a sheet waits for a touch before it counts as declined.
++pub const APPROVAL_WAIT: Duration = Duration::from_secs(60);
++/// How long a client waits for a reply: the sheet's wait and some slack.
++const REPLY_WAIT: Duration = Duration::from_secs(75);
++/// The largest counted body either side accepts, far beyond any store.
++const MAX_BODY: usize = 64 << 20;
++/// How long the agent's accept loop sleeps between checks that it should
++/// end. An idle agent runs for up to 21 days, so it wakes only once a second.
++const POLL: Duration = Duration::from_secs(1);
++/// The longest entry name a sheet shows.
++const REASON_NAME_CHARS: usize = 60;
++
++/// Asks a person to approve one request. The agent uses Touch ID; tests
++/// use a fake.
++pub trait Approver: Send + Sync + 'static {
++    fn approve(&self, reason: &str) -> Approval;
++}
++
++/// Approval through Touch ID or an Apple Watch on this Mac.
++pub struct TouchIdApprover;
++
++impl Approver for TouchIdApprover {
++    fn approve(&self, reason: &str) -> Approval {
++        TouchId::approve(reason, APPROVAL_WAIT)
++    }
++}
++
++/// Whether commands may use an agent: not with `MULTIPASS_NO_AGENT` set,
++/// and not over SSH, where nobody can touch the Mac's sensor.
++pub fn enabled(no_agent: Option<&str>, ssh_connection: Option<&str>) -> bool {
++    let set = |v: Option<&str>| v.is_some_and(|v| !v.is_empty());
++    cfg!(target_os = "macos") && !set(no_agent) && !set(ssh_connection)
++}
++
++/// Where one store's agent listens and leaves its end note.
++#[derive(Debug, Clone)]
++pub struct Paths {
++    pub dir: PathBuf,
++    pub socket: PathBuf,
++    pub note: PathBuf,
++}
++
++impl Paths {
++    /// The paths for the store package at `package`, in `dir`, which is
++    /// `~/.multipass/agent` in the CLI. Each store gets its own agent,
++    /// named by a hash of its canonical path, which is public.
++    pub fn new(dir: &Path, package: &Path) -> Paths {
++        let canonical = package
++            .canonicalize()
++            .unwrap_or_else(|_| package.to_path_buf());
++        let digest = sha256::hex_digest(canonical.as_os_str().as_encoded_bytes());
++        let hash = &digest[..16];
++        Paths {
++            dir: dir.to_path_buf(),
++            socket: dir.join(format!("{hash}.sock")),
++            note: dir.join(format!("{hash}.ended")),
++        }
++    }
++}
++
++/// Fails unless `dir` is a directory, not a symbolic link, that belongs to
++/// this user and has mode 0700, so no other user can reach the socket.
++pub fn check_dir(dir: &Path) -> Result<(), String> {
++    let refuse = || {
++        format!(
++            "not using the session agent: {} must be a directory of yours with mode 0700",
++            dir.display()
++        )
++    };
++    let meta = fs::symlink_metadata(dir).map_err(|_| refuse())?;
++    if meta.is_dir() && meta.uid() == sys::uid() && meta.mode() & 0o777 == 0o700 {
++        Ok(())
++    } else {
++        Err(refuse())
++    }
++}
++
++/// Why a session ended, as the end note records it.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum Ended {
++    Expired,
++    Declined,
++    Changed,
++    Locked,
++    Updated,
++}
++
++impl Ended {
++    const ALL: [Ended; 5] = [
++        Ended::Expired,
++        Ended::Declined,
++        Ended::Changed,
++        Ended::Locked,
++        Ended::Updated,
++    ];
++
++    fn word(self) -> &'static str {
++        match self {
++            Ended::Expired => "expired",
++            Ended::Declined => "declined",
++            Ended::Changed => "changed",
++            Ended::Locked => "locked",
++            Ended::Updated => "updated",
++        }
++    }
++
++    /// What the next prompt says about it.
++    pub fn reason(self) -> &'static str {
++        match self {
++            Ended::Expired => "the vault key expired",
++            Ended::Declined => "you declined a request",
++            Ended::Changed => "the vault key changed",
++            Ended::Locked => "locked by multipass lock",
++            Ended::Updated => "multipass was updated",
++        }
++    }
++}
++
++/// The end note: why the last agent for this store ended, and when, in
++/// Unix seconds. `None` when there is no note or it does not parse.
++pub fn end_note(paths: &Paths) -> Option<(Ended, u64)> {
++    let text = fs::read_to_string(&paths.note).ok()?;
++    let (word, at) = text.trim_end().split_once(' ')?;
++    let ended = Ended::ALL.into_iter().find(|e| e.word() == word)?;
++    Some((ended, at.parse().ok()?))
++}
++
++/// What a command found when it tried the store's agent before prompting.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum Tried {
++    /// It did not ask, as `passwd` and `rekey` never do.
++    NotAsked,
++    /// No agent answered.
++    NoAgent,
++    /// An agent answered from another executable than this command's.
++    Updated,
++    /// The agent answered, but neither Touch ID nor a watch could approve.
++    Unavailable,
++    /// The agent's key no longer opens the store, and it ended.
++    Stale,
++}
++
++/// Why the passphrase is being asked for. Only a session that ended has a
++/// reason: the end note's, or `the session ended` when a socket is left
++/// with no agent behind it and no note, as after a restart. A command that
++/// did not ask a running agent, or whose agent could not get a touch, gives
++/// none.
++pub fn prompt_reason(paths: &Paths, tried: Tried) -> Option<&'static str> {
++    match tried {
++        Tried::NotAsked | Tried::Unavailable => None,
++        Tried::Updated => Some(Ended::Updated.reason()),
++        Tried::NoAgent | Tried::Stale => match end_note(paths) {
++            Some((ended, _)) => Some(ended.reason()),
++            None if paths.socket.exists() => Some("the session ended"),
++            None => None,
++        },
++    }
++}
++
++/// The passphrase prompt, with the reason it asks, if there is one.
++pub fn prompt_text(reason: Option<&str>) -> String {
++    match reason {
++        Some(reason) => format!("Passphrase ({reason}): "),
++        None => "Passphrase: ".into(),
++    }
++}
++
++/// What identifies an executable file across an upgrade: a rename over it
++/// gives a new inode, and any write or rename sets a new change time.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub struct ExeId {
++    dev: u64,
++    ino: u64,
++    size: u64,
++    ctime: i64,
++    ctime_nsec: i64,
++}
++
++impl ExeId {
++    pub fn of(path: &Path) -> io::Result<ExeId> {
++        let meta = fs::metadata(path)?;
++        Ok(ExeId {
++            dev: meta.dev(),
++            ino: meta.ino(),
++            size: meta.size(),
++            ctime: meta.ctime(),
++            ctime_nsec: meta.ctime_nsec(),
++        })
++    }
++}
++
++fn now_ms() -> u64 {
++    SystemTime::now()
++        .duration_since(UNIX_EPOCH)
++        .map_or(0, |d| d.as_millis() as u64)
++}
++
++/// Reads one `\n`-terminated line of at most 64 bytes, without the `\n`.
++fn read_line(r: &mut impl Read) -> io::Result<String> {
++    let mut line = Vec::new();
++    let mut byte = [0u8; 1];
++    loop {
++        r.read_exact(&mut byte)?;
++        if byte[0] == b'\n' {
++            break;
++        }
++        if line.len() == 64 {
++            return Err(io::Error::new(io::ErrorKind::InvalidData, "line too long"));
++        }
++        line.push(byte[0]);
++    }
++    String::from_utf8(line).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "not ASCII"))
++}
++
++/// Reads the `n` bytes a line announced.
++fn read_body(r: &mut impl Read, n: &str) -> io::Result<Vec<u8>> {
++    let n: usize = n
++        .parse()
++        .ok()
++        .filter(|&n| n <= MAX_BODY)
++        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "bad length"))?;
++    let mut body = vec![0u8; n];
++    r.read_exact(&mut body)?;
++    Ok(body)
++}
++
++fn read_text(r: &mut impl Read, n: &str) -> io::Result<String> {
++    String::from_utf8(read_body(r, n)?)
++        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "not UTF-8"))
++}
++
++/// Writes `word <n>\n` and then the `n` bytes of `body`.
++fn write_counted(w: &mut impl Write, word: &str, body: &[u8]) -> io::Result<()> {
++    w.write_all(format!("{word} {}\n", body.len()).as_bytes())?;
++    w.write_all(body)?;
++    w.flush()
++}
++
++/// The message a command writes to a new agent's stdin: the key's deadline
++/// in Unix seconds and the keys, as `Session::agent_keys` gives them.
++pub fn start_message(deadline: u64, keys: &str) -> Vec<u8> {
++    let mut message = format!("start {deadline} {}\n", keys.len()).into_bytes();
++    message.extend_from_slice(keys.as_bytes());
++    message
++}
++
++/// Reads the start message, refusing a short key, a missing count, and any
++/// bytes after the key.
++fn read_start(r: &mut impl Read) -> io::Result<(u64, String)> {
++    let bad = || io::Error::new(io::ErrorKind::InvalidData, "bad start message");
++    let line = read_line(r)?;
++    let mut words = line.split(' ');
++    let (Some("start"), Some(deadline), Some(n), None) =
++        (words.next(), words.next(), words.next(), words.next())
++    else {
++        return Err(bad());
++    };
++    let deadline = deadline.parse().map_err(|_| bad())?;
++    let keys = read_text(r, n)?;
++    let mut rest = [0u8; 1];
++    if r.read(&mut rest)? != 0 {
++        return Err(bad());
++    }
++    Ok((deadline, keys))
++}
++
++/// One request the agent needs approval for.
++enum Request {
++    Read(String),
++    Edit(String),
++    List,
++}
++
++impl Request {
++    /// What the sheet says: "multipass is trying to <reason>".
++    fn reason(&self) -> String {
++        let short = |name: &str| -> String {
++            store::escape(name)
++                .chars()
++                .take(REASON_NAME_CHARS)
++                .collect()
++        };
++        match self {
++            Request::Read(name) => format!("read {}", short(name)),
++            Request::Edit(name) => format!("change {}", short(name)),
++            Request::List => "list your entries".into(),
++        }
++    }
++}
++
++/// The agent: the keys it holds and what it needs to serve and end.
++pub struct Agent<A: Approver> {
++    /// One open or save at a time, from any connection.
++    vault: Mutex<Vault>,
++    paths: Paths,
++    /// The keys' text, wiped when the agent ends.
++    keys: Mutex<String>,
++    /// When the vault key expires, in Unix seconds.
++    deadline: u64,
++    approver: A,
++    /// The agent's executable and its identity when the agent started.
++    exe: Option<(PathBuf, ExeId)>,
++    /// Set by the first `end`: the session is over, and no request is served.
++    ending: AtomicBool,
++    /// The thread whose `end` call won `ending`, so only the handler that
++    /// ended the session stops `serve`, once its reply is out.
++    ender: Mutex<Option<std::thread::ThreadId>>,
++    /// Set once the handler that ended the session has written its reply, so
++    /// `serve` returns, and the process exits, only after that reply is out.
++    stopped: AtomicBool,
++    /// Held while a sheet shows, so there is one at a time.
++    one_sheet: Mutex<()>,
++}
++
++/// Runs the `__agent` command: leaves the terminal's session, protects its
++/// memory, reads the start message, and serves until the session ends.
++pub fn run_agent(vault: Vault, paths: Paths) -> Result<(), String> {
++    sys::new_session().map_err(|e| e.to_string())?;
++    sys::deny_debuggers().map_err(|e| e.to_string())?;
++    sys::no_core_files().map_err(|e| e.to_string())?;
++    if !TouchId::available() {
++        return Err("neither Touch ID nor an Apple Watch can approve requests".into());
++    }
++    // Read the start message without std's stdin buffer, which would keep an
++    // unpinned copy of the keys for the agent's whole life.
++    let mut stdin = fs::File::open("/dev/stdin").map_err(|e| e.to_string())?;
++    let (deadline, keys) = read_start(&mut stdin).map_err(|e| e.to_string())?;
++    drop(stdin);
++    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
++    let id = ExeId::of(&exe).map_err(|e| e.to_string())?;
++    let agent = Arc::new(Agent::new(
++        vault,
++        paths,
++        keys,
++        deadline,
++        TouchIdApprover,
++        Some((exe, id)),
++    ));
++    let listener = agent.bind()?;
++    // The command that started the agent stops waiting for `ready` after 2
++    // seconds, so a failed write means only that nobody is listening; the
++    // agent serves either way.
++    let mut stdout = io::stdout().lock();
++    let _ = stdout.write_all(b"ready\n").and_then(|()| stdout.flush());
++    drop(stdout);
++    agent.serve(listener);
++    Ok(())
++}
++
++impl<A: Approver> Agent<A> {
++    pub fn new(
++        vault: Vault,
++        paths: Paths,
++        keys: String,
++        deadline: u64,
++        approver: A,
++        exe: Option<(PathBuf, ExeId)>,
++    ) -> Agent<A> {
++        // Best effort: an agent that cannot pin the page still serves.
++        let _ = sys::lock_in_memory(keys.as_bytes());
++        Agent {
++            vault: Mutex::new(vault),
++            paths,
++            keys: Mutex::new(keys),
++            deadline,
++            approver,
++            exe,
++            ending: AtomicBool::new(false),
++            ender: Mutex::new(None),
++            stopped: AtomicBool::new(false),
++            one_sheet: Mutex::new(()),
++        }
++    }
++
++    /// Checks that the keys open the store and that no agent already serves
++    /// it, then binds the socket and removes the last end note.
++    pub fn bind(&self) -> Result<UnixListener, String> {
++        if now_ms() / 1000 >= self.deadline {
++            return Err(vault::Error::Stale.to_string());
++        }
++        self.open().map_err(|e| e.to_string())?;
++        store::create_private_dir(&self.paths.dir).map_err(|e| e.to_string())?;
++        check_dir(&self.paths.dir)?;
++        if self.paths.socket.exists() {
++            if UnixStream::connect(&self.paths.socket).is_ok() {
++                return Err("another agent already serves this store".into());
++            }
++            fs::remove_file(&self.paths.socket).map_err(|e| e.to_string())?;
++        }
++        let listener = UnixListener::bind(&self.paths.socket).map_err(|e| e.to_string())?;
++        let _ = fs::remove_file(&self.paths.note);
++        Ok(listener)
++    }
++
++    /// Answers connections, each on its own thread, until the session ends
++    /// and the handler that ended it has replied.
++    pub fn serve(self: &Arc<Self>, listener: UnixListener) {
++        if listener.set_nonblocking(true).is_err() {
++            self.end(Ended::Locked);
++            return;
++        }
++        while !self.stopped.load(Ordering::SeqCst) {
++            if now_ms() / 1000 >= self.deadline {
++                self.end(Ended::Expired);
++                break;
++            }
++            match listener.accept() {
++                Ok((stream, _)) => {
++                    let agent = Arc::clone(self);
++                    std::thread::spawn(move || agent.handle(stream));
++                }
++                Err(e) if e.kind() == io::ErrorKind::WouldBlock => std::thread::sleep(POLL),
++                Err(_) => std::thread::sleep(POLL),
++            }
++        }
++    }
++
++    /// Writes the end note, removes the socket, and wipes the keys. Only
++    /// the first call does anything.
++    pub fn end(&self, why: Ended) {
++        if self.ending.swap(true, Ordering::SeqCst) {
++            return;
++        }
++        *self.ender.lock().unwrap_or_else(|p| p.into_inner()) = Some(std::thread::current().id());
++        let note = format!("{} {}\n", why.word(), now_ms() / 1000);
++        let _ = fs::write(&self.paths.note, note);
++        let _ = fs::remove_file(&self.paths.socket);
++        let mut keys = self.keys.lock().unwrap_or_else(|p| p.into_inner());
++        sys::wipe_string(&mut keys);
++    }
++
++    fn open(&self) -> Result<vault::Session, vault::Error> {
++        let keys = self.keys.lock().unwrap_or_else(|p| p.into_inner());
++        let vault = self.vault.lock().unwrap_or_else(|p| p.into_inner());
++        vault.open_with_keys(&keys, now_ms())
++    }
++
++    /// Answers one connection, then lets `serve` return when the answer
++    /// ended the session.
++    fn handle(&self, stream: UnixStream) {
++        self.handle_one(stream);
++        let ender = *self.ender.lock().unwrap_or_else(|p| p.into_inner());
++        if ender == Some(std::thread::current().id()) {
++            self.stopped.store(true, Ordering::SeqCst);
++        }
++    }
++
++    fn handle_one(&self, mut stream: UnixStream) {
++        if sys::peer_uid(stream.as_raw_fd()).ok() != Some(sys::uid()) {
++            return;
++        }
++        // On macOS an accepted socket inherits the listener's non-blocking
++        // mode, so reads would fail whenever the client is slower than this.
++        if stream.set_nonblocking(false).is_err()
++            || stream.set_read_timeout(Some(REQUEST_WAIT)).is_err()
++        {
++            return;
++        }
++        let Ok(line) = read_line(&mut stream) else {
++            return;
++        };
++        let words: Vec<&str> = line.split(' ').collect();
++        let request = match words.as_slice() {
++            ["status"] => {
++                if !self.ending.load(Ordering::SeqCst) {
++                    let _ = stream.write_all(format!("unlocked {}\n", self.deadline).as_bytes());
++                }
++                return;
++            }
++            ["lock"] => {
++                self.end(Ended::Locked);
++                let _ = stream.write_all(b"ok\n");
++                return;
++            }
++            ["list"] => Request::List,
++            ["read", n] => match read_text(&mut stream, n) {
++                Ok(name) => Request::Read(name),
++                Err(_) => return,
++            },
++            ["edit", n] => match read_text(&mut stream, n) {
++                Ok(name) => Request::Edit(name),
++                Err(_) => return,
++            },
++            _ => return,
++        };
++        let _ = self.answer(request, &mut stream);
++    }
++
++    /// Ends the session when something has made this agent unfit to serve:
++    /// it has ended already, its executable changed, or its key expired.
++    fn unfit(&self) -> bool {
++        if self.ending.load(Ordering::SeqCst) {
++            return true;
++        }
++        if let Some((path, id)) = &self.exe {
++            if ExeId::of(path).ok().as_ref() != Some(id) {
++                self.end(Ended::Updated);
++                return true;
++            }
++        }
++        if now_ms() / 1000 >= self.deadline {
++            self.end(Ended::Expired);
++            return true;
++        }
++        false
++    }
++
++    /// Opens the store for an approved request, replying and ending the
++    /// session when a rotation elsewhere has left this agent's key behind.
++    /// When an older Mac has saved to the old single-file store since its
++    /// move record, it replies `unavailable` instead, so the command prompts
++    /// and the prompt merges that change.
++    fn open_for(&self, stream: &mut UnixStream) -> io::Result<Option<vault::Session>> {
++        match self.open() {
++            Ok(session) => {
++                let vault = self.vault.lock().unwrap_or_else(|p| p.into_inner());
++                if session.old_file_changed(&vault) {
++                    stream.write_all(b"unavailable\n")?;
++                    return Ok(None);
++                }
++                Ok(Some(session))
++            }
++            Err(vault::Error::Stale) => {
++                self.end(Ended::Changed);
++                stream.write_all(b"stale\n")?;
++                Ok(None)
++            }
++            Err(e) => {
++                write_counted(stream, "failed", e.to_string().as_bytes())?;
++                Ok(None)
++            }
++        }
++    }
++
++    fn answer(&self, request: Request, stream: &mut UnixStream) -> io::Result<()> {
++        if self.unfit() {
++            return stream.write_all(b"stale\n");
++        }
++        let approval = {
++            let _sheet = self.one_sheet.lock().unwrap_or_else(|p| p.into_inner());
++            if self.unfit() {
++                return stream.write_all(b"stale\n");
++            }
++            self.approver.approve(&request.reason())
++        };
++        match approval {
++            Approval::Approved => {}
++            Approval::Denied => {
++                self.end(Ended::Declined);
++                stream.write_all(b"denied\n")?;
++                return Ok(());
++            }
++            Approval::Unavailable => return stream.write_all(b"unavailable\n"),
++        }
++        if self.unfit() {
++            return stream.write_all(b"stale\n");
++        }
++        let Some(session) = self.open_for(stream)? else {
++            return Ok(());
++        };
++        let now = now_ms();
++        match request {
++            Request::List => {
++                let mut names = String::new();
++                for name in session.store.names() {
++                    names.push_str(&store::escape(name));
++                    names.push('\n');
++                }
++                write_counted(stream, "ok", names.as_bytes())
++            }
++            Request::Read(name) => send_version(stream, &session.store, &name, now),
++            Request::Edit(name) => {
++                send_version(stream, &session.store, &name, now)?;
++                drop(session);
++                self.save(stream, &name)
++            }
++        }
++    }
++
++    /// Waits for the `save` that follows an `edit` of `name`, refuses one
++    /// that touches any other entry, and saves the entry into the store as
++    /// it is now, merged again, with a fresh stamp.
++    fn save(&self, stream: &mut UnixStream, name: &str) -> io::Result<()> {
++        stream.set_read_timeout(Some(SAVE_WAIT))?;
++        let line = read_line(stream)?;
++        let Some(n) = line.strip_prefix("save ") else {
++            return stream.write_all(b"refused\n");
++        };
++        let mut text = read_text(stream, n)?;
++        let sent = Store::from_text(&text);
++        sys::wipe_string(&mut text);
++        let Ok(sent) = sent else {
++            return stream.write_all(b"refused\n");
++        };
++        if sent.all_names().any(|other| other != name) {
++            return stream.write_all(b"refused\n");
++        }
++        if self.unfit() {
++            return stream.write_all(b"stale\n");
++        }
++        let Some(mut session) = self.open_for(stream)? else {
++            return Ok(());
++        };
++        let now = now_ms();
++        let stamp = session.store.stamp(now);
++        match sent.get(name) {
++            Some(entry) => {
++                session.store.insert(name, entry.clone(), stamp);
++            }
++            None => {
++                session.store.remove(name, stamp);
++            }
++        }
++        let vault = self.vault.lock().unwrap_or_else(|p| p.into_inner());
++        match session.save(&vault, now) {
++            Ok(()) => stream.write_all(b"saved\n"),
++            Err(vault::Error::Io(e)) => {
++                let message = format!("could not write to {}: {e}", vault.path().display());
++                write_counted(stream, "failed", message.as_bytes())
++            }
++            Err(e) => write_counted(stream, "failed", e.to_string().as_bytes()),
++        }
++    }
++}
++
++/// Replies with store text holding only `name`'s version, or `missing`.
++fn send_version(stream: &mut UnixStream, store: &Store, name: &str, now: u64) -> io::Result<()> {
++    let only = store.only(name);
++    if only.all_names().next().is_none() {
++        return stream.write_all(b"missing\n");
++    }
++    let mut text = only.to_text(Cutoffs::at(now)).into_bytes();
++    let written = write_counted(stream, "ok", &text);
++    sys::wipe(&mut text);
++    written
++}
++
++/// An agent's answer to `read`, `list`, or `edit`.
++#[derive(Debug)]
++pub enum Answer {
++    /// Store text holding only the requested entry, for `read` and `edit`.
++    Entry(Store),
++    /// The entry names, for `list`.
++    Names(Vec<String>),
++    Missing,
++    Denied,
++    Unavailable,
++    Stale,
++}
++
++/// A connection to a store's agent that passed the checks.
++pub struct Client {
++    stream: UnixStream,
++}
++
++/// An `edit` the agent approved, waiting for the changed entry.
++pub struct Editing {
++    stream: UnixStream,
++}
++
++/// Which checks `connect` makes of the agent at the other end.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum Peer {
++    /// It runs as this user from this command's own executable, as a
++    /// request that hands over or changes an entry needs.
++    SameBinary,
++    /// It runs as this user. Enough for `status` and `lock`, which send
++    /// nothing and only learn or end the session, whichever multipass
++    /// binary started it.
++    SameUser,
++}
++
++/// Connects to the store's agent. `Err(Tried::NoAgent)` when no agent
++/// answers or the one that does runs as another user, and, with
++/// `Peer::SameBinary`, `Err(Tried::Updated)` when it runs from another
++/// executable than this command; either way the command asks for the
++/// passphrase. A directory that fails `check_dir` is named on stderr and
++/// counts as no agent.
++pub fn connect(paths: &Paths, peer: Peer) -> Result<Client, Tried> {
++    if !paths.dir.exists() {
++        return Err(Tried::NoAgent);
++    }
++    if let Err(refused) = check_dir(&paths.dir) {
++        eprintln!("multipass: {refused}");
++        return Err(Tried::NoAgent);
++    }
++    let stream = UnixStream::connect(&paths.socket).map_err(|_| Tried::NoAgent)?;
++    let fd = stream.as_raw_fd();
++    if sys::peer_uid(fd).ok() != Some(sys::uid()) {
++        return Err(Tried::NoAgent);
++    }
++    if peer == Peer::SameBinary {
++        let theirs = sys::peer_pid(fd)
++            .and_then(sys::pid_path)
++            .and_then(|path| ExeId::of(&path));
++        let ours = std::env::current_exe().and_then(|path| ExeId::of(&path));
++        match (theirs, ours) {
++            (Ok(theirs), Ok(ours)) if theirs == ours => {}
++            _ => return Err(Tried::Updated),
++        }
++    }
++    if stream.set_read_timeout(Some(REPLY_WAIT)).is_err()
++        || stream.set_write_timeout(Some(REQUEST_WAIT)).is_err()
++    {
++        return Err(Tried::NoAgent);
++    }
++    Ok(Client { stream })
++}
++
++fn protocol_error() -> String {
++    "the session agent sent a reply this multipass does not understand".into()
++}
++
++/// Reads a reply to `read`, `list`, or `edit`.
++fn read_answer(stream: &mut UnixStream, names: bool) -> Result<Answer, String> {
++    let line = read_line(stream).map_err(|_| protocol_error())?;
++    let words: Vec<&str> = line.split(' ').collect();
++    match words.as_slice() {
++        ["ok", n] => {
++            let mut text = read_text(stream, n).map_err(|_| protocol_error())?;
++            let answer = if names {
++                text.lines()
++                    .map(store::unescape)
++                    .collect::<Option<Vec<String>>>()
++                    .map(Answer::Names)
++                    .ok_or_else(protocol_error)
++            } else {
++                Store::from_text(&text)
++                    .map(Answer::Entry)
++                    .map_err(|_| protocol_error())
++            };
++            sys::wipe_string(&mut text);
++            answer
++        }
++        ["missing"] => Ok(Answer::Missing),
++        ["denied"] => Ok(Answer::Denied),
++        ["unavailable"] => Ok(Answer::Unavailable),
++        ["stale"] => Ok(Answer::Stale),
++        ["failed", n] => Err(read_text(stream, n).map_err(|_| protocol_error())?),
++        _ => Err(protocol_error()),
++    }
++}
++
++impl Client {
++    fn ask(&mut self, word: &str, name: &str) -> Result<Answer, String> {
++        write_counted(&mut self.stream, word, name.as_bytes()).map_err(|_| protocol_error())?;
++        read_answer(&mut self.stream, false)
++    }
++
++    /// Asks for one entry, live or removed, with its history.
++    pub fn read(mut self, name: &str) -> Result<Answer, String> {
++        self.ask("read", name)
++    }
++
++    /// Asks for the live entry names.
++    pub fn list(mut self) -> Result<Answer, String> {
++        self.stream
++            .write_all(b"list\n")
++            .map_err(|_| protocol_error())?;
++        read_answer(&mut self.stream, true)
++    }
++
++    /// Asks to change one entry. On `Entry` or `Missing`, the agent waits
++    /// for `Editing::save` on the same connection.
++    pub fn edit(mut self, name: &str) -> Result<(Answer, Editing), String> {
++        let answer = self.ask("edit", name)?;
++        Ok((
++            answer,
++            Editing {
++                stream: self.stream,
++            },
++        ))
++    }
++
++    /// The deadline the agent serves until, in Unix seconds.
++    pub fn status(mut self) -> Option<u64> {
++        self.stream.write_all(b"status\n").ok()?;
++        let line = read_line(&mut self.stream).ok()?;
++        line.strip_prefix("unlocked ")?.parse().ok()
++    }
++
++    /// Ends the session. True when the agent confirmed.
++    pub fn lock(mut self) -> bool {
++        self.stream.write_all(b"lock\n").is_ok()
++            && read_line(&mut self.stream).is_ok_and(|line| line == "ok")
++    }
++}
++
++impl Editing {
++    /// Sends the changed entry: `store` holds it, or holds nothing, or a
++    /// tombstone for it, to remove it.
++    pub fn save(mut self, store: &Store, now: u64) -> Result<(), String> {
++        let mut text = store.to_text(Cutoffs::at(now)).into_bytes();
++        let sent = write_counted(&mut self.stream, "save", &text);
++        sys::wipe(&mut text);
++        sent.map_err(|_| protocol_error())?;
++        let line = read_line(&mut self.stream).map_err(|_| protocol_error())?;
++        let words: Vec<&str> = line.split(' ').collect();
++        match words.as_slice() {
++            ["saved"] => Ok(()),
++            ["refused"] => Err("the session agent refused the change".into()),
++            ["unavailable"] => {
++                Err("an older multipass changed the store meanwhile; run the command again".into())
++            }
++            ["stale"] => Err(format!(
++                "{}; run the command again",
++                Ended::Changed.reason()
++            )),
++            ["failed", n] => Err(read_text(&mut self.stream, n).map_err(|_| protocol_error())?),
++            _ => Err(protocol_error()),
++        }
++    }
++}
++
++/// Starts an agent for the store at `store`, holding `keys` until
++/// `deadline`, and waits briefly for it to say `ready`. A failed start
++/// costs nothing but the next prompt, so it reports nothing.
++pub fn start(store: &Path, keys: &str, deadline: u64) {
++    let Ok(exe) = std::env::current_exe() else {
++        return;
++    };
++    let Ok(mut child) = Command::new(exe)
++        .arg("--store")
++        .arg(store)
++        .arg(COMMAND)
++        .stdin(Stdio::piped())
++        .stdout(Stdio::piped())
++        .stderr(Stdio::null())
++        .spawn()
++    else {
++        return;
++    };
++    let mut message = start_message(deadline, keys);
++    if let Some(mut stdin) = child.stdin.take() {
++        let _ = stdin.write_all(&message);
++    }
++    sys::wipe(&mut message);
++    let Some(stdout) = child.stdout.take() else {
++        return;
++    };
++    let (sender, receiver) = mpsc::channel();
++    std::thread::spawn(move || {
++        let mut line = String::new();
++        let _ = BufReader::new(stdout).read_line(&mut line);
++        let _ = sender.send(line);
++    });
++    let _ = receiver.recv_timeout(START_WAIT);
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::store::Entry;
++    use std::sync::atomic::AtomicUsize;
++
++    const FAST: u8 = 10;
++
++    fn temp(name: &str) -> PathBuf {
++        static N: AtomicUsize = AtomicUsize::new(0);
++        // A Unix socket path must fit in 104 bytes, which the system
++        // temporary directory on macOS leaves little room for.
++        let dir = PathBuf::from("/tmp").join(format!(
++            "mp-{name}-{}-{}",
++            std::process::id(),
++            N.fetch_add(1, Ordering::SeqCst)
++        ));
++        let _ = fs::remove_dir_all(&dir);
++        fs::create_dir_all(&dir).unwrap();
++        dir
++    }
++
++    /// A fake approver that answers from a script and records each reason.
++    #[derive(Clone)]
++    struct Fake {
++        answers: Arc<Mutex<Vec<Approval>>>,
++        reasons: Arc<Mutex<Vec<String>>>,
++    }
++
++    impl Fake {
++        fn always(approval: Approval) -> Fake {
++            Fake {
++                answers: Arc::new(Mutex::new(vec![approval; 64])),
++                reasons: Arc::default(),
++            }
++        }
++
++        fn reasons(&self) -> Vec<String> {
++            self.reasons.lock().unwrap().clone()
++        }
++    }
++
++    impl Approver for Fake {
++        fn approve(&self, reason: &str) -> Approval {
++            self.reasons.lock().unwrap().push(reason.to_string());
++            self.answers
++                .lock()
++                .unwrap()
++                .pop()
++                .unwrap_or(Approval::Denied)
++        }
++    }
++
++    fn entry(secret: &str) -> Entry {
++        Entry {
++            secret: Some(secret.into()),
++            username: None,
++            notes: None,
++            otp: None,
++        }
++    }
++
++    /// A package of three entries in a temporary directory, the keys an
++    /// agent would hold for it, and the agent paths beside it.
++    struct Setup {
++        root: PathBuf,
++        package: PathBuf,
++        keys: String,
++        deadline: u64,
++        paths: Paths,
++    }
++
++    fn setup(name: &str) -> Setup {
++        setup_in(temp(name))
++    }
++
++    /// `setup` in a directory that already exists.
++    fn setup_in(root: PathBuf) -> Setup {
++        let package = root.join("store.multipass");
++        let vault = Vault::new(&package, FAST);
++        let now = now_ms();
++        vault.init("pw", now).unwrap();
++        let mut ask = |_: vault::Ask| Ok(Some("pw".to_string()));
++        let mut session = vault.open(&mut ask, now).unwrap();
++        for (i, name) in ["a", "b", "c"].into_iter().enumerate() {
++            let stamp = session.store.stamp(now + i as u64);
++            session
++                .store
++                .insert(name, entry(&format!("{name}-secret")), stamp);
++        }
++        session.save(&vault, now).unwrap();
++        let agent_dir = root.join("agent");
++        store::create_private_dir(&agent_dir).unwrap();
++        Setup {
++            paths: Paths::new(&agent_dir, &package),
++            keys: session.agent_keys(),
++            deadline: session.session_deadline(),
++            root,
++            package,
++        }
++    }
++
++    fn agent(s: &Setup, approver: Fake) -> Arc<Agent<Fake>> {
++        Arc::new(Agent::new(
++            Vault::new(&s.package, FAST),
++            s.paths.clone(),
++            s.keys.clone(),
++            s.deadline,
++            approver,
++            None,
++        ))
++    }
++
++    /// Binds the agent and serves it on a thread, as `run_agent` does.
++    fn serving(agent: &Arc<Agent<Fake>>) {
++        let listener = agent.bind().unwrap();
++        let agent = Arc::clone(agent);
++        std::thread::spawn(move || agent.serve(listener));
++    }
++
++    /// A client without the executable check, which an agent serving from
++    /// the test harness's own thread would fail only by accident.
++    fn client(s: &Setup) -> Client {
++        let stream = UnixStream::connect(&s.paths.socket).unwrap();
++        stream.set_read_timeout(Some(REPLY_WAIT)).unwrap();
++        Client { stream }
++    }
++
++    /// Ends the session and stops `serve`, as a handler that ended it would.
++    fn finish(agent: &Arc<Agent<Fake>>) {
++        agent.end(Ended::Locked);
++        agent.stopped.store(true, Ordering::SeqCst);
++    }
++
++    /// `serve` keeps running after `end` until a handler has replied and set
++    /// `stopped`. Catches a `serve` that watches the flag `end` sets, which
++    /// lets the process exit before the ending reply is written.
++    #[test]
++    fn ending_alone_does_not_stop_serve() {
++        let s = setup("end-alone");
++        let agent = agent(&s, Fake::always(Approval::Approved));
++        let listener = agent.bind().unwrap();
++        let serving = {
++            let agent = Arc::clone(&agent);
++            std::thread::spawn(move || agent.serve(listener))
++        };
++        agent.end(Ended::Locked);
++        std::thread::sleep(POLL * 2);
++        assert!(!serving.is_finished(), "serve returned before any reply");
++        agent.stopped.store(true, Ordering::SeqCst);
++        serving.join().unwrap();
++        fs::remove_dir_all(&s.root).unwrap();
++    }
++
++    /// Only the handler whose `end` won the guard stops `serve`. Catches a
++    /// concurrent request, such as a `status`, that finishes while the session
++    /// is ending and stops `serve` before the ending handler has replied.
++    #[test]
++    fn a_concurrent_request_does_not_stop_serve() {
++        let s = setup("concurrent");
++        let agent = agent(&s, Fake::always(Approval::Approved));
++        agent.end(Ended::Locked);
++        let (mine, theirs) = UnixStream::pair().unwrap();
++        let handler = {
++            let agent = Arc::clone(&agent);
++            std::thread::spawn(move || agent.handle(theirs))
++        };
++        (&mine).write_all(b"status\n").unwrap();
++        handler.join().unwrap();
++        assert!(!agent.stopped.load(Ordering::SeqCst));
++        fs::remove_dir_all(&s.root).unwrap();
++    }
++
++    /// Serves an agent from whichever copy of the test binary runs it, until
++    /// killed. Only `connect_refuses_an_agent_from_another_executable` runs
++    /// it, from a copy at another path.
++    #[test]
++    #[ignore]
++    fn serve_for_another_executable() {
++        let Some(root) = std::env::var_os("MULTIPASS_TEST_AGENT_ROOT") else {
++            return;
++        };
++        let root = PathBuf::from(root);
++        let s = setup_in(root.clone());
++        let agent = agent(&s, Fake::always(Approval::Approved));
++        let listener = agent.bind().unwrap();
++        fs::write(root.join("serving"), s.deadline.to_string()).unwrap();
++        agent.serve(listener);
++    }
++
++    /// `Peer::SameBinary` refuses an agent that runs from another executable
++    /// file, and `Peer::SameUser`, for `status` and `lock`, still reaches it.
++    /// Catches a client that would hand a request to an agent an old or
++    /// foreign binary is running.
++    #[test]
++    fn connect_refuses_an_agent_from_another_executable() {
++        let root = temp("other-exe");
++        let copy = root.join("copy-of-tests");
++        fs::copy(std::env::current_exe().unwrap(), &copy).unwrap();
++        /// Kills the helper however the test ends, so a failed test never
++        /// leaves it serving an agent that approves every request.
++        struct KillOnDrop(std::process::Child);
++        impl Drop for KillOnDrop {
++            fn drop(&mut self) {
++                let _ = self.0.kill();
++                let _ = self.0.wait();
++            }
++        }
++        let child = Command::new(&copy)
++            .args([
++                "--exact",
++                "agent::tests::serve_for_another_executable",
++                "--ignored",
++            ])
++            .env("MULTIPASS_TEST_AGENT_ROOT", &root)
++            .stdout(Stdio::null())
++            .stderr(Stdio::null())
++            .spawn()
++            .unwrap();
++        let child = KillOnDrop(child);
++        let serving = root.join("serving");
++        for _ in 0..1000 {
++            if serving.exists() {
++                break;
++            }
++            std::thread::sleep(Duration::from_millis(10));
++        }
++        let deadline: u64 = fs::read_to_string(&serving).unwrap().parse().unwrap();
++        let paths = Paths::new(&root.join("agent"), &root.join("store.multipass"));
++        let refused = connect(&paths, Peer::SameBinary);
++        let reached = connect(&paths, Peer::SameUser)
++            .ok()
++            .and_then(Client::status);
++        drop(child);
++        assert!(matches!(refused, Err(Tried::Updated)));
++        assert_eq!(reached, Some(deadline));
++        fs::remove_dir_all(&root).unwrap();
++    }
++
++    fn wait_until(mut done: impl FnMut() -> bool) {
++        for _ in 0..200 {
++            if done() {
++                return;
++            }
++            std::thread::sleep(Duration::from_millis(10));
++        }
++        panic!("timed out");
++    }
++
++    #[test]
++    fn the_start_message_round_trips_and_refuses_damage() {
++        let message = start_message(1_766_000_000, "multipass-key 1\nkey abc\n");
++        let (deadline, keys) = read_start(&mut message.as_slice()).unwrap();
++        assert_eq!(deadline, 1_766_000_000);
++        assert_eq!(keys, "multipass-key 1\nkey abc\n");
++
++        let short = &message[..message.len() - 1];
++        assert!(read_start(&mut &short[..]).is_err());
++        let mut trailing = message.clone();
++        trailing.push(b'x');
++        assert!(read_start(&mut trailing.as_slice()).is_err());
++        assert!(read_start(&mut &b"start 1766000000\nabc"[..]).is_err());
++    }
++
++    #[test]
++    fn each_request_asks_once_and_names_its_entry() {
++        let s = setup("reasons");
++        let fake = Fake::always(Approval::Approved);
++        let agent = agent(&s, fake.clone());
++        serving(&agent);
++
++        let Answer::Entry(one) = client(&s).read("b").unwrap() else {
++            panic!("expected an entry");
++        };
++        assert_eq!(one.names().collect::<Vec<_>>(), ["b"]);
++        assert_eq!(one.get("b").unwrap().secret.as_deref(), Some("b-secret"));
++        client(&s).read("b").unwrap();
++        let Answer::Names(names) = client(&s).list().unwrap() else {
++            panic!("expected names");
++        };
++        assert_eq!(names, ["a", "b", "c"]);
++        let (answer, editing) = client(&s).edit("x").unwrap();
++        assert!(matches!(answer, Answer::Missing));
++        drop(editing);
++        assert_eq!(
++            fake.reasons(),
++            ["read b", "read b", "list your entries", "change x"]
++        );
++        finish(&agent);
++        fs::remove_dir_all(&s.root).unwrap();
++    }
++
++    #[test]
++    fn a_declined_request_gets_nothing_and_ends_the_session() {
++        let s = setup("declined");
++        let agent = agent(&s, Fake::always(Approval::Denied));
++        serving(&agent);
++        let mut stream = UnixStream::connect(&s.paths.socket).unwrap();
++        write_counted(&mut stream, "read", b"b").unwrap();
++        let mut reply = Vec::new();
++        stream.read_to_end(&mut reply).unwrap();
++        assert_eq!(reply, b"denied\n");
++        // The session ended before the reply went out.
++        assert!(!s.paths.socket.exists());
++        assert_eq!(end_note(&s.paths).map(|n| n.0), Some(Ended::Declined));
++        assert_eq!(
++            prompt_text(prompt_reason(&s.paths, Tried::NoAgent)),
++            "Passphrase (you declined a request): "
++        );
++        fs::remove_dir_all(&s.root).unwrap();
++    }
++
++    #[test]
++    fn an_unavailable_sensor_keeps_the_session() {
++        let s = setup("unavailable");
++        let agent = agent(&s, Fake::always(Approval::Unavailable));
++        serving(&agent);
++        assert!(matches!(client(&s).read("b").unwrap(), Answer::Unavailable));
++        assert_eq!(client(&s).status(), Some(s.deadline));
++        finish(&agent);
++        fs::remove_dir_all(&s.root).unwrap();
++    }
++
++    #[test]
++    fn a_save_changes_only_the_entry_it_edited() {
++        let s = setup("save");
++        let agent = agent(&s, Fake::always(Approval::Approved));
++        serving(&agent);
++        let vault = Vault::new(&s.package, FAST);
++        let read = |name: &str| {
++            let mut ask = |_: vault::Ask| Ok(Some("pw".to_string()));
++            vault
++                .open(&mut ask, now_ms())
++                .unwrap()
++                .store
++                .get(name)
++                .and_then(|e| e.secret.clone())
++        };
++
++        // A save that also holds another entry is refused, and changes nothing.
++        let (_, editing) = client(&s).edit("b").unwrap();
++        let mut both = Store::new();
++        both.insert("b", entry("new-b"), now_ms());
++        both.insert("c", entry("new-c"), now_ms());
++        assert!(editing.save(&both, now_ms()).is_err());
++        let (_, editing) = client(&s).edit("b").unwrap();
++        let mut other = Store::new();
++        other.insert("c", entry("new-c"), now_ms());
++        assert!(editing.save(&other, now_ms()).is_err());
++        assert_eq!(read("b").as_deref(), Some("b-secret"));
++        assert_eq!(read("c").as_deref(), Some("c-secret"));
++
++        // A file another command saves between edit and save survives.
++        let (answer, editing) = client(&s).edit("b").unwrap();
++        let Answer::Entry(mut one) = answer else {
++            panic!("expected b");
++        };
++        {
++            let mut ask = |_: vault::Ask| Ok(Some("pw".to_string()));
++            let mut session = vault.open(&mut ask, now_ms()).unwrap();
++            let stamp = session.store.stamp(now_ms());
++            session.store.insert("d", entry("d-secret"), stamp);
++            session.save(&vault, now_ms()).unwrap();
++        }
++        let stamp = one.stamp(now_ms());
++        one.insert("b", entry("new-b"), stamp);
++        editing.save(&one, now_ms()).unwrap();
++        assert_eq!(read("b").as_deref(), Some("new-b"));
++        assert_eq!(read("d").as_deref(), Some("d-secret"));
++
++        // An empty save removes the entry, leaving a tombstone.
++        let (_, editing) = client(&s).edit("a").unwrap();
++        editing.save(&Store::new(), now_ms()).unwrap();
++        assert_eq!(read("a"), None);
++        let mut ask = |_: vault::Ask| Ok(Some("pw".to_string()));
++        let store = vault.open(&mut ask, now_ms()).unwrap().store;
++        assert!(store.version("a").is_some_and(|v| v.entry.is_none()));
++
++        // A save with no edit before it is refused.
++        let mut stream = UnixStream::connect(&s.paths.socket).unwrap();
++        write_counted(
++            &mut stream,
++            "save",
++            Store::new().to_text(Cutoffs::at(0)).as_bytes(),
++        )
++        .unwrap();
++        let mut reply = Vec::new();
++        stream.read_to_end(&mut reply).unwrap();
++        assert!(reply.is_empty());
++        finish(&agent);
++        fs::remove_dir_all(&s.root).unwrap();
++    }
++
++    #[test]
++    fn a_rotation_elsewhere_makes_the_agent_stale() {
++        let s = setup("stale");
++        let agent = agent(&s, Fake::always(Approval::Approved));
++        serving(&agent);
++        let vault = Vault::new(&s.package, FAST);
++        let mut ask = |_: vault::Ask| Ok(Some("pw".to_string()));
++        let mut session = vault.open(&mut ask, now_ms()).unwrap();
++        session.rotate(&vault, now_ms(), None).unwrap();
++        assert!(matches!(client(&s).read("b").unwrap(), Answer::Stale));
++        wait_until(|| !s.paths.socket.exists());
++        assert_eq!(end_note(&s.paths).map(|n| n.0), Some(Ended::Changed));
++        fs::remove_dir_all(&s.root).unwrap();
++    }
++
++    #[test]
++    fn an_agent_past_its_deadline_does_not_start() {
++        let s = setup("expired");
++        let past = Arc::new(Agent::new(
++            Vault::new(&s.package, FAST),
++            s.paths.clone(),
++            s.keys.clone(),
++            now_ms() / 1000 - 1,
++            Fake::always(Approval::Approved),
++            None,
++        ));
++        assert!(past.bind().is_err());
++        assert!(!s.paths.socket.exists());
++        fs::remove_dir_all(&s.root).unwrap();
++    }
++
++    #[test]
++    fn a_changed_executable_ends_the_session() {
++        let s = setup("updated");
++        let exe = s.root.join("multipass");
++        fs::write(&exe, b"old binary").unwrap();
++        let id = ExeId::of(&exe).unwrap();
++        let agent = Arc::new(Agent::new(
++            Vault::new(&s.package, FAST),
++            s.paths.clone(),
++            s.keys.clone(),
++            s.deadline,
++            Fake::always(Approval::Approved),
++            Some((exe.clone(), id)),
++        ));
++        serving(&agent);
++        assert!(matches!(client(&s).read("b").unwrap(), Answer::Entry(_)));
++
++        // Rewritten in place: same inode, new size and change time.
++        fs::write(&exe, b"new binary, longer").unwrap();
++        assert!(matches!(client(&s).read("b").unwrap(), Answer::Stale));
++        assert_eq!(end_note(&s.paths).map(|n| n.0), Some(Ended::Updated));
++
++        // Replaced by rename: a new inode.
++        let rewritten = s.root.join("multipass.new");
++        fs::write(&rewritten, b"old binary").unwrap();
++        fs::rename(&rewritten, &exe).unwrap();
++        assert_ne!(ExeId::of(&exe).unwrap(), id);
++        fs::remove_dir_all(&s.root).unwrap();
++    }
++
++    #[test]
++    fn lock_ends_the_session_and_status_reports_the_deadline() {
++        let s = setup("lock");
++        let agent = agent(&s, Fake::always(Approval::Approved));
++        serving(&agent);
++        assert_eq!(client(&s).status(), Some(s.deadline));
++        assert!(client(&s).lock());
++        wait_until(|| !s.paths.socket.exists());
++        assert_eq!(end_note(&s.paths).map(|n| n.0), Some(Ended::Locked));
++        assert!(agent.keys.lock().unwrap().is_empty());
++        fs::remove_dir_all(&s.root).unwrap();
++    }
++
++    #[test]
++    fn the_deadline_is_the_keys_creation_plus_21_days() {
++        // A key made five days before the session opens, so a deadline
++        // counted from the session's start would land five days late.
++        const DAY: u64 = 24 * 60 * 60;
++        let root = temp("deadline");
++        let vault = Vault::new(root.join("store.multipass"), FAST);
++        let made = now_ms() / 1000 - 5 * DAY;
++        vault.init("pw", made * 1000).unwrap();
++        let mut ask = |_: vault::Ask| Ok(Some("pw".to_string()));
++        let session = vault.open(&mut ask, now_ms()).unwrap();
++        assert_eq!(session.session_deadline(), made + vault::SESSION_DAYS * DAY);
++        fs::remove_dir_all(&root).unwrap();
++    }
++
++    #[test]
++    fn the_prompt_says_why_the_session_ended() {
++        let root = temp("prompt");
++        let paths = Paths::new(&root, &root.join("store.multipass"));
++        let prompt = |tried| prompt_text(prompt_reason(&paths, tried));
++        assert_eq!(prompt(Tried::NoAgent), "Passphrase: ");
++        fs::write(&paths.socket, b"").unwrap();
++        assert_eq!(prompt(Tried::NoAgent), "Passphrase (the session ended): ");
++        for ended in Ended::ALL {
++            fs::write(&paths.note, format!("{} 1766000000\n", ended.word())).unwrap();
++            assert_eq!(
++                prompt(Tried::NoAgent),
++                format!("Passphrase ({}): ", ended.reason())
++            );
++        }
++        fs::write(&paths.note, "sleepy 1766000000\n").unwrap();
++        fs::remove_file(&paths.socket).unwrap();
++        assert_eq!(prompt(Tried::NoAgent), "Passphrase: ");
++        fs::remove_dir_all(&root).unwrap();
++    }
++
++    /// A running agent leaves a socket and no end note, which is not a
++    /// session that ended, so a prompt that did not ask it, or whose request
++    /// it could not get a touch for, gives no reason.
++    #[test]
++    fn a_running_agent_gives_the_prompt_no_reason() {
++        let s = setup("running");
++        let agent = agent(&s, Fake::always(Approval::Unavailable));
++        serving(&agent);
++        assert!(s.paths.socket.exists());
++        let prompt = |tried| prompt_text(prompt_reason(&s.paths, tried));
++        assert_eq!(prompt(Tried::NotAsked), "Passphrase: ");
++        assert!(matches!(client(&s).read("b").unwrap(), Answer::Unavailable));
++        assert_eq!(prompt(Tried::Unavailable), "Passphrase: ");
++        assert_eq!(
++            prompt(Tried::Updated),
++            "Passphrase (multipass was updated): "
++        );
++        finish(&agent);
++        fs::remove_dir_all(&s.root).unwrap();
++    }
++
++    /// A rotation elsewhere ends the session before the agent replies, so
++    /// the command that saw `stale` finds the note at once.
++    #[test]
++    fn the_end_note_is_written_before_the_reply() {
++        let s = setup("note-first");
++        let agent = agent(&s, Fake::always(Approval::Approved));
++        serving(&agent);
++        let vault = Vault::new(&s.package, FAST);
++        let mut ask = |_: vault::Ask| Ok(Some("pw".to_string()));
++        let mut session = vault.open(&mut ask, now_ms()).unwrap();
++        session.rotate(&vault, now_ms(), None).unwrap();
++        assert!(matches!(client(&s).read("b").unwrap(), Answer::Stale));
++        assert_eq!(
++            prompt_text(prompt_reason(&s.paths, Tried::Stale)),
++            "Passphrase (the vault key changed): "
++        );
++        fs::remove_dir_all(&s.root).unwrap();
++    }
++
++    /// `serve` returns, and the agent's process exits, only once the
++    /// request that ended the session has its reply, so a `lock`, a decline,
++    /// or a stale key never leaves the command without an answer. Checked by
++    /// reading the reply without blocking once `serve` has returned.
++    #[test]
++    fn serve_returns_only_after_the_ending_reply_is_out() {
++        for (approval, request) in [(Approval::Approved, "lock"), (Approval::Denied, "read")] {
++            let s = setup("reply-first");
++            let agent = agent(&s, Fake::always(approval));
++            let listener = agent.bind().unwrap();
++            let serving = {
++                let agent = Arc::clone(&agent);
++                std::thread::spawn(move || agent.serve(listener))
++            };
++            let mut stream = UnixStream::connect(&s.paths.socket).unwrap();
++            match request {
++                "lock" => stream.write_all(b"lock\n").unwrap(),
++                _ => write_counted(&mut stream, "read", b"b").unwrap(),
++            }
++            serving.join().unwrap();
++            stream.set_nonblocking(true).unwrap();
++            let line = read_line(&mut stream).expect("the reply was written before serve returned");
++            assert_eq!(line, if request == "lock" { "ok" } else { "denied" });
++            assert!(end_note(&s.paths).is_some());
++            assert!(!s.paths.socket.exists());
++            fs::remove_dir_all(&s.root).unwrap();
++        }
++    }
++
++    /// While an older Mac's save to the old single-file store waits to be
++    /// merged, the agent answers `unavailable`, so the command prompts and the
++    /// prompt merges it, and the agent sends nothing from the package alone.
++    #[test]
++    fn a_changed_old_file_sends_the_command_to_the_prompt() {
++        let root = temp("old-file");
++        let old = root.join("store.age");
++        let write_old = |secret: &str| {
++            let text = format!("multipass 2\nb\n\tsecret {secret}\n");
++            fs::write(
++                &old,
++                crate::age::encrypt(b"pw", text.as_bytes(), FAST).unwrap(),
++            )
++            .unwrap();
++        };
++        write_old("one");
++        let package = root.join("store.multipass");
++        let vault = Vault::new(&package, FAST).with_old(Some(old.clone()));
++        let mut ask = |_: vault::Ask| Ok(Some("pw".to_string()));
++        let (session, _) = vault.open_or_move(&mut ask, now_ms()).unwrap();
++        let agent_dir = root.join("agent");
++        store::create_private_dir(&agent_dir).unwrap();
++        let s = Setup {
++            paths: Paths::new(&agent_dir, &package),
++            keys: session.agent_keys(),
++            deadline: session.session_deadline(),
++            root: root.clone(),
++            package,
++        };
++        let agent = agent(&s, Fake::always(Approval::Approved));
++        serving(&agent);
++        assert!(matches!(client(&s).read("b").unwrap(), Answer::Entry(_)));
++        write_old("two");
++        assert!(matches!(client(&s).read("b").unwrap(), Answer::Unavailable));
++        assert!(matches!(client(&s).list().unwrap(), Answer::Unavailable));
++        finish(&agent);
++        fs::remove_dir_all(&root).unwrap();
++    }
++
++    #[test]
++    fn the_agent_switches_follow_the_environment() {
++        assert_eq!(enabled(None, None), cfg!(target_os = "macos"));
++        assert!(!enabled(Some("1"), None));
++        assert!(!enabled(None, Some("10.0.0.1 52000 10.0.0.2 22")));
++        assert_eq!(enabled(Some(""), None), cfg!(target_os = "macos"));
++    }
++
++    #[test]
++    fn the_directory_must_be_private() {
++        use std::os::unix::fs::PermissionsExt;
++        let root = temp("dir");
++        let dir = root.join("agent");
++        store::create_private_dir(&dir).unwrap();
++        assert!(check_dir(&dir).is_ok());
++        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
++        let refused = check_dir(&dir).unwrap_err();
++        assert!(refused.contains(&dir.display().to_string()), "{refused}");
++        for peer in [Peer::SameBinary, Peer::SameUser] {
++            assert!(matches!(
++                connect(&Paths::new(&dir, &root.join("s")), peer),
++                Err(Tried::NoAgent)
++            ));
++        }
++        fs::remove_dir_all(&root).unwrap();
++    }
++}
+diff --git a/src/main.rs b/src/main.rs
+index 3d15297..3fb731e 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,16 +1,24 @@
+ mod age;
++mod agent;
+ mod clipboard;
+ mod crypto;
+ #[cfg(target_os = "macos")]
+ mod objc;
+ mod otp;
+ mod store;
++mod sys;
++#[cfg(target_os = "macos")]
++mod touch_id;
++#[cfg(not(target_os = "macos"))]
++#[path = "touch_id_other.rs"]
++mod touch_id;
+ mod tty;
+ mod upgrade;
+ mod vault;
+ 
++use std::cell::{Cell, RefCell};
+ use std::io::{self, IsTerminal, Read, Write};
+-use std::path::PathBuf;
++use std::path::{Path, PathBuf};
+ use std::process::ExitCode;
+ use std::time::{SystemTime, UNIX_EPOCH};
+ 
+@@ -53,6 +61,9 @@ Commands:
+                         password
+   passwd                Change the store's passphrase, and replace its vault key
+   rekey                 Replace the vault key now, as for a suspected leak
++  status                Say whether the store is unlocked, and until when
++  lock                  End the session, so the next command asks for the
++                        passphrase
+   upgrade [<version>]   Install the newest release, or the one named, with
+                         the installer, checking its attestation when gh is
+                         installed. Only this command reaches the network
+@@ -63,6 +74,11 @@ Options:
+                         [default: ~/.multipass/store.multipass]
+   -h, --help            Print this help
+   -V, --version         Print the version
++
++After a command asks for the passphrase, the store stays unlocked until
++its vault key expires, and each later command asks only for Touch ID or
++an Apple Watch. Set MULTIPASS_NO_AGENT=1 to be asked for the passphrase
++every time.
+ ";
+ 
+ #[derive(Debug, PartialEq)]
+@@ -96,6 +112,9 @@ enum Command {
+     },
+     Passwd,
+     Rekey,
++    Status,
++    Lock,
++    Agent,
+ }
+ 
+ #[derive(Debug, Clone, Copy, PartialEq)]
+@@ -303,6 +322,9 @@ fn parse(args: Vec<String>) -> Result<Parsed> {
+         "list" => Command::List,
+         "passwd" => Command::Passwd,
+         "rekey" => Command::Rekey,
++        "status" => Command::Status,
++        "lock" => Command::Lock,
++        agent::COMMAND => Command::Agent,
+         "add" => Command::Add {
+             name: name()?,
+             username: username.take(),
+@@ -369,7 +391,7 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
+     let place =
+         package_path(store.or_else(|| std::env::var_os("MULTIPASS_STORE").map(PathBuf::from)))?;
+     let path = place.package;
+-    if place.named_old && path.exists() {
++    if place.named_old && path.exists() && command != Command::Agent {
+         if let Some(old) = &place.old {
+             eprintln!(
+                 "note: {} moved to {}; update MULTIPASS_STORE or --store",
+@@ -378,13 +400,19 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
+             );
+         }
+     }
+-    let vault = Vault::new(&path, age::DEFAULT_WORK_FACTOR).with_old(place.old.clone());
+-    let now = now_ms()?;
+-    let save = |session: &mut Session| {
+-        session
+-            .save(&vault, now)
+-            .map_err(|e| write_error(&vault, e))
++    let ctx = Ctx {
++        vault: Vault::new(&path, age::DEFAULT_WORK_FACTOR).with_old(place.old.clone()),
++        agent: agent_paths(&path),
++        use_agent: agent::enabled(
++            std::env::var("MULTIPASS_NO_AGENT").ok().as_deref(),
++            std::env::var("SSH_CONNECTION").ok().as_deref(),
++        ),
++        now: now_ms()?,
++        start: RefCell::new(None),
++        tried: Cell::new(agent::Tried::NotAsked),
++        path,
+     };
++    let (path, now) = (&ctx.path, ctx.now);
+ 
+     match command {
+         Command::Init => {
+@@ -398,7 +426,7 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
+                     path.display()
+                 ));
+             }
+-            vault
++            ctx.vault
+                 .init(&new_passphrase()?, now)
+                 .map_err(|e| e.to_string())?;
+             eprintln!("Created {}", path.display());
+@@ -409,8 +437,8 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
+             notes,
+             force,
+         } => {
+-            let mut session = open_writable(&vault, now)?;
+-            let store = &mut session.store;
++            let mut change = ctx.open_change(&name)?;
++            let store = &mut change.store;
+             let existing = store.get(&name);
+             if existing.is_some() && !force {
+                 return Err(format!("{name} already exists; pass --force to replace it"));
+@@ -428,7 +456,7 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
+                 },
+                 stamp,
+             );
+-            save(&mut session)?;
++            ctx.commit(change)?;
+         }
+         Command::Get {
+             name,
+@@ -436,10 +464,9 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
+             clip,
+             previous,
+         } => {
+-            let session = open(&vault, now, Settle::Try)?;
+-            let store = &session.store;
++            let store = ctx.read_entry(&name)?;
+             let value = match previous {
+-                Some(n) => previous_value(store, &name, field, n)?,
++                Some(n) => previous_value(&store, &name, field, n)?,
+                 None => {
+                     let entry = store
+                         .get(&name)
+@@ -456,31 +483,29 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
+             deliver(value, clip)?;
+         }
+         Command::History { name } => {
+-            let session = open(&vault, now, Settle::Try)?;
+-            let version = session
+-                .store
++            let store = ctx.read_entry(&name)?;
++            let version = store
+                 .version(&name)
+                 .ok_or_else(|| format!("no entry named {name}"))?;
+             print!("{}", history_text(version));
+         }
+         Command::List => {
+-            let session = open(&vault, now, Settle::Try)?;
+-            for name in session.store.names() {
++            for name in ctx.read_names()? {
+                 println!("{name}");
+             }
+         }
+         Command::Rm { name } => {
+-            let mut session = open_writable(&vault, now)?;
+-            let stamp = stamp(&session.store, now);
+-            session
++            let mut change = ctx.open_change(&name)?;
++            let stamp = stamp(&change.store, now);
++            change
+                 .store
+                 .remove(&name, stamp)
+                 .ok_or_else(|| format!("no entry named {name}"))?;
+-            save(&mut session)?;
++            ctx.commit(change)?;
+         }
+         Command::Restore { name } => {
+-            let mut session = open_writable(&vault, now)?;
+-            let store = &mut session.store;
++            let mut change = ctx.open_change(&name)?;
++            let store = &mut change.store;
+             let version = store
+                 .version(&name)
+                 .ok_or_else(|| format!("no removed entry named {name}"))?;
+@@ -491,90 +516,301 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
+             store.restore(&name, stamp).ok_or_else(|| {
+                 format!("{name} was removed more than 30 days ago and cannot be restored")
+             })?;
+-            save(&mut session)?;
++            ctx.commit(change)?;
+         }
+-        Command::Otp { name, action } => {
+-            let mut session = match action {
+-                OtpAction::Show { .. } => open(&vault, now, Settle::Try)?,
+-                _ => open_writable(&vault, now)?,
++        Command::Otp {
++            name,
++            action: OtpAction::Show { clip },
++        } => {
++            let store = ctx.read_entry(&name)?;
++            let uri = store
++                .get(&name)
++                .ok_or_else(|| format!("no entry named {name}"))?
++                .otp
++                .as_ref()
++                .ok_or_else(|| format!("{name} has no one-time password"))?;
++            let otp = Otp::parse(uri).map_err(|e| e.to_string())?;
++            let now = now / 1000;
++            deliver(&otp.code(now), clip)?;
++            if io::stderr().is_terminal() {
++                eprintln!("expires in {}s", otp.seconds_left(now));
++            }
++        }
++        Command::Otp {
++            name,
++            action: OtpAction::Set { force },
++        } => {
++            let mut change = ctx.open_change(&name)?;
++            let store = &mut change.store;
++            refuse_otp_replacement(store, &name, force)?;
++            let key = read_hidden(&format!("Setup key for {name}: "), "setup key")?;
++            let uri = otp::setup_uri(&key, &name).map_err(|e| e.to_string())?;
++            let entry = match store.get(&name) {
++                Some(entry) => Entry {
++                    otp: Some(uri),
++                    ..entry.clone()
++                },
++                None => Entry {
++                    secret: None,
++                    username: None,
++                    notes: None,
++                    otp: Some(uri),
++                },
+             };
+-            let store = &mut session.store;
+-            match action {
+-                OtpAction::Show { clip } => {
+-                    let uri = store
+-                        .get(&name)
+-                        .ok_or_else(|| format!("no entry named {name}"))?
+-                        .otp
+-                        .as_ref()
+-                        .ok_or_else(|| format!("{name} has no one-time password"))?;
+-                    let otp = Otp::parse(uri).map_err(|e| e.to_string())?;
+-                    let now = now / 1000;
+-                    deliver(&otp.code(now), clip)?;
+-                    if io::stderr().is_terminal() {
+-                        eprintln!("expires in {}s", otp.seconds_left(now));
+-                    }
+-                }
+-                OtpAction::Set { force } => {
+-                    refuse_otp_replacement(store, &name, force)?;
+-                    let key = read_hidden(&format!("Setup key for {name}: "), "setup key")?;
+-                    let uri = otp::setup_uri(&key, &name).map_err(|e| e.to_string())?;
+-                    let entry = match store.get(&name) {
+-                        Some(entry) => Entry {
+-                            otp: Some(uri),
+-                            ..entry.clone()
+-                        },
+-                        None => Entry {
+-                            secret: None,
+-                            username: None,
+-                            notes: None,
+-                            otp: Some(uri),
+-                        },
+-                    };
+-                    let stamp = stamp(store, now);
+-                    store.insert(name, entry, stamp);
+-                    save(&mut session)?;
+-                }
+-                OtpAction::Clear => {
+-                    let entry = store
+-                        .get(&name)
+-                        .ok_or_else(|| format!("no entry named {name}"))?;
+-                    if entry.otp.is_none() {
+-                        return Err(format!("{name} has no one-time password"));
+-                    }
+-                    if entry.secret.is_none() {
+-                        return Err(format!(
+-                            "{name} holds only a one-time password; use rm to remove the entry"
+-                        ));
+-                    }
+-                    let entry = Entry {
+-                        otp: None,
+-                        ..entry.clone()
+-                    };
+-                    let stamp = stamp(store, now);
+-                    store.insert(name, entry, stamp);
+-                    save(&mut session)?;
+-                }
++            let stamp = stamp(store, now);
++            store.insert(name, entry, stamp);
++            ctx.commit(change)?;
++        }
++        Command::Otp {
++            name,
++            action: OtpAction::Clear,
++        } => {
++            let mut change = ctx.open_change(&name)?;
++            let store = &mut change.store;
++            let entry = store
++                .get(&name)
++                .ok_or_else(|| format!("no entry named {name}"))?;
++            if entry.otp.is_none() {
++                return Err(format!("{name} has no one-time password"));
+             }
++            if entry.secret.is_none() {
++                return Err(format!(
++                    "{name} holds only a one-time password; use rm to remove the entry"
++                ));
++            }
++            let entry = Entry {
++                otp: None,
++                ..entry.clone()
++            };
++            let stamp = stamp(store, now);
++            store.insert(name, entry, stamp);
++            ctx.commit(change)?;
+         }
+         Command::Passwd => {
+-            let mut session = open_writable_unsettled(&vault, now)?;
++            let mut session = ctx.open_prompting(Settle::Skip)?;
++            session.writable().map_err(|e| e.to_string())?;
+             let new = new_passphrase()?;
+             session
+-                .rotate(&vault, now, Some(new))
+-                .map_err(|e| write_error(&vault, e))?;
++                .rotate(&ctx.vault, now, Some(new))
++                .map_err(|e| write_error(&ctx.vault, e))?;
++            ctx.replace_agent(&session);
+             eprintln!("Passphrase changed, and the vault key replaced");
+         }
+         Command::Rekey => {
+-            let mut session = open_writable_unsettled(&vault, now)?;
++            let mut session = ctx.open_prompting(Settle::Skip)?;
++            session.writable().map_err(|e| e.to_string())?;
+             session
+-                .rotate(&vault, now, None)
+-                .map_err(|e| write_error(&vault, e))?;
++                .rotate(&ctx.vault, now, None)
++                .map_err(|e| write_error(&ctx.vault, e))?;
++            ctx.replace_agent(&session);
+             eprintln!("Replaced the vault key");
+         }
++        Command::Status => println!("{}", ctx.status()),
++        Command::Lock => {
++            let locked = ctx.client_any().is_some_and(agent::Client::lock);
++            eprintln!("{}", if locked { "Locked" } else { "Not unlocked" });
++        }
++        Command::Agent => {
++            let paths = ctx.agent.clone().ok_or("HOME is not set")?;
++            return agent::run_agent(Vault::new(path, age::DEFAULT_WORK_FACTOR), paths);
++        }
++    }
++    if let Some((keys, deadline)) = ctx.start.take() {
++        // An agent from another multipass binary would keep the socket, so
++        // the new one could not bind, and every command would prompt.
++        if ctx.tried.get() == agent::Tried::Updated {
++            if let Some(other) = ctx.client_any() {
++                other.lock();
++            }
++        }
++        agent::start(&ctx.path, &keys, deadline);
+     }
+     Ok(())
+ }
+ 
++/// The message for a request the agent's sheet did not approve.
++const NOT_APPROVED: &str = "the request was not approved";
++
++/// What a command needs to reach the store: its package and vault, and the
++/// session agent, which serves the store once a prompt has unlocked it.
++struct Ctx {
++    path: PathBuf,
++    vault: Vault,
++    /// Where this store's agent listens, when `HOME` is set.
++    agent: Option<agent::Paths>,
++    /// False with `MULTIPASS_NO_AGENT` or over SSH: no agent is asked or
++    /// started, so every command prompts.
++    use_agent: bool,
++    now: u64,
++    /// The keys and deadline of an agent to start once the command
++    /// succeeds, set when it prompted.
++    start: RefCell<Option<(String, u64)>>,
++    /// What the command found when it tried the agent, which decides what
++    /// a prompt after it says.
++    tried: Cell<agent::Tried>,
++}
++
++/// A store a command changes, and where the change goes.
++struct Change {
++    store: Store,
++    saver: Saver,
++}
++
++enum Saver {
++    /// The agent sent one entry and waits for it back.
++    Agent(agent::Editing),
++    /// The command prompted and holds the whole store.
++    Local(Box<Session>),
++}
++
++/// `~/.multipass/agent`, where every store's agent listens.
++fn agent_paths(package: &Path) -> Option<agent::Paths> {
++    let home = std::env::var_os("HOME")?;
++    let dir = PathBuf::from(home).join(".multipass").join("agent");
++    Some(agent::Paths::new(&dir, package))
++}
++
++impl Ctx {
++    /// The store's agent, when one may be used and one answers, recording
++    /// what the command found otherwise.
++    fn client(&self) -> Option<agent::Client> {
++        if !self.use_agent {
++            return None;
++        }
++        match agent::connect(self.agent.as_ref()?, agent::Peer::SameBinary) {
++            Ok(client) => Some(client),
++            Err(tried) => {
++                self.tried.set(tried);
++                None
++            }
++        }
++    }
++
++    /// The store's agent, whatever the settings say and whichever multipass
++    /// binary started it, for `status`, `lock`, and ending an agent this
++    /// command replaces. Those requests send nothing and only learn or end
++    /// the session.
++    fn client_any(&self) -> Option<agent::Client> {
++        agent::connect(self.agent.as_ref()?, agent::Peer::SameUser).ok()
++    }
++
++    /// Handles an answer that leaves the command to prompt: records why for
++    /// the prompt, and fails on a declined request or a reply of the wrong
++    /// kind.
++    fn fall_back(&self, answer: agent::Answer) -> Result<()> {
++        match answer {
++            agent::Answer::Unavailable => self.tried.set(agent::Tried::Unavailable),
++            agent::Answer::Stale => self.tried.set(agent::Tried::Stale),
++            agent::Answer::Denied => return Err(NOT_APPROVED.into()),
++            _ => return Err("the session agent sent a reply of the wrong kind".into()),
++        }
++        Ok(())
++    }
++
++    /// Opens the store with the passphrase, and, when commands may use an
++    /// agent, arranges to start one holding this session's keys once the
++    /// command succeeds.
++    fn open_prompting(&self, settle: Settle) -> Result<Session> {
++        let reason = match (&self.agent, self.use_agent) {
++            (Some(paths), true) => agent::prompt_reason(paths, self.tried.get()),
++            _ => None,
++        };
++        let session = open(&self.vault, self.now, settle, &agent::prompt_text(reason))?;
++        if self.use_agent && self.agent.is_some() && session.writable().is_ok() {
++            *self.start.borrow_mut() = Some((session.agent_keys(), session.session_deadline()));
++        }
++        Ok(session)
++    }
++
++    /// The store, or the part of it holding `name`, for a command that only
++    /// reads one entry.
++    fn read_entry(&self, name: &str) -> Result<Store> {
++        if let Some(client) = self.client() {
++            match client.read(name)? {
++                agent::Answer::Entry(store) => return Ok(store),
++                agent::Answer::Missing => return Ok(Store::new()),
++                other => self.fall_back(other)?,
++            }
++        }
++        Ok(self.open_prompting(Settle::Try)?.store)
++    }
++
++    /// The live entry names.
++    fn read_names(&self) -> Result<Vec<String>> {
++        if let Some(client) = self.client() {
++            match client.list()? {
++                agent::Answer::Names(names) => return Ok(names),
++                other => self.fall_back(other)?,
++            }
++        }
++        let session = self.open_prompting(Settle::Try)?;
++        Ok(session.store.names().map(String::from).collect())
++    }
++
++    /// Opens the store to change the entry named `name`. Through the agent,
++    /// the store holds only that entry.
++    fn open_change(&self, name: &str) -> Result<Change> {
++        if let Some(client) = self.client() {
++            match client.edit(name)? {
++                (agent::Answer::Entry(store), editing) => {
++                    return Ok(Change {
++                        store,
++                        saver: Saver::Agent(editing),
++                    });
++                }
++                (agent::Answer::Missing, editing) => {
++                    return Ok(Change {
++                        store: Store::new(),
++                        saver: Saver::Agent(editing),
++                    });
++                }
++                (other, _) => self.fall_back(other)?,
++            }
++        }
++        let mut session = self.open_prompting(Settle::Must)?;
++        session.writable().map_err(|e| e.to_string())?;
++        Ok(Change {
++            store: std::mem::take(&mut session.store),
++            saver: Saver::Local(Box::new(session)),
++        })
++    }
++
++    fn commit(&self, change: Change) -> Result<()> {
++        match change.saver {
++            Saver::Agent(editing) => editing.save(&change.store, self.now),
++            Saver::Local(mut session) => {
++                session.store = change.store;
++                session
++                    .save(&self.vault, self.now)
++                    .map_err(|e| write_error(&self.vault, e))
++            }
++        }
++    }
++
++    /// After `passwd` or `rekey`, ends the agent holding the old key, and
++    /// starts one with the new key once the command succeeds.
++    fn replace_agent(&self, session: &Session) {
++        if let Some(client) = self.client_any() {
++            client.lock();
++        }
++        if self.use_agent && self.agent.is_some() {
++            *self.start.borrow_mut() = Some((session.agent_keys(), session.session_deadline()));
++        }
++    }
++
++    /// `unlocked until …`, or `locked` and the reason the last session
++    /// ended.
++    fn status(&self) -> String {
++        if let Some(deadline) = self.client_any().and_then(agent::Client::status) {
++            return format!("unlocked until {}", utc(deadline * 1000));
++        }
++        match self.agent.as_ref().and_then(agent::end_note) {
++            Some((ended, at)) => format!("locked: {} at {}", ended.reason(), utc(at * 1000)),
++            None => "locked".into(),
++        }
++    }
++}
++
+ /// Whether `open` rotates or compacts the package when `Session::settle`
+ /// finds either due.
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+@@ -592,10 +828,10 @@ enum Settle {
+ 
+ /// Opens the store package, asking for the passphrase on the terminal, and
+ /// settles it as `settle` says. Prints what the open left alone.
+-fn open(vault: &Vault, now: u64, settle: Settle) -> Result<Session> {
++fn open(vault: &Vault, now: u64, settle: Settle, prompt: &str) -> Result<Session> {
+     let mut ask = |ask: Ask| -> io::Result<Option<String>> {
+         match ask {
+-            Ask::Passphrase => terminal_prompt("Passphrase: ").map(Some),
++            Ask::Passphrase => terminal_prompt(prompt).map(Some),
+             Ask::Other(files) => {
+                 eprintln!(
+                     "multipass: that passphrase does not open {}, which another Mac's \
+@@ -676,22 +912,6 @@ fn open_with(
+     Ok(session)
+ }
+ 
+-/// Opens the store for a command that saves, failing before it asks for
+-/// anything more when the store opened read-only or cannot be written.
+-fn open_writable(vault: &Vault, now: u64) -> Result<Session> {
+-    let session = open(vault, now, Settle::Must)?;
+-    session.writable().map_err(|e| e.to_string())?;
+-    Ok(session)
+-}
+-
+-/// Opens the store for `passwd` and `rekey`, which rotate anyway, so it
+-/// neither rotates nor compacts first.
+-fn open_writable_unsettled(vault: &Vault, now: u64) -> Result<Session> {
+-    let session = open(vault, now, Settle::Skip)?;
+-    session.writable().map_err(|e| e.to_string())?;
+-    Ok(session)
+-}
+-
+ /// The message for a failed write to the package. It names the package
+ /// when the file system refused, because the OS error alone does not.
+ fn write_error(vault: &Vault, e: vault::Error) -> String {
+@@ -977,6 +1197,9 @@ mod tests {
+         assert_eq!(run_of("init"), Command::Init);
+         assert_eq!(run_of("list"), Command::List);
+         assert_eq!(run_of("rekey"), Command::Rekey);
++        assert_eq!(run_of("status"), Command::Status);
++        assert_eq!(run_of("lock"), Command::Lock);
++        assert_eq!(run_of("--store /tmp/s.multipass __agent"), Command::Agent);
+         assert_eq!(
+             run_of("restore github.com"),
+             Command::Restore {
+@@ -1130,6 +1353,13 @@ mod tests {
+         for bad in [
+             "",
+             "frobnicate",
++            "status x",
++            "status --check",
++            "lock --force",
++            "lock x",
++            "__agent x",
++            "__agent --clip",
++            "upgrade status",
+             "add",
+             "get x y",
+             "list --force",
+diff --git a/src/objc.rs b/src/objc.rs
+index 80b9691..68621f8 100644
+--- a/src/objc.rs
++++ b/src/objc.rs
+@@ -131,3 +131,55 @@ pub fn with_pool<T>(f: impl FnOnce() -> T) -> T {
+     unsafe { objc_autoreleasePoolPop(pool) };
+     result
+ }
++
++/// `BLOCK_IS_GLOBAL` from the block ABI: the runtime never copies or frees
++/// the block, which suits one that captures nothing and lives forever.
++const BLOCK_IS_GLOBAL: i32 = 1 << 28;
++
++unsafe extern "C" {
++    /// The block runtime's class for global blocks; only its address is used.
++    static _NSConcreteGlobalBlock: *const c_void;
++}
++
++#[repr(C)]
++struct BlockDescriptor {
++    reserved: usize,
++    size: usize,
++}
++
++/// A block literal laid out as the block ABI defines it, for a block that
++/// takes a `BOOL` and an `NSError *`, as completion handlers often do.
++#[repr(C)]
++pub struct Block {
++    isa: *const c_void,
++    flags: i32,
++    reserved: i32,
++    pub(crate) invoke: unsafe extern "C" fn(*const Block, u8, Id),
++    descriptor: *const BlockDescriptor,
++}
++
++/// A global block that calls `invoke`, leaked so it outlives every call to
++/// it, as a global block must. It captures nothing, so `invoke` finds its
++/// state elsewhere, such as in a static.
++pub fn global_block(invoke: unsafe extern "C" fn(*const Block, u8, Id)) -> *const Block {
++    static DESCRIPTOR: BlockDescriptor = BlockDescriptor {
++        reserved: 0,
++        size: std::mem::size_of::<Block>(),
++    };
++    Box::leak(Box::new(Block {
++        isa: (&raw const _NSConcreteGlobalBlock).cast(),
++        flags: BLOCK_IS_GLOBAL,
++        reserved: 0,
++        invoke,
++        descriptor: &DESCRIPTOR,
++    }))
++}
++
++/// The code of an `NSError`, or 0 for null. `error` must be null or a valid
++/// `NSError` for the length of the call.
++pub unsafe fn error_code(error: Id) -> isize {
++    if error.is_null() {
++        return 0;
++    }
++    unsafe { send(error, c"code") }
++}
+diff --git a/src/store.rs b/src/store.rs
+index 5641ffb..24f1688 100644
+--- a/src/store.rs
++++ b/src/store.rs
+@@ -319,6 +319,21 @@ impl Store {
+             .map(|(name, _)| name.as_str())
+     }
+ 
++    /// Every name the store holds, live or removed, in sorted order.
++    pub fn all_names(&self) -> impl Iterator<Item = &str> {
++        self.versions.keys().map(String::as_str)
++    }
++
++    /// A store holding only the version named `name`, with its history, or
++    /// an empty store when there is none.
++    pub fn only(&self, name: &str) -> Store {
++        let mut store = Store::new();
++        if let Some(version) = self.versions.get(name) {
++            store.versions.insert(name.to_string(), version.clone());
++        }
++        store
++    }
++
+     /// The largest `modified` in the store, tombstones included.
+     pub fn newest(&self) -> u64 {
+         self.versions
+@@ -615,7 +630,7 @@ fn parse_stamp(s: &str) -> Option<u64> {
+     canonical.then(|| s.parse().ok()).flatten()
+ }
+ 
+-fn escape(s: &str) -> String {
++pub fn escape(s: &str) -> String {
+     let mut out = String::with_capacity(s.len());
+     for c in s.chars() {
+         match c {
+@@ -629,7 +644,7 @@ fn escape(s: &str) -> String {
+     out
+ }
+ 
+-fn unescape(s: &str) -> Option<String> {
++pub fn unescape(s: &str) -> Option<String> {
+     let mut out = String::with_capacity(s.len());
+     let mut chars = s.chars();
+     while let Some(c) = chars.next() {
+diff --git a/src/sys.rs b/src/sys.rs
+new file mode 100644
+index 0000000..1527e94
+--- /dev/null
++++ b/src/sys.rs
+@@ -0,0 +1,243 @@
++//! System calls the session agent needs that the standard library does not
++//! offer, behind safe wrappers: who is on the other end of a Unix socket,
++//! leaving the terminal's session, and keeping the vault key out of
++//! debuggers, core files, and swap.
++//!
++//! Every call is in libSystem, which every macOS program links. Elsewhere
++//! no agent starts, so the calls that only an agent makes fail.
++
++#[cfg(target_os = "macos")]
++pub use macos::*;
++#[cfg(not(target_os = "macos"))]
++pub use other::*;
++
++#[cfg(target_os = "macos")]
++mod macos {
++    use std::ffi::{OsString, c_char, c_int, c_void};
++    use std::io;
++    use std::os::fd::RawFd;
++    use std::os::unix::ffi::OsStringExt;
++    use std::path::PathBuf;
++
++    /// `SOL_LOCAL` and `LOCAL_PEERPID` from `<sys/un.h>`: the process ID of a
++    /// Unix socket's peer, as it was when the connection was made.
++    const SOL_LOCAL: c_int = 0;
++    const LOCAL_PEERPID: c_int = 2;
++    /// `PT_DENY_ATTACH` from `<sys/ptrace.h>`.
++    const PT_DENY_ATTACH: c_int = 31;
++    /// `RLIMIT_CORE` from `<sys/resource.h>`.
++    const RLIMIT_CORE: c_int = 4;
++    /// `PROC_PIDPATHINFO_MAXSIZE` from `<sys/proc_info.h>`.
++    const PID_PATH_MAX: usize = 4 * 1024;
++
++    #[repr(C)]
++    struct Rlimit {
++        current: u64,
++        max: u64,
++    }
++
++    unsafe extern "C" {
++        fn getuid() -> u32;
++        fn getpeereid(fd: c_int, uid: *mut u32, gid: *mut u32) -> c_int;
++        fn getsockopt(
++            fd: c_int,
++            level: c_int,
++            name: c_int,
++            value: *mut c_void,
++            len: *mut u32,
++        ) -> c_int;
++        fn proc_pidpath(pid: c_int, buffer: *mut c_char, size: u32) -> c_int;
++        fn setsid() -> c_int;
++        fn ptrace(request: c_int, pid: c_int, addr: *mut c_char, data: c_int) -> c_int;
++        fn setrlimit(resource: c_int, limit: *const Rlimit) -> c_int;
++        fn mlock(addr: *const c_void, len: usize) -> c_int;
++    }
++
++    /// Turns a C return value of -1 into the error `errno` holds.
++    fn check(result: c_int) -> io::Result<c_int> {
++        if result == -1 {
++            Err(io::Error::last_os_error())
++        } else {
++            Ok(result)
++        }
++    }
++
++    /// The user ID this process runs as.
++    pub fn uid() -> u32 {
++        // `getuid` takes nothing and cannot fail.
++        unsafe { getuid() }
++    }
++
++    /// The user ID of the process on the other end of the Unix socket `fd`.
++    pub fn peer_uid(fd: RawFd) -> io::Result<u32> {
++        let (mut uid, mut gid) = (0u32, 0u32);
++        // `getpeereid` writes two `uid_t`s, both `u32` on macOS, through valid
++        // pointers, and fails cleanly when `fd` is not a connected socket.
++        check(unsafe { getpeereid(fd, &mut uid, &mut gid) })?;
++        Ok(uid)
++    }
++
++    /// The process ID of the process on the other end of the Unix socket `fd`.
++    pub fn peer_pid(fd: RawFd) -> io::Result<i32> {
++        let mut pid: c_int = 0;
++        let mut len = std::mem::size_of::<c_int>() as u32;
++        // `LOCAL_PEERPID` writes a `pid_t`, an `i32`, into the buffer of the
++        // length given, and sets `len` to what it wrote.
++        check(unsafe {
++            getsockopt(
++                fd,
++                SOL_LOCAL,
++                LOCAL_PEERPID,
++                (&mut pid as *mut c_int).cast(),
++                &mut len,
++            )
++        })?;
++        Ok(pid)
++    }
++
++    /// The path of the executable that process `pid` runs.
++    pub fn pid_path(pid: i32) -> io::Result<PathBuf> {
++        let mut buffer = vec![0u8; PID_PATH_MAX];
++        // `proc_pidpath` writes at most `size` bytes and returns how many, or 0
++        // with `errno` set when the process is gone or not ours to inspect.
++        let written = unsafe { proc_pidpath(pid, buffer.as_mut_ptr().cast(), PID_PATH_MAX as u32) };
++        if written <= 0 {
++            return Err(io::Error::last_os_error());
++        }
++        buffer.truncate(written as usize);
++        Ok(PathBuf::from(OsString::from_vec(buffer)))
++    }
++
++    /// Makes this process the leader of a new session with no controlling
++    /// terminal, so closing the terminal that started it does not end it.
++    pub fn new_session() -> io::Result<()> {
++        // `setsid` takes nothing; it fails only for a process group leader.
++        check(unsafe { setsid() }).map(drop)
++    }
++
++    /// Refuses debuggers for the rest of this process's life.
++    pub fn deny_debuggers() -> io::Result<()> {
++        // `PT_DENY_ATTACH` ignores the other arguments.
++        check(unsafe { ptrace(PT_DENY_ATTACH, 0, std::ptr::null_mut(), 0) }).map(drop)
++    }
++
++    /// Makes a crash leave no core file.
++    pub fn no_core_files() -> io::Result<()> {
++        let limit = Rlimit { current: 0, max: 0 };
++        // `setrlimit` reads one `struct rlimit`, two `rlim_t`s of 64 bits.
++        check(unsafe { setrlimit(RLIMIT_CORE, &limit) }).map(drop)
++    }
++
++    /// Keeps the pages holding `bytes` out of swap.
++    pub fn lock_in_memory(bytes: &[u8]) -> io::Result<()> {
++        if bytes.is_empty() {
++            return Ok(());
++        }
++        // `mlock` only pins the pages that hold the range; it reads nothing.
++        check(unsafe { mlock(bytes.as_ptr().cast(), bytes.len()) }).map(drop)
++    }
++}
++
++#[cfg(not(target_os = "macos"))]
++mod other {
++    use std::io;
++    use std::os::fd::RawFd;
++    use std::path::PathBuf;
++
++    unsafe extern "C" {
++        fn getuid() -> u32;
++    }
++
++    fn unsupported<T>() -> io::Result<T> {
++        Err(io::Error::new(
++            io::ErrorKind::Unsupported,
++            "session unlock works only on macOS",
++        ))
++    }
++
++    pub fn uid() -> u32 {
++        // `getuid` takes nothing and cannot fail.
++        unsafe { getuid() }
++    }
++
++    pub fn peer_uid(_fd: RawFd) -> io::Result<u32> {
++        unsupported()
++    }
++
++    pub fn peer_pid(_fd: RawFd) -> io::Result<i32> {
++        unsupported()
++    }
++
++    pub fn pid_path(_pid: i32) -> io::Result<PathBuf> {
++        unsupported()
++    }
++
++    pub fn new_session() -> io::Result<()> {
++        unsupported()
++    }
++
++    pub fn deny_debuggers() -> io::Result<()> {
++        unsupported()
++    }
++
++    pub fn no_core_files() -> io::Result<()> {
++        unsupported()
++    }
++
++    pub fn lock_in_memory(_bytes: &[u8]) -> io::Result<()> {
++        Ok(())
++    }
++}
++
++/// Overwrites `buffer` with zeros, in a way the compiler may not remove as
++/// a dead store.
++pub fn wipe(buffer: &mut [u8]) {
++    for byte in buffer.iter_mut() {
++        // A volatile write through a valid `&mut u8`.
++        unsafe { std::ptr::write_volatile(byte, 0) };
++    }
++    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
++}
++
++/// Overwrites a string's bytes with zeros and empties it. Zero bytes are
++/// valid UTF-8, so the string stays valid while it is wiped.
++pub fn wipe_string(s: &mut String) {
++    // Writing zeros keeps every byte a valid UTF-8 code unit.
++    wipe(unsafe { s.as_bytes_mut() });
++    s.clear();
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn wipe_leaves_only_zeros() {
++        let mut buffer = *b"hunter2 and more";
++        wipe(&mut buffer);
++        assert_eq!(buffer, [0u8; 16]);
++
++        let mut text = String::from("correct horse");
++        let capacity = text.capacity();
++        let start = text.as_ptr();
++        wipe_string(&mut text);
++        assert!(text.is_empty());
++        // The buffer the text lived in now reads as zeros.
++        let left = unsafe { std::slice::from_raw_parts(start, capacity.min(13)) };
++        assert_eq!(left, [0u8; 13]);
++    }
++
++    #[test]
++    #[cfg(target_os = "macos")]
++    fn a_socket_pair_names_this_process_and_user() {
++        use std::os::fd::AsRawFd;
++        let (a, _b) = std::os::unix::net::UnixStream::pair().unwrap();
++        assert_eq!(peer_uid(a.as_raw_fd()).unwrap(), uid());
++        let pid = peer_pid(a.as_raw_fd()).unwrap();
++        assert_eq!(pid as u32, std::process::id());
++        assert_eq!(
++            pid_path(pid).unwrap().canonicalize().unwrap(),
++            std::env::current_exe().unwrap().canonicalize().unwrap()
++        );
++    }
++}
+diff --git a/src/touch_id.rs b/src/touch_id.rs
+new file mode 100644
+index 0000000..e6d5b5e
+--- /dev/null
++++ b/src/touch_id.rs
+@@ -0,0 +1,216 @@
++//! Approval with Touch ID or an Apple Watch, through LocalAuthentication.
++//!
++//! The session agent asks here before it answers each request. The policy
++//! is `LAPolicyDeviceOwnerAuthenticationWithBiometricsOrWatch`: a finger on
++//! the sensor or a press on a paired watch, never the login password, which
++//! a program that captured it could type. LocalAuthentication ships with
++//! macOS and is loaded with `dlopen` only when an agent starts, so no other
++//! command has it in its process. It needs no entitlement, so it works from
++//! an unsigned command-line program.
++
++use crate::objc::{self, Block, Id, release, send, send2, send3, with_pool};
++use std::ffi::CStr;
++use std::sync::{Mutex, OnceLock, mpsc};
++use std::time::Duration;
++
++/// `LAPolicyDeviceOwnerAuthenticationWithBiometricsOrWatch`, which macOS 15
++/// renamed `...WithBiometricsOrCompanion` with the same value.
++const POLICY: isize = 4;
++
++const LOCAL_AUTHENTICATION: &CStr =
++    c"/System/Library/Frameworks/LocalAuthentication.framework/LocalAuthentication";
++
++/// How long a request that timed out waits for the reply `invalidate`
++/// sends, so that reply cannot reach a later request.
++const LATE_REPLY_WAIT: Duration = Duration::from_secs(5);
++
++/// How a request for approval ended.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum Approval {
++    Approved,
++    /// Cancelled, failed, or not answered in time.
++    Denied,
++    /// Neither Touch ID nor a watch can approve at the moment.
++    Unavailable,
++}
++
++/// Touch ID or an Apple Watch on this Mac.
++pub struct TouchId;
++
++fn load() -> Result<(), String> {
++    static LOADED: OnceLock<Result<(), String>> = OnceLock::new();
++    LOADED
++        // `LOCAL_AUTHENTICATION` is the absolute path of a system framework.
++        .get_or_init(|| unsafe { objc::load(LOCAL_AUTHENTICATION, "LocalAuthentication") })
++        .clone()
++}
++
++/// A new `LAContext`, owned by the caller, who must release it. `load` must
++/// have succeeded, so the class exists.
++unsafe fn new_context() -> Id {
++    unsafe {
++        let allocated: Id = send(objc::class(c"LAContext"), c"alloc");
++        send(allocated, c"init")
++    }
++}
++
++/// Where the reply block sends its result. The block captures nothing, so
++/// the one waiting request leaves its sender here, and `ONE_AT_A_TIME`
++/// keeps a second request from replacing it.
++static REPLY: Mutex<Option<mpsc::Sender<(bool, isize)>>> = Mutex::new(None);
++static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
++
++/// The reply block, built once and kept for the life of the process, as a
++/// global block must be. Its address is kept as a number, which any thread
++/// may share.
++fn reply_block() -> *const Block {
++    static BLOCK: OnceLock<usize> = OnceLock::new();
++    *BLOCK.get_or_init(|| objc::global_block(on_reply) as usize) as *const Block
++}
++
++/// The reply block's body. LocalAuthentication calls it once, on a queue of
++/// its own, with the block, a `BOOL`, and a null or valid `NSError`.
++unsafe extern "C" fn on_reply(_block: *const Block, success: u8, error: Id) {
++    let code = unsafe { objc::error_code(error) };
++    let sender = REPLY.lock().unwrap_or_else(|p| p.into_inner()).take();
++    if let Some(sender) = sender {
++        let _ = sender.send((success != 0, code));
++    }
++}
++
++impl TouchId {
++    /// True when Touch ID or a watch can approve requests on this Mac.
++    pub fn available() -> bool {
++        if load().is_err() {
++            return false;
++        }
++        with_pool(|| unsafe {
++            let context = new_context();
++            // `canEvaluatePolicy:error:` takes an `NSInteger` and an
++            // `NSError **`, which may be null, and returns a one-byte `BOOL`.
++            let ok: u8 = send2(
++                context,
++                c"canEvaluatePolicy:error:",
++                POLICY,
++                std::ptr::null_mut::<Id>(),
++            );
++            release(context);
++            ok != 0
++        })
++    }
++
++    /// Shows the sheet "multipass is trying to <reason>" and waits up to
++    /// `timeout` for a touch. `Unavailable` comes only from asking, before
++    /// any sheet shows, whether Touch ID or a watch can approve. Once a sheet
++    /// has shown, anything but a touch is `Denied`, whatever error code
++    /// LocalAuthentication gives, because a person may have cancelled it,
++    /// and a cancel must never fall back to the passphrase prompt.
++    pub fn approve(reason: &str, timeout: Duration) -> Approval {
++        if load().is_err() {
++            return Approval::Unavailable;
++        }
++        let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|p| p.into_inner());
++        let context = unsafe { new_context() };
++        // `canEvaluatePolicy:error:` takes an `NSInteger` and an `NSError **`,
++        // which may be null, and returns a one-byte `BOOL`.
++        let can: u8 = with_pool(|| unsafe {
++            send2(
++                context,
++                c"canEvaluatePolicy:error:",
++                POLICY,
++                std::ptr::null_mut::<Id>(),
++            )
++        });
++        let approval = if can == 0 {
++            Approval::Unavailable
++        } else {
++            let (sender, receiver) = mpsc::channel();
++            *REPLY.lock().unwrap_or_else(|p| p.into_inner()) = Some(sender);
++            with_pool(|| unsafe {
++                let text = objc::new_string(reason);
++                // `evaluatePolicy:localizedReason:reply:` takes an
++                // `NSInteger`, an `NSString`, which it copies, and a block it
++                // calls once.
++                send3::<isize, Id, *const Block, ()>(
++                    context,
++                    c"evaluatePolicy:localizedReason:reply:",
++                    POLICY,
++                    text,
++                    reply_block(),
++                );
++                release(text);
++            });
++            let reply = receiver.recv_timeout(timeout).ok();
++            if reply.is_none() {
++                // `invalidate` takes nothing and takes the sheet down. Its
++                // reply is drained here, while this request still holds the
++                // slot, so it can never answer a later request.
++                unsafe { send::<()>(context, c"invalidate") };
++                let _ = receiver.recv_timeout(LATE_REPLY_WAIT);
++            }
++            REPLY.lock().unwrap_or_else(|p| p.into_inner()).take();
++            after_sheet(reply)
++        };
++        // The context is ours from `new_context`: `invalidate` ends anything
++        // it still shows, and then it is released.
++        unsafe {
++            send::<()>(context, c"invalidate");
++            release(context);
++        }
++        approval
++    }
++}
++
++/// How a request ends once its sheet has shown: approved only when the reply
++/// says it succeeded, and denied for every failure and for no reply at all.
++fn after_sheet(reply: Option<(bool, isize)>) -> Approval {
++    match reply {
++        Some((true, _)) => Approval::Approved,
++        _ => Approval::Denied,
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    /// A cancel (-2), a system cancel (-4), an app cancel (-9), no companion
++    /// device (-11), and a lockout (-8) all come after a sheet may have
++    /// shown, so none of them may approve or fall back to the passphrase.
++    #[test]
++    fn only_a_touch_approves_once_a_sheet_has_shown() {
++        assert_eq!(after_sheet(Some((true, 0))), Approval::Approved);
++        for code in [-1, -2, -3, -4, -6, -7, -8, -9, -11, -12, -13, -1004] {
++            assert_eq!(after_sheet(Some((false, code))), Approval::Denied, "{code}");
++        }
++        assert_eq!(after_sheet(None), Approval::Denied);
++    }
++
++    /// Calls the reply block's `invoke` through the block LocalAuthentication
++    /// receives, with the arguments it passes, and checks that a failed reply
++    /// arrives as a failure and a successful one as a success. Catches a
++    /// block layout or `invoke` signature that reads `success` from the wrong
++    /// argument.
++    #[test]
++    fn the_reply_block_carries_success_and_failure() {
++        let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|p| p.into_inner());
++        let block = reply_block();
++        for (success, expected) in [(0u8, (false, 0)), (1u8, (true, 0))] {
++            let (sender, receiver) = mpsc::channel();
++            *REPLY.lock().unwrap() = Some(sender);
++            // The block's first field after `isa`, `flags`, and `reserved` is
++            // `invoke`; calling it with the block and a null error is what
++            // LocalAuthentication does for a reply without an error.
++            let invoke = unsafe { (*block).invoke };
++            unsafe { invoke(block, success, std::ptr::null_mut()) };
++            assert_eq!(receiver.recv().unwrap(), expected);
++            assert_eq!(
++                after_sheet(Some(expected)),
++                match success {
++                    0 => Approval::Denied,
++                    _ => Approval::Approved,
++                }
++            );
++        }
++    }
++}
+diff --git a/src/touch_id_other.rs b/src/touch_id_other.rs
+new file mode 100644
+index 0000000..6ec5341
+--- /dev/null
++++ b/src/touch_id_other.rs
+@@ -0,0 +1,24 @@
++//! Off macOS there is no Touch ID or Apple Watch to approve a request, so
++//! no session agent starts, and every command asks for the passphrase.
++
++use std::time::Duration;
++
++/// How a request for approval ended.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum Approval {
++    Approved,
++    Denied,
++    Unavailable,
++}
++
++pub struct TouchId;
++
++impl TouchId {
++    pub fn available() -> bool {
++        false
++    }
++
++    pub fn approve(_reason: &str, _timeout: Duration) -> Approval {
++        Approval::Unavailable
++    }
++}
+diff --git a/src/vault.rs b/src/vault.rs
+index b555ac7..02797e6 100644
+--- a/src/vault.rs
++++ b/src/vault.rs
+@@ -50,6 +50,10 @@ const ROTATE_AFTER_DAYS: u64 = 14;
+ /// another Mac wrote under it before hearing of the rotation still opens.
+ const RETIRED_DAYS: u64 = 90;
+ 
++/// How long a vault key may serve an unlocked session: 21 days from when it
++/// was made, so every Mac's session for one key ends at the same moment.
++pub const SESSION_DAYS: u64 = 21;
++
+ /// How many times `open` lists the package again when a file it was reading
+ /// disappears, because another Mac merged and deleted it.
+ const ATTEMPTS: usize = 3;
+@@ -304,6 +308,9 @@ pub struct Session {
+     typed: Vec<String>,
+     /// What `open` saw that you should know, such as files it left alone.
+     pub warnings: Vec<String>,
++    /// True for a session an agent opened with the keys it holds: it may
++    /// save store files, but never writes a key file.
++    unlocked: bool,
+ }
+ 
+ #[derive(Debug)]
+@@ -324,6 +331,9 @@ pub enum Error {
+     Stopped,
+     /// A file disappeared while `open` read it; `open` lists again.
+     Vanished,
++    /// The package holds a key file or a store file of a generation the
++    /// keys an agent holds do not cover, because a rotation ran elsewhere.
++    Stale,
+ }
+ 
+ impl fmt::Display for Error {
+@@ -347,6 +357,7 @@ impl fmt::Display for Error {
+             #[cfg(test)]
+             Error::Stopped => write!(f, "stopped"),
+             Error::Vanished => write!(f, "the store changed while it was being read"),
++            Error::Stale => write!(f, "the vault key changed"),
+         }
+     }
+ }
+@@ -774,45 +785,21 @@ impl Vault {
+             .expect("a key file opened")
+             .clone();
+ 
+-        let mut stores = Vec::new();
+-        let mut store_files = Vec::new();
+-        for listed in &listing.stores {
+-            let Some((key, _)) = known.get(&listed.generation) else {
+-                warnings.push(format!(
+-                    "left {} alone: no key this passphrase opens is of its generation",
+-                    file_name(&listed.path)
+-                ));
+-                continue;
+-            };
+-            let bytes = fs::read(&listed.path)?;
+-            let mut store = Store::decrypt(&key.text, &bytes)
+-                .map_err(|_| Error::Damaged(file_name(&listed.path)))?;
+-            // Expire before merging, as a save would, so history a file
+-            // still holds past its cutoff cannot join a live entry's.
+-            store.expire(cutoffs(&known, now_ms));
+-            stores.push(store);
+-            store_files.push(listed.path.clone());
++        let (stores, store_files, unkeyed) = read_stores(&listing, &known, now_ms)?;
++        for name in unkeyed {
++            warnings.push(format!(
++                "left {name} alone: no key this passphrase opens is of its generation"
++            ));
+         }
+         if stores.is_empty() {
+             return Err(Error::StillSyncing);
+         }
+ 
+-        let mut moves = Vec::new();
+-        for listed in &listing.moved {
+-            let Some((key, _)) = known.get(&listed.generation) else {
+-                warnings.push(format!(
+-                    "left {} alone: no key this passphrase opens is of its generation",
+-                    file_name(&listed.path)
+-                ));
+-                continue;
+-            };
+-            let bytes = fs::read(&listed.path)?;
+-            let record = age::decrypt(key.text.as_bytes(), &bytes)
+-                .ok()
+-                .and_then(|plain| String::from_utf8(plain).ok())
+-                .and_then(|text| MoveRecord::from_text(&text))
+-                .ok_or_else(|| Error::Damaged(file_name(&listed.path)))?;
+-            moves.push((listed.path.clone(), record));
++        let (moves, unkeyed) = read_moves(&listing, &known)?;
++        for name in unkeyed {
++            warnings.push(format!(
++                "left {name} alone: no key this passphrase opens is of its generation"
++            ));
+         }
+ 
+         let mut typed = vec![passphrase_typed.to_string()];
+@@ -833,10 +820,125 @@ impl Vault {
+             passphrase,
+             typed,
+             warnings,
++            unlocked: false,
++        })
++    }
++
++    /// Opens the package with the keys an agent holds, the text
++    /// `Session::agent_keys` gave it, without the passphrase. Fails with
++    /// `Error::Stale` when the package holds a key file or a store file the
++    /// keys do not cover. It changes nothing on disk, and the session it
++    /// returns saves store files but never rotates.
++    pub fn open_with_keys(&self, keys: &str, now_ms: u64) -> Result<Session> {
++        let file = KeyFile::from_text(keys).ok_or(Error::Stale)?;
++        let mut attempt = 0;
++        loop {
++            attempt += 1;
++            match self.try_open_with_keys(&file, now_ms) {
++                Err(Error::Vanished) if attempt < ATTEMPTS => continue,
++                result => return result,
++            }
++        }
++    }
++
++    fn try_open_with_keys(&self, file: &KeyFile, now_ms: u64) -> Result<Session> {
++        let listing = self.list()?;
++        let current = &file.key;
++        let ours = |l: &Listed| l.generation == current.generation;
++        if !listing.keys.iter().any(ours) || !listing.keys.iter().all(ours) {
++            return Err(Error::Stale);
++        }
++        let now = seconds(now_ms);
++        let mut known: BTreeMap<String, (Key, Option<u64>)> = file
++            .retired
++            .iter()
++            .filter(|r| r.retired + RETIRED_DAYS * DAY >= now)
++            .map(|r| (r.key.generation.clone(), (r.key.clone(), Some(r.retired))))
++            .collect();
++        known.insert(current.generation.clone(), (current.clone(), None));
++        let (stores, store_files, unkeyed) = read_stores(&listing, &known, now_ms)?;
++        if !unkeyed.is_empty() {
++            return Err(Error::Stale);
++        }
++        if stores.is_empty() {
++            return Err(Error::StillSyncing);
++        }
++        let (moves, unkeyed) = read_moves(&listing, &known)?;
++        if !unkeyed.is_empty() {
++            return Err(Error::Stale);
++        }
++        let mut store = Store::merge(&stores);
++        store.expire(cutoffs(&known, now_ms));
++        Ok(Session {
++            store,
++            current: current.clone(),
++            known,
++            key_files: listing.keys.into_iter().map(|l| l.path).collect(),
++            store_files,
++            moves,
++            passphrase: None,
++            typed: Vec::new(),
++            warnings: Vec::new(),
++            unlocked: true,
+         })
+     }
+ }
+ 
++/// Move records with the paths they were read from.
++type Moves = Vec<(PathBuf, MoveRecord)>;
++
++/// Decrypts every move record in `listing` that one of the `known` keys
++/// opens. Returns the records with their paths, and the names of the
++/// records no known key is of.
++fn read_moves(
++    listing: &Listing,
++    known: &BTreeMap<String, (Key, Option<u64>)>,
++) -> Result<(Moves, Vec<String>)> {
++    let mut moves = Vec::new();
++    let mut unkeyed = Vec::new();
++    for listed in &listing.moved {
++        let Some((key, _)) = known.get(&listed.generation) else {
++            unkeyed.push(file_name(&listed.path));
++            continue;
++        };
++        let bytes = fs::read(&listed.path)?;
++        let record = age::decrypt(key.text.as_bytes(), &bytes)
++            .ok()
++            .and_then(|plain| String::from_utf8(plain).ok())
++            .and_then(|text| MoveRecord::from_text(&text))
++            .ok_or_else(|| Error::Damaged(file_name(&listed.path)))?;
++        moves.push((listed.path.clone(), record));
++    }
++    Ok((moves, unkeyed))
++}
++
++/// Decrypts every store file in `listing` that one of the `known` keys
++/// opens, expiring each before it is merged, as a save would, so history a
++/// file still holds past its cutoff cannot join a live entry's. Returns the
++/// stores, their paths, and the names of the files no known key is of.
++fn read_stores(
++    listing: &Listing,
++    known: &BTreeMap<String, (Key, Option<u64>)>,
++    now_ms: u64,
++) -> Result<(Vec<Store>, Vec<PathBuf>, Vec<String>)> {
++    let mut stores = Vec::new();
++    let mut paths = Vec::new();
++    let mut unkeyed = Vec::new();
++    for listed in &listing.stores {
++        let Some((key, _)) = known.get(&listed.generation) else {
++            unkeyed.push(file_name(&listed.path));
++            continue;
++        };
++        let bytes = fs::read(&listed.path)?;
++        let mut store = Store::decrypt(&key.text, &bytes)
++            .map_err(|_| Error::Damaged(file_name(&listed.path)))?;
++        store.expire(cutoffs(known, now_ms));
++        stores.push(store);
++        paths.push(listed.path.clone());
++    }
++    Ok((stores, paths, unkeyed))
++}
++
+ /// Decrypts an old single-file store with the first of `passphrases` that
+ /// opens it, returning the store and its text, or `None` when none does.
+ fn open_old(path: &Path, bytes: &[u8], passphrases: &[String]) -> Result<Option<(Store, String)>> {
+@@ -947,6 +1049,7 @@ impl Session {
+             passphrase: None,
+             typed: Vec::new(),
+             warnings: Vec::new(),
++            unlocked: false,
+         })
+     }
+ 
+@@ -955,10 +1058,52 @@ impl Session {
+     pub fn writable(&self) -> Result<()> {
+         match self.passphrase {
+             Some(_) => Ok(()),
++            None if self.unlocked => Ok(()),
+             None => Err(Error::ReadOnly),
+         }
+     }
+ 
++    /// True when an old single-file store that a move record names has
++    /// changed since the record, because a Mac on an older multipass saved
++    /// to it. Only a prompt merges that change, so a session an agent opened
++    /// must not answer from the package alone. The hash is of ciphertext, so
++    /// comparing it is public.
++    pub fn old_file_changed(&self, vault: &Vault) -> bool {
++        self.moves.iter().any(
++            |(_, record)| match fs::read(vault.parent().join(&record.file)) {
++                Ok(bytes) => crypto::sha256::hex_digest(&bytes) != record.sha256,
++                Err(_) => false,
++            },
++        )
++    }
++
++    /// The keys an agent holds to serve this store: the current vault key
++    /// and the keys it replaced in the last 90 days, as a key file's text.
++    /// It holds keys, so it goes only to a child the command started.
++    pub fn agent_keys(&self) -> String {
++        let retired = self
++            .known
++            .values()
++            .filter(|(key, _)| key.generation != self.current.generation)
++            .map(|(key, at)| Retired {
++                key: key.clone(),
++                retired: at.unwrap_or(self.current.created),
++            })
++            .collect();
++        KeyFile {
++            key: self.current.clone(),
++            passphrase_set: self.passphrase.as_ref().map_or(0, |(_, set)| *set),
++            retired,
++        }
++        .to_text()
++    }
++
++    /// When an agent holding this session's key must end, in Unix seconds:
++    /// the key's creation time plus `SESSION_DAYS`.
++    pub fn session_deadline(&self) -> u64 {
++        self.current.created + SESSION_DAYS * DAY
++    }
++
+     fn cutoffs(&self, now_ms: u64) -> Cutoffs {
+         cutoffs(&self.known, now_ms)
+     }
+@@ -2035,6 +2180,30 @@ mod tests {
+         (session, matches!(opened, Opened::Moved))
+     }
+ 
++    /// A session an agent opens with its keys reads the move record, and
++    /// says when an older Mac has saved to the old file since, which only a
++    /// prompt merges. Catches an agent that answers from the package alone
++    /// while the old file holds a newer password.
++    #[test]
++    fn a_session_opened_with_keys_sees_a_changed_old_file() {
++        let (vault, old) = beside_old("multipass 2\nx\n\tsecret one\n");
++        let (session, moved) = open_or_move(&vault, "pass", T0);
++        assert!(moved);
++        let keys = session.agent_keys();
++        let agent_vault = Vault::new(vault.path(), FAST);
++        let unlocked = agent_vault.open_with_keys(&keys, T0 + S).unwrap();
++        assert!(!unlocked.old_file_changed(&agent_vault));
++
++        save_old(&old, "pass", "multipass 2\nx\n\tsecret two\n", T0 + 2 * S);
++        let unlocked = agent_vault.open_with_keys(&keys, T0 + 3 * S).unwrap();
++        assert!(unlocked.old_file_changed(&agent_vault));
++
++        // Once the old file is gone, as after another Mac retired it, there
++        // is nothing left to merge.
++        fs::remove_file(&old).unwrap();
++        assert!(!unlocked.old_file_changed(&agent_vault));
++    }
++
+     #[test]
+     fn moves_stores_of_every_format_into_a_package_and_keeps_the_old_file() {
+         for text in [
