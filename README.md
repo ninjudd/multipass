@@ -4,7 +4,7 @@ multipass is a minimal password manager with no dependencies and no sharing. It 
 
 Use it beside a full password manager, not instead of one. Keep shared and everyday logins in something like 1Password. Keep the few secrets you never want on someone else's server in multipass, such as recovery codes, seed phrases, and the master password itself.
 
-Every line of multipass is in this repository, cryptography included: about 1,000 lines of cryptography and 900 of everything else, small enough to read in a day. It uses no third-party crates, so the only code you trust beyond this repository is the Rust toolchain and its standard library.
+Every line of multipass is in this repository, cryptography included: about 1,000 lines of cryptography and 900 of everything else, small enough to read in a day. It uses no third-party crates, so the only code you trust beyond this repository is the Rust toolchain, its standard library, and, for `--clip`, macOS's own AppKit framework.
 
 > [!WARNING]
 > multipass is new and has not been audited. Its cryptography is written by hand and checked against the official test vectors and against files from the reference age implementation, but no one outside the project has reviewed it.
@@ -28,7 +28,7 @@ cargo install --path .
 ```sh
 multipass init                                   # create ~/.multipass/store.age
 multipass add github.com --username octocat      # prompts for the secret
-multipass get github.com | pbcopy                # copies exactly the secret
+multipass get github.com --clip                  # copies the secret for 30 seconds
 multipass get github.com --field username
 multipass list
 multipass rm github.com
@@ -37,13 +37,15 @@ multipass passwd                                 # change the passphrase
 
 Every command asks for the passphrase. To use a different file, set `MULTIPASS_STORE` or pass `--store`.
 
+`--clip` on `get` and `otp` copies the value instead of printing it, and clears the clipboard 30 seconds later, unless you have copied something else since. It marks the value as concealed and as this Mac only, so Universal Clipboard does not send it to your other Apple devices, and clipboard-history apps that honor the marking skip it. `--clip` works only on macOS. Piping to `pbcopy` also works, but `pbcopy` cannot mark the value, so it syncs and lands in clipboard history.
+
 ## Keep one-time passwords
 
 An entry can hold a one-time password setup key beside its secret, username, and notes, and `otp` prints the entry's current code. When a site shows a QR code for an authenticator app, it usually offers the setup key as text too: either a base32 key such as `JBSW Y3DP EHPK 3PXP`, or an `otpauth://totp/` URI.
 
 ```sh
 printf 'JBSW Y3DP EHPK 3PXP' | multipass otp github.com --set   # or paste it at the prompt
-multipass otp github.com | pbcopy                             # copies exactly the code
+multipass otp github.com --clip                               # copies the code for 30 seconds
 multipass get github.com --field otp                          # the stored otpauth:// URI
 multipass otp github.com --clear                              # remove the one-time password
 ```
@@ -91,7 +93,6 @@ If you lose the passphrase, no one can recover the store. That is the point.
 
 - **Export to 1Password.** Send an entry to 1Password with `op item create`, and delete it locally once it lands.
 - **Session unlock.** Unlock once per session, the way `ssh-agent` does, instead of asking for the passphrase on every command.
-- **Clipboard.** Copy a secret to the clipboard directly, and clear the clipboard after 30 seconds.
 - **Memory wiping.** Wipe secrets from memory once a command is done.
 - **Echo after Ctrl-C.** Restore terminal echo when you press Ctrl-C at a passphrase prompt. Until then, if your terminal stops showing what you type, run `stty echo` or `reset`.
 
