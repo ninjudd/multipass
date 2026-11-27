@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>multipass</title>
-<meta name="description" content="A minimal password manager for the few secrets you never want on someone else's server: one passphrase, one age file, no dependencies.">
+<meta name="description" content="A minimal password manager for the few secrets you never want on someone else's server: one passphrase, a few age-encrypted files, no dependencies.">
 <style>
   :root {
     color-scheme: light dark;
@@ -62,16 +62,16 @@
 
   <h2>What it is</h2>
   <ul>
-    <li><strong>One passphrase, one file.</strong> Your secrets, and the setup keys of your one-time passwords, live in one file encrypted with <a href="https://age-encryption.org">age</a> under a passphrase. There are no accounts and no server.</li>
+    <li><strong>One passphrase, one small folder.</strong> Your secrets, and the setup keys of your one-time passwords, live in a small folder of files encrypted with <a href="https://age-encryption.org">age</a> and unlocked by a passphrase you choose. There are no accounts and no server.</li>
     <li><strong>No dependencies.</strong> Every line is in the repository, cryptography included, small enough to read in a day. No third-party crates, so a build from source trusts only the Rust toolchain, and GitHub to serve the tagged source. The prebuilt binary also trusts GitHub's hosted macOS runner, with its Xcode linker and <code>lipo</code>, the pinned Rust toolchain, and GitHub's and Sigstore's signing of its attestation, which <code>install.sh verify</code> lets you replace with your own build. The one-liner above also trusts whoever controls this domain, its registrar account, and its Vercel team, which the commands below avoid.</li>
-    <li><strong>Recoverable without it.</strong> The store is a standard age file, so <code>age -d</code> prints it as plain text even if multipass disappears.</li>
+    <li><strong>Recoverable without it.</strong> Every file in the store is an ordinary age file, so two <code>age -d</code> commands print everything as plain text even if multipass disappears.</li>
   </ul>
 
   <h2>Install without this domain</h2>
   <p>This domain only redirects to releases on GitHub: <code>/install.sh</code> to the newest, and <code>/v&lt;version&gt;/install.sh</code> to that release. To skip it, use GitHub's URL directly:</p>
   <pre><code>curl -fsSL https://github.com/ninjudd/multipass/releases/latest/download/install.sh | bash</code></pre>
   <p>To pin a release, so a later one cannot change what you run, name its tag and its version:</p>
-  <pre><code>curl -fsSL https://github.com/ninjudd/multipass/releases/download/v0.1.0/install.sh | MULTIPASS_VERSION=0.1.0 bash</code></pre>
+  <pre><code>curl -fsSL https://github.com/ninjudd/multipass/releases/download/v0.2.0/install.sh | MULTIPASS_VERSION=0.2.0 bash</code></pre>
   <p>To check the installer before you run it, download it with its attestation bundle and verify it:</p>
   <pre><code>curl -fsSLO https://github.com/ninjudd/multipass/releases/latest/download/install.sh
 curl -fsSLO https://github.com/ninjudd/multipass/releases/latest/download/multipass.sigstore.json
