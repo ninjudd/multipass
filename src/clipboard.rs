@@ -9,7 +9,10 @@
 //! has to stay in memory to decide whether it is still there.
 //!
 //! AppKit ships with macOS, so it counts like the standard library under the
-//! no-dependencies rule. This module holds the program's only `unsafe` code.
+//! no-dependencies rule. The binary does not link it: this module loads it
+//! with `dlopen` the first time a command touches the clipboard, so every
+//! other command runs without AppKit in the process. This module holds the
+//! program's only `unsafe` code.
 
 use std::time::Duration;
 
@@ -72,7 +75,8 @@ fn spawn_clearer(change_count: isize) -> std::io::Result<()> {
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use std::ffi::{CStr, c_char, c_void};
+    use std::ffi::{CStr, c_char, c_int, c_void};
+    use std::sync::OnceLock;
 
     type Id = *mut c_void;
     type Sel = *mut c_void;
@@ -84,8 +88,14 @@ mod macos {
     const PLAIN_TEXT: &str = "public.utf8-plain-text";
     const CONCEALED: &str = "org.nspasteboard.ConcealedType";
 
-    #[link(name = "AppKit", kind = "framework")]
-    unsafe extern "C" {}
+    const APPKIT: &CStr = c"/System/Library/Frameworks/AppKit.framework/AppKit";
+    const RTLD_LAZY: c_int = 1;
+
+    // From libSystem, which every macOS program links.
+    unsafe extern "C" {
+        fn dlopen(path: *const c_char, mode: c_int) -> *mut c_void;
+        fn dlerror() -> *mut c_char;
+    }
 
     #[link(name = "objc")]
     unsafe extern "C" {
@@ -121,6 +131,32 @@ mod macos {
         let f: unsafe extern "C" fn(Id, Sel, A, B, C) -> R =
             unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
         unsafe { f(receiver, sel_registerName(selector.as_ptr()), a, b, c) }
+    }
+
+    /// Loads AppKit into the process once, so that `NSPasteboard` exists.
+    /// The handle is never closed: AppKit cannot be unloaded once loaded.
+    fn load_appkit() -> Result<(), String> {
+        static LOADED: OnceLock<Result<(), String>> = OnceLock::new();
+        LOADED
+            .get_or_init(|| {
+                // `dlopen` takes a NUL-terminated path, and `dlerror` returns
+                // either null or a NUL-terminated message, valid until the
+                // next `dl` call on this thread, so it is copied at once.
+                let handle = unsafe { dlopen(APPKIT.as_ptr(), RTLD_LAZY) };
+                if !handle.is_null() {
+                    return Ok(());
+                }
+                let reason = unsafe {
+                    let message = dlerror();
+                    if message.is_null() {
+                        "unknown error".to_string()
+                    } else {
+                        CStr::from_ptr(message).to_string_lossy().into_owned()
+                    }
+                };
+                Err(format!("could not load AppKit for the clipboard: {reason}"))
+            })
+            .clone()
     }
 
     fn class(name: &CStr) -> Id {
@@ -164,6 +200,7 @@ mod macos {
 
     impl Pasteboard {
         pub fn general() -> Result<Self, String> {
+            load_appkit()?;
             let handle: Id =
                 with_pool(|| unsafe { send(class(c"NSPasteboard"), c"generalPasteboard") });
             if handle.is_null() {
@@ -179,6 +216,7 @@ mod macos {
         /// A new pasteboard that no other program reads, for tests.
         #[cfg(test)]
         pub fn private() -> Self {
+            load_appkit().unwrap();
             let handle: Id = unsafe {
                 let made: Id = send(class(c"NSPasteboard"), c"pasteboardWithUniqueName");
                 send(made, c"retain")
