@@ -1,0 +1,51 @@
+{
+ "version": 1,
+ "name": "Ignore Claude Code state",
+ "project": "",
+ "pr": {
+  "repo": "ninjudd/multipass",
+  "number": 16,
+  "title": "Ignore the .claude directory",
+  "head": "4cb1cbcd6ed1f53b057c4752cfcb521ea1c92c58",
+  "headRef": "ignore-claude-dir",
+  "base": "bb6115c8013391f0079e9036b9142e0835eddeb6",
+  "baseRef": "main"
+ },
+ "overview": {
+  "summary": [
+   "Claude Code, the coding agent that works on this repository, keeps per-session state in a <code>.claude/</code> directory at the repository root. When an agent starts an isolated task, Claude Code creates a Git worktree, a second working copy of the repository, under <code>.claude/worktrees/</code>. Git sees that directory as new, untracked content, so <code>git status</code> lists <code>.claude/</code> in every checkout an agent has touched.",
+   "This pull request adds one line, <code>/.claude/*</code>, to <code>.gitignore</code>, so that Git ignores everything inside the <code>.claude</code> directory at the repository root. Nothing under <code>.claude/</code> is tracked on <code>main</code>, so the line hides no committed file. The repository's shared agent instructions live in <code>AGENTS.md</code> at the root, outside the ignored directory.",
+   "The pattern names the directory's contents rather than the directory itself, so that the repository can later share one Claude Code setting, such as <code>.claude/settings.json</code>, by adding a <code>!/.claude/settings.json</code> line. The first head used <code>/.claude/</code>, which would have blocked that line. The review flagged it, and the second commit changed the pattern."
+  ],
+  "cards": []
+ },
+ "groups": [
+  {
+   "id": "ignore",
+   "title": "Git ignores the contents of .claude",
+   "kicker": "One new ignore pattern for Claude Code's per-session state",
+   "intro": [
+    "<code>.gitignore</code> lists the paths Git leaves out of <code>git status</code> and <code>git add</code>. It held one pattern, <code>/target</code>, for Cargo's build output. The new pattern <code>/.claude/*</code> matches every entry inside the <code>.claude</code> directory at the repository root, because of the leading slash, including the <code>worktrees</code> directory and files whose names start with a dot.",
+    "A pattern that names a directory itself, such as <code>/.claude/</code>, makes Git skip the directory without reading it, so a later <code>!</code> line, which re-includes a path, cannot bring back a file inside it. Naming the contents instead keeps Git reading the directory, so such a line works."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": ".gitignore",
+     "note": "Adds <code>/.claude/*</code> after the existing <code>/target</code> pattern.",
+     "checks": [
+      {
+       "kind": "verify",
+       "text": "Nothing under <code>.claude/</code> is tracked on <code>main</code>: <code>git ls-files .claude</code> prints nothing, so the pattern hides no committed file."
+      },
+      {
+       "kind": "verify",
+       "line": 2,
+       "text": "The description's Testing steps hold at this head, run in a scratch copy: <code>git status --short</code> prints nothing with <code>.claude/probe</code> and <code>.claude/worktrees/</code> present, and with <code>!/.claude/settings.json</code> appended, <code>git status</code> lists <code>?? .claude/settings.json</code> and <code>git check-ignore -v</code> names line 3's negation."
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}
