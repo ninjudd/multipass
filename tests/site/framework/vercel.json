@@ -1,0 +1,38 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "redirects": [
+    {
+      "source": "/:path*",
+      "has": [
+        {
+          "type": "host",
+          "value": "www.getmultipass.dev"
+        }
+      ],
+      "destination": "https://getmultipass.dev/:path*",
+      "permanent": true
+    },
+    {
+      "source": "/install.sh",
+      "destination": "https://github.com/ninjudd/multipass/releases/latest/download/install.sh",
+      "permanent": false
+    },
+    {
+      "source": "/:tag(v[0-9]+\\.[0-9]+\\.[0-9]+[0-9A-Za-z.-]*)/install.sh",
+      "destination": "https://github.com/ninjudd/multipass/releases/download/:tag/install.sh",
+      "permanent": false
+    }
+  ],
+  "headers": [
+    {
+      "source": "/(.*)install.sh",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "no-store"
+        }
+      ]
+    }
+  ],
+  "framework": "nextjs"
+}

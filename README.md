@@ -20,9 +20,22 @@ Every line of multipass is in this repository, cryptography included: about 1,00
 
 ## Install
 
+Install from a checkout with `install.sh`. It needs [Rust](https://rustup.rs), builds the checkout with `cargo build --release --locked --offline`, which takes a few seconds because multipass has no dependencies, and installs the binary as `~/.local/bin/multipass`:
+
 ```sh
-cargo install --path .
+git clone https://github.com/ninjudd/multipass
+cd multipass
+./install.sh
 ```
+
+The installer prints one row for each step. When `~/.local/bin` is not on your `PATH`, it prints the line to add to your shell's startup file rather than editing the file itself, and when another `multipass` comes first on your `PATH`, such as Canonical's Multipass for Ubuntu virtual machines, it says so. It records what it installed in `~/.local/share/multipass-install/receipt`, and it never touches your stores or `~/.multipass`.
+
+```sh
+./install.sh status      # what is installed, and whether it matches the checkout
+./install.sh uninstall   # remove the binary the installer wrote, keeping your stores
+```
+
+To upgrade, pull the checkout and run `./install.sh` again. A rerun that would install the same bytes leaves the file alone. For a copy the installer installed from a release, `multipass upgrade` downloads the newest release's installer with `/usr/bin/curl`, checks its attestation with `gh` when `gh` is installed, and runs it; `multipass upgrade 0.2.0` installs a given release, and `multipass upgrade --check` only says whether a newer release is out. `upgrade` is the only command that reaches the network, and only when you type it. `uninstall` removes only a file that still matches the receipt, so it never deletes a `multipass` you replaced by hand. Set `MULTIPASS_BIN_DIR` to install somewhere other than `~/.local/bin`; a later rerun installs to the same place without it.
 
 ## Use
 
