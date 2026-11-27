@@ -1,0 +1,97 @@
+{
+ "version": 1,
+ "name": "Installer plan follow-ups",
+ "project": "installer",
+ "pr": {
+  "repo": "ninjudd/multipass",
+  "number": 17,
+  "title": "Leave the downgrade warning to the vault-key plan, and harden CI's workflow",
+  "head": "5afeab8925549df65e87b9ce7f7ded946cf0d9f7",
+  "headRef": "installer-downgrade-note",
+  "base": "9386fb5e2ad9aa3a31dd7597f6a1e04df18412ca",
+  "baseRef": "main"
+ },
+ "overview": {
+  "summary": [
+   "multipass is a password manager kept in one age file, and its installer plan, merged in #15, describes how one command will install it from a tagged release. The reviews of #15 left two things for later, and this pull request takes both.",
+   "<ol><li><b>The downgrade warning moves to the plan that causes it.</b> The installer plan asked the installer's change to add a README warning against going back to a release from before the vault key. The vault key is a separate plan, still in #11, that moves the store from one file into a folder of files, called a package. The installer lands while no store has moved, and the README describes only what is built, so the warning now belongs to the vault-key change. The installer plan drops it and says where it lives.</li><li><b>CI's workflow gets the hardening the release workflow will have.</b> <code>ci.yml</code> now gives the job a read-only token, pins <code>actions/checkout</code> to a commit, and installs Rust with the runner's own <code>rustup</code> in place of a third-party action. The four checks CI runs do not change.</li></ol>",
+   "The Projector review of <code>5afeab8</code> found nothing to fix. CI's <code>test</code> check passed at this head."
+  ],
+  "cards": [
+   {
+    "id": "terms",
+    "title": "Terms on this page",
+    "html": "<ul class=\"tight\"><li><b>Vault key</b>: the plan in #11 that has the passphrase unlock a random key, and moves the store into a package.</li><li><b>Package</b>: <code>~/.multipass/store.multipass</code>, the folder of files that replaces <code>store.age</code>.</li><li><b>Pinning by SHA</b>: naming an action by the full commit it runs, so a tag moved later cannot change what runs.</li></ul>"
+   }
+  ]
+ },
+ "groups": [
+  {
+   "id": "plan",
+   "title": "The downgrade warning belongs to the vault-key plan",
+   "kicker": "The installer plan stops asking its README change for a warning that only the vault key needs.",
+   "intro": [
+    "Going back to an older multipass is safe until a store moves into a package. Only the vault-key change moves a store, so only its README change needs to warn against going back. The installer plan's <code>README.md</code> row in § 2.8 drops the warning, and § 2.7 says the vault-key plan's README row carries it.",
+    "The second commit also brings § 2.7 in line with how the vault-key plan moves a store. The old <code>store.age</code> stays beside the package until it has gone 30 days unchanged, and the package merges any change made to it. Only after that does an older multipass find no store at its default path."
+   ],
+   "checks": [
+    {
+     "kind": "context",
+     "text": "The vault-key plan is not on <code>main</code> yet. Until #11 merges, the warning lives only in that pull request."
+    }
+   ],
+   "files": [
+    {
+     "path": "docs/projects/installer/readme.md",
+     "note": "§ 2.7 sends the warning to the vault-key plan and describes the 30-day retirement of the old file; § 2.8's README row drops the warning.",
+     "collapsed": false,
+     "checks": [
+      {
+       "kind": "verify",
+       "line": 166,
+       "text": "At #11's head <code>4fd32f8</code>, the vault-key plan's <code>README.md</code> row warns, beside the install and upgrade instructions, not to go back to a release from before the vault key once the store has moved. It gives the same 30-day reason and the same failure this paragraph states. Checked by reading that plan at that head."
+      },
+      {
+       "kind": "verify",
+       "line": 177,
+       "text": "No other line of the installer plan mentions the warning, and this row still reads as a complete sentence without it. Checked with a search of the plan for the warning's wording, and <code>project check</code> reports the plans valid."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "ci",
+   "title": "CI runs with a read-only token and pinned actions",
+   "kicker": "ci.yml meets the standard the installer plan sets for the release workflow.",
+   "intro": [
+    "The installer plan's release workflow uses only GitHub's own actions, each pinned by full commit SHA, and grants each job only the permissions it needs. CI now does the same. It checks out with <code>actions/checkout</code> at the <code>v4.4.0</code> commit, keeps the job token out of the checkout's git config, and installs Rust with <code>rustup</code>, which the macOS runner image ships.",
+    "The toolchain is still the latest stable with <code>rustfmt</code> and <code>clippy</code>, as the third-party action installed before. The dependency check, <code>cargo fmt --check</code>, <code>cargo clippy --all-targets -- -D warnings</code>, and <code>cargo test</code> follow it unchanged."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": ".github/workflows/ci.yml",
+     "note": "Adds a read-only token, pins the checkout by commit, and replaces the toolchain action with a <code>rustup</code> step.",
+     "checks": [
+      {
+       "kind": "verify",
+       "line": 11,
+       "text": "The only job checks out and builds, so <code>contents: read</code> is all it needs. The triggers, a push to <code>main</code> and any pull request, are unchanged."
+      },
+      {
+       "kind": "verify",
+       "line": 17,
+       "text": "<code>11d5960a326750d5838078e36cf38b85af677262</code> is a commit in <code>actions/checkout</code>, and the <code>v4.4.0</code> tag points at that commit. Checked through GitHub's API for the commit and the tag."
+      },
+      {
+       "kind": "verify",
+       "line": 24,
+       "text": "CI's log at this head shows <code>rustup</code> syncing stable with <code>clippy</code> and <code>rustfmt</code> installed, and every later step passing. The step runs under <code>bash -e</code>, so a failed install fails the job."
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}
