@@ -67,7 +67,7 @@ retired 7c1e9a3b5d2f4e6a8c0b1d3f5a7c9e2b 1761200000 1763000000 Qm9vYmFyYmF6cXV4Z
 7. When it did not rotate, and it merged more than one store file, it compacts: it writes one new store file under the current key, holding the merged store, and then deletes the store files it read.
 8. The command runs on the merged store.
 
-When a rotation or compaction cannot write to the package, as in a read-only backup, a command that only reads warns `could not write to <package>: …` and runs on the merged store, and a command that saves fails with that error before it asks for anything more.
+When a rotation, a compaction, or the merge of a change to the old file (§ 2.6) cannot write to the package, as in a read-only backup, a command that only reads warns `could not write to <package>: …` and runs on the merged store, and a command that saves fails with that error before it asks for anything more.
 
 A merge or a compaction deletes only files it read, and only after its own new file is durable. A file another Mac writes meanwhile was not read, so it survives. When a deletion reaches another Mac before the file that replaced it, that Mac briefly sees fewer entries, never wrong ones, and they come back when the newer file arrives, because a merge only adds what it finds.
 
