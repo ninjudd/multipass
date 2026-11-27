@@ -964,7 +964,10 @@ fn open_old(path: &Path, bytes: &[u8], passphrases: &[String]) -> Result<Option<
 /// the stamp of each change, so the whole file merges as it is. Formats 1
 /// and 2 carry none, so each entry that differs from the snapshot is stamped
 /// with the file's modification time, `saved`, when the older multipass
-/// wrote it.
+/// wrote it. A Mac that never got the record of an earlier save diffs
+/// against an older snapshot, so it stamps that earlier save's changes with
+/// this save's time too, and can revert an edit made in the package between
+/// the two saves.
 fn old_file_changes(changed: &Store, text: &str, snapshot: &Store, saved: SystemTime) -> Store {
     if !text.starts_with("multipass 1\n") && !text.starts_with("multipass 2\n") {
         return changed.clone();

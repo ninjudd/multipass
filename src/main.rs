@@ -871,7 +871,15 @@ fn open_with(
     settle: Settle,
     ask: &mut dyn FnMut(Ask) -> io::Result<Option<String>>,
 ) -> Result<Session> {
-    let (mut session, opened) = vault.open_or_move(ask, now).map_err(|e| e.to_string())?;
+    // Only a settle merges the old file, so an open that skips it leaves
+    // the old file's passphrase unasked rather than ask for nothing.
+    let mut ask = |question: Ask| match question {
+        Ask::OldFile(_) if settle == Settle::Skip => Ok(None),
+        question => ask(question),
+    };
+    let (mut session, opened) = vault
+        .open_or_move(&mut ask, now)
+        .map_err(|e| e.to_string())?;
     let old = vault.old().unwrap_or(vault.path()).display();
     match opened {
         Opened::Package => {}
@@ -1687,5 +1695,51 @@ mod tests {
         assert_eq!(new.package, root.join("other"));
         assert_eq!(new.old, None);
         assert!(!new.named_old);
+    }
+
+    /// `passwd` and `rekey` neither rotate first nor merge the old file, so
+    /// they never ask for its passphrase; a command that settles does.
+    #[test]
+    fn asks_for_an_old_files_passphrase_only_when_the_open_settles() {
+        use std::cell::Cell;
+        use std::fs;
+
+        let root =
+            std::env::temp_dir().join(format!("multipass-main-oldask-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let old = root.join("store.age");
+        let write_old = |text: &str| {
+            fs::write(&old, age::encrypt(b"pass", text.as_bytes(), 10).unwrap()).unwrap();
+        };
+        write_old("multipass 2\nx\n\tsecret 1\n");
+        let vault = Vault::new(root.join("store.multipass"), 10).with_old(Some(old.clone()));
+        let now = 1_764_000_000_000;
+        let mut first = |_: Ask| -> io::Result<Option<String>> { Ok(Some("pass".into())) };
+        let mut session = open_with(&vault, now, Settle::Try, &mut first).unwrap();
+        session
+            .rotate(&vault, now + 1000, Some("new".into()))
+            .unwrap();
+        // An older multipass saves to the old file under the earlier passphrase.
+        write_old("multipass 2\nx\n\tsecret 1\nz\n\tsecret 3\n");
+
+        let asked = Cell::new(false);
+        let mut ask = |question: Ask| -> io::Result<Option<String>> {
+            Ok(Some(match question {
+                Ask::OldFile(_) => {
+                    asked.set(true);
+                    "pass".into()
+                }
+                _ => "new".into(),
+            }))
+        };
+        open_with(&vault, now + 2000, Settle::Skip, &mut ask).unwrap();
+        let asked_unsettled = asked.get();
+        let settled = open_with(&vault, now + 3000, Settle::Must, &mut ask).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        assert!(!asked_unsettled, "an open that does not settle asked");
+        assert!(asked.get(), "an open that settles did not ask");
+        assert!(settled.store.get("z").is_some());
     }
 }
