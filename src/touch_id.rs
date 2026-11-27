@@ -20,10 +20,9 @@ const POLICY: isize = 4;
 const LOCAL_AUTHENTICATION: &CStr =
     c"/System/Library/Frameworks/LocalAuthentication.framework/LocalAuthentication";
 
-/// The `LAError` codes that mean nobody can approve right now, rather than
-/// that someone declined: no biometry or it is locked out, not enrolled,
-/// not paired or disconnected, or no watch in reach.
-const UNAVAILABLE: [isize; 6] = [-6, -7, -8, -11, -12, -13];
+/// How long a request that timed out waits for the reply `invalidate`
+/// sends, so that reply cannot reach a later request.
+const LATE_REPLY_WAIT: Duration = Duration::from_secs(5);
 
 /// How a request for approval ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,45 +91,89 @@ impl TouchId {
     }
 
     /// Shows the sheet "multipass is trying to <reason>" and waits up to
-    /// `timeout` for a touch.
+    /// `timeout` for a touch. `Unavailable` comes only from asking, before
+    /// any sheet shows, whether Touch ID or a watch can approve. Once a sheet
+    /// has shown, anything but a touch is `Denied`, whatever error code
+    /// LocalAuthentication gives, because a person may have cancelled it,
+    /// and a cancel must never fall back to the passphrase prompt.
     pub fn approve(reason: &str, timeout: Duration) -> Approval {
         if load().is_err() {
             return Approval::Unavailable;
         }
         let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|p| p.into_inner());
-        let (sender, receiver) = mpsc::channel();
-        *REPLY.lock().unwrap_or_else(|p| p.into_inner()) = Some(sender);
         let context = unsafe { new_context() };
-        with_pool(|| unsafe {
-            let text = objc::new_string(reason);
-            // `evaluatePolicy:localizedReason:reply:` takes an `NSInteger`,
-            // an `NSString`, which it copies, and a block it calls once.
-            send3::<isize, Id, *const Block, ()>(
+        // `canEvaluatePolicy:error:` takes an `NSInteger` and an `NSError **`,
+        // which may be null, and returns a one-byte `BOOL`.
+        let can: u8 = with_pool(|| unsafe {
+            send2(
                 context,
-                c"evaluatePolicy:localizedReason:reply:",
+                c"canEvaluatePolicy:error:",
                 POLICY,
-                text,
-                objc::global_block(on_reply),
-            );
-            release(text);
+                std::ptr::null_mut::<Id>(),
+            )
         });
-        let approval = match receiver.recv_timeout(timeout) {
-            Ok((true, _)) => Approval::Approved,
-            Ok((false, code)) if UNAVAILABLE.contains(&code) => Approval::Unavailable,
-            Ok((false, _)) => Approval::Denied,
-            Err(_) => {
-                // The late reply, with `LAErrorAppCancel` once `invalidate`
-                // below takes the sheet down, finds no sender and is dropped.
-                REPLY.lock().unwrap_or_else(|p| p.into_inner()).take();
-                Approval::Denied
+        let approval = if can == 0 {
+            Approval::Unavailable
+        } else {
+            let (sender, receiver) = mpsc::channel();
+            *REPLY.lock().unwrap_or_else(|p| p.into_inner()) = Some(sender);
+            with_pool(|| unsafe {
+                let text = objc::new_string(reason);
+                // `evaluatePolicy:localizedReason:reply:` takes an
+                // `NSInteger`, an `NSString`, which it copies, and a block it
+                // calls once.
+                send3::<isize, Id, *const Block, ()>(
+                    context,
+                    c"evaluatePolicy:localizedReason:reply:",
+                    POLICY,
+                    text,
+                    objc::global_block(on_reply),
+                );
+                release(text);
+            });
+            let reply = receiver.recv_timeout(timeout).ok();
+            if reply.is_none() {
+                // `invalidate` takes nothing and takes the sheet down. Its
+                // reply is drained here, while this request still holds the
+                // slot, so it can never answer a later request.
+                unsafe { send::<()>(context, c"invalidate") };
+                let _ = receiver.recv_timeout(LATE_REPLY_WAIT);
             }
+            REPLY.lock().unwrap_or_else(|p| p.into_inner()).take();
+            after_sheet(reply)
         };
-        // `invalidate` takes nothing and ends any evaluation still showing.
-        // The context is ours from `new_context`, so it is then released.
+        // The context is ours from `new_context`: `invalidate` ends anything
+        // it still shows, and then it is released.
         unsafe {
             send::<()>(context, c"invalidate");
             release(context);
         }
         approval
+    }
+}
+
+/// How a request ends once its sheet has shown: approved only when the reply
+/// says it succeeded, and denied for every failure and for no reply at all.
+fn after_sheet(reply: Option<(bool, isize)>) -> Approval {
+    match reply {
+        Some((true, _)) => Approval::Approved,
+        _ => Approval::Denied,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A cancel (-2), a system cancel (-4), an app cancel (-9), no companion
+    /// device (-11), and a lockout (-8) all come after a sheet may have
+    /// shown, so none of them may approve or fall back to the passphrase.
+    #[test]
+    fn only_a_touch_approves_once_a_sheet_has_shown() {
+        assert_eq!(after_sheet(Some((true, 0))), Approval::Approved);
+        for code in [-1, -2, -3, -4, -6, -7, -8, -9, -11, -12, -13, -1004] {
+            assert_eq!(after_sheet(Some((false, code))), Approval::Denied, "{code}");
+        }
+        assert_eq!(after_sheet(None), Approval::Denied);
     }
 }

@@ -15,7 +15,7 @@ mod touch_id;
 mod tty;
 mod vault;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -365,6 +365,7 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
         ),
         now: now_ms()?,
         start: RefCell::new(None),
+        tried: Cell::new(agent::Tried::NotAsked),
         path,
     };
     let (path, now) = (&ctx.path, ctx.now);
@@ -593,6 +594,9 @@ struct Ctx {
     /// The keys and deadline of an agent to start once the command
     /// succeeds, set when it prompted.
     start: RefCell<Option<(String, u64)>>,
+    /// What the command found when it tried the agent, which decides what
+    /// a prompt after it says.
+    tried: Cell<agent::Tried>,
 }
 
 /// A store a command changes, and where the change goes.
@@ -616,24 +620,38 @@ fn agent_paths(package: &Path) -> Option<agent::Paths> {
 }
 
 impl Ctx {
-    /// The store's agent, when one may be used and one answers. A directory
-    /// that fails its check is named, and the command prompts instead.
+    /// The store's agent, when one may be used and one answers, recording
+    /// what the command found otherwise.
     fn client(&self) -> Option<agent::Client> {
         if !self.use_agent {
             return None;
         }
-        self.client_any()
-    }
-
-    /// The store's agent, whatever the settings say, for `status` and `lock`.
-    fn client_any(&self) -> Option<agent::Client> {
         match agent::connect(self.agent.as_ref()?) {
-            Ok(client) => client,
-            Err(refused) => {
-                eprintln!("multipass: {refused}");
+            Ok(client) => Some(client),
+            Err(tried) => {
+                self.tried.set(tried);
                 None
             }
         }
+    }
+
+    /// The store's agent, whatever the settings say, for `status`, `lock`,
+    /// and replacing the agent after `passwd` and `rekey`.
+    fn client_any(&self) -> Option<agent::Client> {
+        agent::connect(self.agent.as_ref()?).ok()
+    }
+
+    /// Handles an answer that leaves the command to prompt: records why for
+    /// the prompt, and fails on a declined request or a reply of the wrong
+    /// kind.
+    fn fall_back(&self, answer: agent::Answer) -> Result<()> {
+        match answer {
+            agent::Answer::Unavailable => self.tried.set(agent::Tried::Unavailable),
+            agent::Answer::Stale => self.tried.set(agent::Tried::Stale),
+            agent::Answer::Denied => return Err(NOT_APPROVED.into()),
+            _ => return Err("the session agent sent a reply of the wrong kind".into()),
+        }
+        Ok(())
     }
 
     /// Opens the store with the passphrase, and, when commands may use an
@@ -641,7 +659,7 @@ impl Ctx {
     /// command succeeds.
     fn open_prompting(&self, settle: Settle) -> Result<Session> {
         let reason = match (&self.agent, self.use_agent) {
-            (Some(paths), true) => agent::prompt_reason(paths),
+            (Some(paths), true) => agent::prompt_reason(paths, self.tried.get()),
             _ => None,
         };
         let session = open(&self.vault, self.now, settle, &agent::prompt_text(reason))?;
@@ -658,8 +676,7 @@ impl Ctx {
             match client.read(name)? {
                 agent::Answer::Entry(store) => return Ok(store),
                 agent::Answer::Missing => return Ok(Store::new()),
-                agent::Answer::Denied => return Err(NOT_APPROVED.into()),
-                _ => {}
+                other => self.fall_back(other)?,
             }
         }
         Ok(self.open_prompting(Settle::Try)?.store)
@@ -670,8 +687,7 @@ impl Ctx {
         if let Some(client) = self.client() {
             match client.list()? {
                 agent::Answer::Names(names) => return Ok(names),
-                agent::Answer::Denied => return Err(NOT_APPROVED.into()),
-                _ => {}
+                other => self.fall_back(other)?,
             }
         }
         let session = self.open_prompting(Settle::Try)?;
@@ -695,8 +711,7 @@ impl Ctx {
                         saver: Saver::Agent(editing),
                     });
                 }
-                (agent::Answer::Denied, _) => return Err(NOT_APPROVED.into()),
-                _ => {}
+                (other, _) => self.fall_back(other)?,
             }
         }
         let mut session = self.open_prompting(Settle::Must)?;

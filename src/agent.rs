@@ -169,14 +169,35 @@ pub fn end_note(paths: &Paths) -> Option<(Ended, u64)> {
     Some((ended, at.parse().ok()?))
 }
 
-/// Why the passphrase is being asked for, for a store whose agent did not
-/// answer: the end note's reason, or `the session ended` when a socket is
-/// left with no agent behind it and no note, as after a restart.
-pub fn prompt_reason(paths: &Paths) -> Option<&'static str> {
-    match end_note(paths) {
-        Some((ended, _)) => Some(ended.reason()),
-        None if paths.socket.exists() => Some("the session ended"),
-        None => None,
+/// What a command found when it tried the store's agent before prompting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tried {
+    /// It did not ask, as `passwd` and `rekey` never do.
+    NotAsked,
+    /// No agent answered.
+    NoAgent,
+    /// An agent answered from another executable than this command's.
+    Updated,
+    /// The agent answered, but neither Touch ID nor a watch could approve.
+    Unavailable,
+    /// The agent's key no longer opens the store, and it ended.
+    Stale,
+}
+
+/// Why the passphrase is being asked for. Only a session that ended has a
+/// reason: the end note's, or `the session ended` when a socket is left
+/// with no agent behind it and no note, as after a restart. A command that
+/// did not ask a running agent, or whose agent could not get a touch, gives
+/// none.
+pub fn prompt_reason(paths: &Paths, tried: Tried) -> Option<&'static str> {
+    match tried {
+        Tried::NotAsked | Tried::Unavailable => None,
+        Tried::Updated => Some(Ended::Updated.reason()),
+        Tried::NoAgent | Tried::Stale => match end_note(paths) {
+            Some((ended, _)) => Some(ended.reason()),
+            None if paths.socket.exists() => Some("the session ended"),
+            None => None,
+        },
     }
 }
 
@@ -466,8 +487,8 @@ impl<A: Approver> Agent<A> {
                 return;
             }
             ["lock"] => {
-                let _ = stream.write_all(b"ok\n");
                 self.end(Ended::Locked);
+                let _ = stream.write_all(b"ok\n");
                 return;
             }
             ["list"] => Request::List,
@@ -509,8 +530,8 @@ impl<A: Approver> Agent<A> {
         match self.open() {
             Ok(session) => Ok(Some(session)),
             Err(vault::Error::Stale) => {
-                stream.write_all(b"stale\n")?;
                 self.end(Ended::Changed);
+                stream.write_all(b"stale\n")?;
                 Ok(None)
             }
             Err(e) => {
@@ -534,8 +555,8 @@ impl<A: Approver> Agent<A> {
         match approval {
             Approval::Approved => {}
             Approval::Denied => {
-                stream.write_all(b"denied\n")?;
                 self.end(Ended::Declined);
+                stream.write_all(b"denied\n")?;
                 return Ok(());
             }
             Approval::Unavailable => return stream.write_all(b"unavailable\n"),
@@ -646,21 +667,23 @@ pub struct Editing {
     stream: UnixStream,
 }
 
-/// Connects to the store's agent. `Ok(None)` when no agent answers, or the
-/// one that does runs as another user or from another executable than this
-/// command, which then asks for the passphrase. An error names a directory
-/// that fails `check_dir`.
-pub fn connect(paths: &Paths) -> Result<Option<Client>, String> {
+/// Connects to the store's agent. `Err(Tried::NoAgent)` when no agent
+/// answers or the one that does runs as another user, and
+/// `Err(Tried::Updated)` when it runs from another executable than this
+/// command; either way the command asks for the passphrase. A directory
+/// that fails `check_dir` is named on stderr and counts as no agent.
+pub fn connect(paths: &Paths) -> Result<Client, Tried> {
     if !paths.dir.exists() {
-        return Ok(None);
+        return Err(Tried::NoAgent);
     }
-    check_dir(&paths.dir)?;
-    let Ok(stream) = UnixStream::connect(&paths.socket) else {
-        return Ok(None);
-    };
+    if let Err(refused) = check_dir(&paths.dir) {
+        eprintln!("multipass: {refused}");
+        return Err(Tried::NoAgent);
+    }
+    let stream = UnixStream::connect(&paths.socket).map_err(|_| Tried::NoAgent)?;
     let fd = stream.as_raw_fd();
     if sys::peer_uid(fd).ok() != Some(sys::uid()) {
-        return Ok(None);
+        return Err(Tried::NoAgent);
     }
     let theirs = sys::peer_pid(fd)
         .and_then(sys::pid_path)
@@ -668,14 +691,14 @@ pub fn connect(paths: &Paths) -> Result<Option<Client>, String> {
     let ours = std::env::current_exe().and_then(|path| ExeId::of(&path));
     match (theirs, ours) {
         (Ok(theirs), Ok(ours)) if theirs == ours => {}
-        _ => return Ok(None),
+        _ => return Err(Tried::Updated),
     }
     if stream.set_read_timeout(Some(REPLY_WAIT)).is_err()
         || stream.set_write_timeout(Some(REQUEST_WAIT)).is_err()
     {
-        return Ok(None);
+        return Err(Tried::NoAgent);
     }
-    Ok(Some(Client { stream }))
+    Ok(Client { stream })
 }
 
 fn protocol_error() -> String {
@@ -1002,10 +1025,11 @@ mod tests {
         let mut reply = Vec::new();
         stream.read_to_end(&mut reply).unwrap();
         assert_eq!(reply, b"denied\n");
-        wait_until(|| !s.paths.socket.exists());
+        // The session ended before the reply went out.
+        assert!(!s.paths.socket.exists());
         assert_eq!(end_note(&s.paths).map(|n| n.0), Some(Ended::Declined));
         assert_eq!(
-            prompt_text(prompt_reason(&s.paths)),
+            prompt_text(prompt_reason(&s.paths, Tried::NoAgent)),
             "Passphrase (you declined a request): "
         );
         fs::remove_dir_all(&s.root).unwrap();
@@ -1178,23 +1202,61 @@ mod tests {
     fn the_prompt_says_why_the_session_ended() {
         let root = temp("prompt");
         let paths = Paths::new(&root, &root.join("store.multipass"));
-        assert_eq!(prompt_text(prompt_reason(&paths)), "Passphrase: ");
+        let prompt = |tried| prompt_text(prompt_reason(&paths, tried));
+        assert_eq!(prompt(Tried::NoAgent), "Passphrase: ");
         fs::write(&paths.socket, b"").unwrap();
-        assert_eq!(
-            prompt_text(prompt_reason(&paths)),
-            "Passphrase (the session ended): "
-        );
+        assert_eq!(prompt(Tried::NoAgent), "Passphrase (the session ended): ");
         for ended in Ended::ALL {
             fs::write(&paths.note, format!("{} 1766000000\n", ended.word())).unwrap();
             assert_eq!(
-                prompt_text(prompt_reason(&paths)),
+                prompt(Tried::NoAgent),
                 format!("Passphrase ({}): ", ended.reason())
             );
         }
         fs::write(&paths.note, "sleepy 1766000000\n").unwrap();
         fs::remove_file(&paths.socket).unwrap();
-        assert_eq!(prompt_text(prompt_reason(&paths)), "Passphrase: ");
+        assert_eq!(prompt(Tried::NoAgent), "Passphrase: ");
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// `rekey` while unlocked asked `Passphrase (the session ended): `,
+    /// because the running agent's socket, with no end note, read as a
+    /// session that had ended.
+    #[test]
+    fn a_running_agent_gives_the_prompt_no_reason() {
+        let s = setup("running");
+        let agent = agent(&s, Fake::always(Approval::Unavailable));
+        serving(&agent);
+        assert!(s.paths.socket.exists());
+        let prompt = |tried| prompt_text(prompt_reason(&s.paths, tried));
+        assert_eq!(prompt(Tried::NotAsked), "Passphrase: ");
+        assert!(matches!(client(&s).read("b").unwrap(), Answer::Unavailable));
+        assert_eq!(prompt(Tried::Unavailable), "Passphrase: ");
+        assert_eq!(
+            prompt(Tried::Updated),
+            "Passphrase (multipass was updated): "
+        );
+        agent.end(Ended::Locked);
+        fs::remove_dir_all(&s.root).unwrap();
+    }
+
+    /// A rotation elsewhere ends the session before the agent replies, so
+    /// the command that saw `stale` finds the note at once.
+    #[test]
+    fn the_end_note_is_written_before_the_reply() {
+        let s = setup("note-first");
+        let agent = agent(&s, Fake::always(Approval::Approved));
+        serving(&agent);
+        let vault = Vault::new(&s.package, FAST);
+        let mut ask = |_: vault::Ask| Ok(Some("pw".to_string()));
+        let mut session = vault.open(&mut ask, now_ms()).unwrap();
+        session.rotate(&vault, now_ms(), None).unwrap();
+        assert!(matches!(client(&s).read("b").unwrap(), Answer::Stale));
+        assert_eq!(
+            prompt_text(prompt_reason(&s.paths, Tried::Stale)),
+            "Passphrase (the vault key changed): "
+        );
+        fs::remove_dir_all(&s.root).unwrap();
     }
 
     #[test]
@@ -1215,7 +1277,10 @@ mod tests {
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
         let refused = check_dir(&dir).unwrap_err();
         assert!(refused.contains(&dir.display().to_string()), "{refused}");
-        assert!(connect(&Paths::new(&dir, &root.join("s"))).is_err());
+        assert!(matches!(
+            connect(&Paths::new(&dir, &root.join("s"))),
+            Err(Tried::NoAgent)
+        ));
         fs::remove_dir_all(&root).unwrap();
     }
 }
