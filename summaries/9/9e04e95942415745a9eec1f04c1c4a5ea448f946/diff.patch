@@ -1,0 +1,614 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index c3f7253..b669668 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -7,6 +7,7 @@ multipass is a single-user password manager: a Rust CLI over one age file encryp
+ multipass has no dependencies, not even dev-dependencies, and that is a feature people choose it for. CI fails if `cargo tree` shows anything but multipass itself.
+ 
+ - **Do not add a crate**, for code or for tests, without the maintainer's explicit approval in the pull request. Write the code instead.
++- **Apple's system frameworks count like the standard library.** `src/clipboard.rs` links AppKit for `--clip` and holds the program's only `unsafe` code, behind a safe interface. Keep any new `unsafe` code in a module like it, and say in a comment what each call requires of its arguments.
+ - **Every primitive lives in `src/crypto`** and is checked against the official test vectors from its specification: FIPS 180-4 for SHA-1, SHA-256 and SHA-512 (with RFC 3174 for SHA-1), RFC 4231 for HMAC, RFC 5869 for HKDF, RFC 7914 for PBKDF2, scrypt and Salsa20/8, RFC 8439 for ChaCha20 and Poly1305, RFC 4226 for HOTP, RFC 6238 for TOTP, and RFC 4648 for base32 and base64. A change to a primitive keeps those tests and adds any vector that covers the changed path.
+ - **In `src/crypto` and `src/age.rs`, never branch on secret data or index memory with it**, apart from scrypt's data-dependent lookups, which the algorithm requires. Compare MACs and tags with `crypto::ct_eq`. `src/age.rs` builds age's format from the primitives: it derives the scrypt key, unwraps the file key, derives the header and payload keys, and checks the header MAC. It may branch on the header's text and on lengths, which are public.
+ - **Outside `src/crypto` and `src/age.rs`, keep secrets as text and do no cryptography on them.** The store's escaping and parsing, its UTF-8 check, `strip_newline`, and `otpauth` URI parsing branch on each character of a secret: escaping changes the text's length, and Rust's string handling branches on every byte. So hand a key to `src/crypto` as soon as its text is found, as `src/otp.rs` hands the setup key to `crypto::base32`, and put any computation on key material in `src/crypto`.
+diff --git a/README.md b/README.md
+index cbd32ed..19e4a49 100644
+--- a/README.md
++++ b/README.md
+@@ -4,7 +4,7 @@ multipass is a minimal password manager with no dependencies and no sharing. It
+ 
+ Use it beside a full password manager, not instead of one. Keep shared and everyday logins in something like 1Password. Keep the few secrets you never want on someone else's server in multipass, such as recovery codes, seed phrases, and the master password itself.
+ 
+-Every line of multipass is in this repository, cryptography included: about 1,000 lines of cryptography and 900 of everything else, small enough to read in a day. It uses no third-party crates, so the only code you trust beyond this repository is the Rust toolchain and its standard library.
++Every line of multipass is in this repository, cryptography included: about 1,000 lines of cryptography and 900 of everything else, small enough to read in a day. It uses no third-party crates, so the only code you trust beyond this repository is the Rust toolchain, its standard library, and, for `--clip`, macOS's own AppKit framework.
+ 
+ > [!WARNING]
+ > multipass is new and has not been audited. Its cryptography is written by hand and checked against the official test vectors and against files from the reference age implementation, but no one outside the project has reviewed it.
+@@ -28,7 +28,7 @@ cargo install --path .
+ ```sh
+ multipass init                                   # create ~/.multipass/store.age
+ multipass add github.com --username octocat      # prompts for the secret
+-multipass get github.com | pbcopy                # copies exactly the secret
++multipass get github.com --clip                  # copies the secret for 30 seconds
+ multipass get github.com --field username
+ multipass list
+ multipass rm github.com
+@@ -37,13 +37,15 @@ multipass passwd                                 # change the passphrase
+ 
+ Every command asks for the passphrase. To use a different file, set `MULTIPASS_STORE` or pass `--store`.
+ 
++`--clip` on `get` and `otp` copies the value instead of printing it, and clears the clipboard 30 seconds later, unless you have copied something else since. It marks the value as concealed and as this Mac only, so Universal Clipboard does not send it to your other Apple devices, and clipboard-history apps that honor the marking skip it. `--clip` works only on macOS. Piping to `pbcopy` also works, but `pbcopy` cannot mark the value, so it syncs and lands in clipboard history.
++
+ ## Keep one-time passwords
+ 
+ An entry can hold a one-time password setup key beside its secret, username, and notes, and `otp` prints the entry's current code. When a site shows a QR code for an authenticator app, it usually offers the setup key as text too: either a base32 key such as `JBSW Y3DP EHPK 3PXP`, or an `otpauth://totp/` URI.
+ 
+ ```sh
+ printf 'JBSW Y3DP EHPK 3PXP' | multipass otp github.com --set   # or paste it at the prompt
+-multipass otp github.com | pbcopy                             # copies exactly the code
++multipass otp github.com --clip                               # copies the code for 30 seconds
+ multipass get github.com --field otp                          # the stored otpauth:// URI
+ multipass otp github.com --clear                              # remove the one-time password
+ ```
+@@ -91,7 +93,6 @@ If you lose the passphrase, no one can recover the store. That is the point.
+ 
+ - **Export to 1Password.** Send an entry to 1Password with `op item create`, and delete it locally once it lands.
+ - **Session unlock.** Unlock once per session, the way `ssh-agent` does, instead of asking for the passphrase on every command.
+-- **Clipboard.** Copy a secret to the clipboard directly, and clear the clipboard after 30 seconds.
+ - **Memory wiping.** Wipe secrets from memory once a command is done.
+ - **Echo after Ctrl-C.** Restore terminal echo when you press Ctrl-C at a passphrase prompt. Until then, if your terminal stops showing what you type, run `stty echo` or `reset`.
+ 
+diff --git a/src/clipboard.rs b/src/clipboard.rs
+new file mode 100644
+index 0000000..150a4e8
+--- /dev/null
++++ b/src/clipboard.rs
+@@ -0,0 +1,346 @@
++//! Copying a secret to the macOS clipboard, and clearing it later.
++//!
++//! multipass writes through AppKit's `NSPasteboard` instead of `pbcopy`, for
++//! two markings `pbcopy` cannot make. The contents are current-host-only, so
++//! Universal Clipboard does not send them to your other Apple devices, and
++//! they carry `org.nspasteboard.ConcealedType`, which clipboard-history apps
++//! that follow nspasteboard.org's conventions skip. Clearing compares the
++//! clipboard's change count rather than its contents, so the secret never
++//! has to stay in memory to decide whether it is still there.
++//!
++//! AppKit ships with macOS, so it counts like the standard library under the
++//! no-dependencies rule. This module holds the program's only `unsafe` code.
++
++use std::time::Duration;
++
++/// How long a copied secret stays on the clipboard.
++pub const CLEAR_AFTER: Duration = Duration::from_secs(30);
++
++/// The hidden command the clearing process runs, kept out of `--help`.
++pub const CLEAR_COMMAND: &str = "__clear-clipboard";
++
++/// Copies `value` and starts a process that clears it after `CLEAR_AFTER`,
++/// unless something else is copied first.
++pub fn copy(value: &str) -> Result<(), String> {
++    let pasteboard = macos::Pasteboard::general()?;
++    let change_count = pasteboard.write_secret(value)?;
++    if let Err(e) = spawn_clearer(change_count) {
++        pasteboard.clear();
++        return Err(format!(
++            "could not schedule clearing the clipboard, so it was cleared now: {e}"
++        ));
++    }
++    Ok(())
++}
++
++/// Runs in the clearing process: waits, then clears the clipboard if its
++/// change count is still `change_count`.
++pub fn clear_later(change_count: &str) -> Result<(), String> {
++    let change_count: isize = change_count
++        .parse()
++        .map_err(|_| "the clipboard change count must be a number")?;
++    std::thread::sleep(CLEAR_AFTER);
++    let pasteboard = macos::Pasteboard::general()?;
++    clear_if_unchanged(&pasteboard, change_count);
++    Ok(())
++}
++
++/// Clears the clipboard only when nothing has been copied since the secret,
++/// so a later copy of your own is never wiped. Returns whether it cleared.
++fn clear_if_unchanged(pasteboard: &macos::Pasteboard, change_count: isize) -> bool {
++    let unchanged = pasteboard.change_count() == change_count;
++    if unchanged {
++        pasteboard.clear();
++    }
++    unchanged
++}
++
++/// Starts this same program as a detached process that runs `clear_later`.
++/// Its own process group keeps closing the terminal from stopping it early.
++fn spawn_clearer(change_count: isize) -> std::io::Result<()> {
++    use std::os::unix::process::CommandExt;
++    use std::process::{Command, Stdio};
++    Command::new(std::env::current_exe()?)
++        .args([CLEAR_COMMAND, &change_count.to_string()])
++        .stdin(Stdio::null())
++        .stdout(Stdio::null())
++        .stderr(Stdio::null())
++        .process_group(0)
++        .spawn()
++        .map(drop)
++}
++
++#[cfg(target_os = "macos")]
++mod macos {
++    use std::ffi::{CStr, c_char, c_void};
++
++    type Id = *mut c_void;
++    type Sel = *mut c_void;
++
++    /// `NSPasteboardContentsCurrentHostOnly`, which keeps Universal Clipboard
++    /// from sending the contents to other devices.
++    const CURRENT_HOST_ONLY: usize = 1;
++    const NS_UTF8_STRING_ENCODING: usize = 4;
++    const PLAIN_TEXT: &str = "public.utf8-plain-text";
++    const CONCEALED: &str = "org.nspasteboard.ConcealedType";
++
++    #[link(name = "AppKit", kind = "framework")]
++    unsafe extern "C" {}
++
++    #[link(name = "objc")]
++    unsafe extern "C" {
++        fn objc_getClass(name: *const c_char) -> Id;
++        fn sel_registerName(name: *const c_char) -> Sel;
++        fn objc_msgSend();
++        fn objc_autoreleasePoolPush() -> *mut c_void;
++        fn objc_autoreleasePoolPop(pool: *mut c_void);
++    }
++
++    // `objc_msgSend` must be called through a pointer of the method's exact
++    // type, because on Apple silicon a variadic call passes arguments in
++    // different registers than the method expects.
++    unsafe fn send<R>(receiver: Id, selector: &CStr) -> R {
++        let f: unsafe extern "C" fn(Id, Sel) -> R =
++            unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
++        unsafe { f(receiver, sel_registerName(selector.as_ptr())) }
++    }
++
++    unsafe fn send1<A, R>(receiver: Id, selector: &CStr, a: A) -> R {
++        let f: unsafe extern "C" fn(Id, Sel, A) -> R =
++            unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
++        unsafe { f(receiver, sel_registerName(selector.as_ptr()), a) }
++    }
++
++    unsafe fn send2<A, B, R>(receiver: Id, selector: &CStr, a: A, b: B) -> R {
++        let f: unsafe extern "C" fn(Id, Sel, A, B) -> R =
++            unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
++        unsafe { f(receiver, sel_registerName(selector.as_ptr()), a, b) }
++    }
++
++    unsafe fn send3<A, B, C, R>(receiver: Id, selector: &CStr, a: A, b: B, c: C) -> R {
++        let f: unsafe extern "C" fn(Id, Sel, A, B, C) -> R =
++            unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
++        unsafe { f(receiver, sel_registerName(selector.as_ptr()), a, b, c) }
++    }
++
++    fn class(name: &CStr) -> Id {
++        unsafe { objc_getClass(name.as_ptr()) }
++    }
++
++    /// An `NSString` holding `s`, owned by the caller, who must release it.
++    /// It is built from bytes and a length, so a value holding a NUL
++    /// character is not cut short.
++    unsafe fn new_string(s: &str) -> Id {
++        unsafe {
++            let allocated: Id = send(class(c"NSString"), c"alloc");
++            send3(
++                allocated,
++                c"initWithBytes:length:encoding:",
++                s.as_ptr().cast::<c_void>(),
++                s.len(),
++                NS_UTF8_STRING_ENCODING,
++            )
++        }
++    }
++
++    unsafe fn release(object: Id) {
++        unsafe { send::<()>(object, c"release") }
++    }
++
++    /// Runs `f` inside an autorelease pool, so objects AppKit hands back for
++    /// the caller to drop are freed before this returns.
++    fn with_pool<T>(f: impl FnOnce() -> T) -> T {
++        let pool = unsafe { objc_autoreleasePoolPush() };
++        let result = f();
++        unsafe { objc_autoreleasePoolPop(pool) };
++        result
++    }
++
++    pub struct Pasteboard {
++        handle: Id,
++        #[cfg(test)]
++        private: bool,
++    }
++
++    impl Pasteboard {
++        pub fn general() -> Result<Self, String> {
++            let handle: Id =
++                with_pool(|| unsafe { send(class(c"NSPasteboard"), c"generalPasteboard") });
++            if handle.is_null() {
++                return Err("the clipboard is not available".into());
++            }
++            Ok(Self {
++                handle,
++                #[cfg(test)]
++                private: false,
++            })
++        }
++
++        /// A new pasteboard that no other program reads, for tests.
++        #[cfg(test)]
++        pub fn private() -> Self {
++            let handle: Id = unsafe {
++                let made: Id = send(class(c"NSPasteboard"), c"pasteboardWithUniqueName");
++                send(made, c"retain")
++            };
++            assert!(!handle.is_null(), "could not create a private pasteboard");
++            Self {
++                handle,
++                private: true,
++            }
++        }
++
++        /// Replaces the contents with `value`, marked current-host-only and
++        /// concealed, and returns the resulting change count.
++        pub fn write_secret(&self, value: &str) -> Result<isize, String> {
++            with_pool(|| unsafe {
++                let _: isize = send1(
++                    self.handle,
++                    c"prepareForNewContentsWithOptions:",
++                    CURRENT_HOST_ONLY,
++                );
++                let strings = [
++                    new_string(value),
++                    new_string(PLAIN_TEXT),
++                    new_string(""),
++                    new_string(CONCEALED),
++                ];
++                let wrote_text: i8 =
++                    send2(self.handle, c"setString:forType:", strings[0], strings[1]);
++                let wrote_mark: i8 =
++                    send2(self.handle, c"setString:forType:", strings[2], strings[3]);
++                for string in strings {
++                    release(string);
++                }
++                if wrote_text == 0 || wrote_mark == 0 {
++                    let _: isize = send(self.handle, c"clearContents");
++                    return Err("could not write to the clipboard".to_string());
++                }
++                Ok(send(self.handle, c"changeCount"))
++            })
++        }
++
++        pub fn change_count(&self) -> isize {
++            unsafe { send(self.handle, c"changeCount") }
++        }
++
++        pub fn clear(&self) {
++            let _: isize = unsafe { send(self.handle, c"clearContents") };
++        }
++
++        #[cfg(test)]
++        pub fn text(&self) -> Option<String> {
++            with_pool(|| unsafe {
++                let kind = new_string(PLAIN_TEXT);
++                let found: Id = send1(self.handle, c"stringForType:", kind);
++                release(kind);
++                if found.is_null() {
++                    return None;
++                }
++                let bytes: *const c_char = send(found, c"UTF8String");
++                Some(CStr::from_ptr(bytes).to_string_lossy().into_owned())
++            })
++        }
++
++        #[cfg(test)]
++        pub fn types(&self) -> Vec<String> {
++            with_pool(|| unsafe {
++                let types: Id = send(self.handle, c"types");
++                if types.is_null() {
++                    return Vec::new();
++                }
++                let count: usize = send(types, c"count");
++                (0..count)
++                    .map(|i| {
++                        let kind: Id = send1(types, c"objectAtIndex:", i);
++                        let bytes: *const c_char = send(kind, c"UTF8String");
++                        CStr::from_ptr(bytes).to_string_lossy().into_owned()
++                    })
++                    .collect()
++            })
++        }
++    }
++
++    #[cfg(test)]
++    impl Drop for Pasteboard {
++        fn drop(&mut self) {
++            if self.private {
++                unsafe {
++                    send::<()>(self.handle, c"releaseGlobally");
++                    release(self.handle);
++                }
++            }
++        }
++    }
++}
++
++#[cfg(not(target_os = "macos"))]
++mod macos {
++    pub struct Pasteboard;
++
++    impl Pasteboard {
++        pub fn general() -> Result<Self, String> {
++            Err("--clip works only on macOS".into())
++        }
++
++        pub fn write_secret(&self, _value: &str) -> Result<isize, String> {
++            unreachable!("general() never returns a pasteboard off macOS")
++        }
++
++        pub fn change_count(&self) -> isize {
++            unreachable!("general() never returns a pasteboard off macOS")
++        }
++
++        pub fn clear(&self) {
++            unreachable!("general() never returns a pasteboard off macOS")
++        }
++    }
++}
++
++#[cfg(all(test, target_os = "macos"))]
++mod tests {
++    use super::macos::Pasteboard;
++    use super::*;
++    use std::sync::{Mutex, MutexGuard};
++
++    /// The program touches the pasteboard from one thread only, but the test
++    /// harness runs tests on several, and Apple does not document AppKit's
++    /// pasteboard calls as safe to make from several threads at once. So each
++    /// test holds this lock while it uses a pasteboard.
++    fn one_at_a_time() -> MutexGuard<'static, ()> {
++        static LOCK: Mutex<()> = Mutex::new(());
++        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
++    }
++
++    #[test]
++    fn writes_the_secret_marked_concealed() {
++        let _turn = one_at_a_time();
++        let pasteboard = Pasteboard::private();
++        pasteboard.write_secret("hunter2 ✓").unwrap();
++        assert_eq!(pasteboard.text().as_deref(), Some("hunter2 ✓"));
++        let types = pasteboard.types();
++        assert!(
++            types.iter().any(|t| t == "org.nspasteboard.ConcealedType"),
++            "{types:?}"
++        );
++    }
++
++    #[test]
++    fn clears_the_secret_when_nothing_else_was_copied() {
++        let _turn = one_at_a_time();
++        let pasteboard = Pasteboard::private();
++        let count = pasteboard.write_secret("hunter2").unwrap();
++        assert!(clear_if_unchanged(&pasteboard, count));
++        assert_eq!(pasteboard.text(), None);
++    }
++
++    #[test]
++    fn keeps_a_later_copy_of_your_own() {
++        let _turn = one_at_a_time();
++        let pasteboard = Pasteboard::private();
++        let count = pasteboard.write_secret("hunter2").unwrap();
++        pasteboard.write_secret("copied afterwards").unwrap();
++        assert!(!clear_if_unchanged(&pasteboard, count));
++        assert_eq!(pasteboard.text().as_deref(), Some("copied afterwards"));
++    }
++}
+diff --git a/src/main.rs b/src/main.rs
+index 1a944ae..c1c7327 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,4 +1,5 @@
+ mod age;
++mod clipboard;
+ mod crypto;
+ mod otp;
+ mod store;
+@@ -27,7 +28,9 @@ Commands:
+                         already exists, keeping its one-time password
+   get <name>            Print one field of an entry, by default its secret
+     --field <field>     secret, username, notes or otp
++    --clip              Copy it to the clipboard instead, for 30 seconds
+   otp <name>            Print the entry's current one-time password code
++    --clip              Copy it to the clipboard instead, for 30 seconds
+     --set               Store a setup key, an otpauth:// URI or a base32 key,
+                         read from stdin when it is piped and from a hidden
+                         prompt otherwise. Creates the entry if needed
+@@ -56,6 +59,7 @@ enum Command {
+     Get {
+         name: String,
+         field: Field,
++        clip: bool,
+     },
+     List,
+     Rm {
+@@ -70,7 +74,7 @@ enum Command {
+ 
+ #[derive(Debug, Clone, Copy, PartialEq)]
+ enum OtpAction {
+-    Show,
++    Show { clip: bool },
+     Set { force: bool },
+     Clear,
+ }
+@@ -99,6 +103,12 @@ fn main() -> ExitCode {
+         .map(|arg| arg.into_string())
+         .collect();
+     let result = match args {
++        Ok(args) if args.first().is_some_and(|a| a == clipboard::CLEAR_COMMAND) => {
++            match &args[1..] {
++                [change_count] => clipboard::clear_later(change_count),
++                _ => Err("usage: multipass __clear-clipboard <change count>".into()),
++            }
++        }
+         Ok(args) => parse(args).and_then(|parsed| match parsed {
+             Parsed::Help => {
+                 print!("{USAGE}");
+@@ -140,6 +150,7 @@ fn parse(args: Vec<String>) -> Result<Parsed> {
+     let mut notes = None;
+     let mut field = None;
+     let mut force = false;
++    let mut clip = false;
+     let mut otp_action = None;
+     let mut positional = Vec::new();
+ 
+@@ -179,6 +190,8 @@ fn parse(args: Vec<String>) -> Result<Parsed> {
+                 })
+             }
+             "--force" if inline.is_none() => force = true,
++            "--clip" if inline.is_none() => clip = true,
++            "--clip" => return Err("--clip takes no value".into()),
+             "--set" | "--clear" if inline.is_some() => {
+                 return Err(format!("{flag} takes no value"));
+             }
+@@ -226,15 +239,19 @@ fn parse(args: Vec<String>) -> Result<Parsed> {
+         "get" => Command::Get {
+             name: name()?,
+             field: field.take().unwrap_or(Field::Secret),
++            clip: std::mem::take(&mut clip),
+         },
+         "rm" => Command::Rm { name: name()? },
+         "otp" => Command::Otp {
+             name: name()?,
+-            action: match otp_action.take().unwrap_or(OtpAction::Show) {
+-                OtpAction::Set { .. } => OtpAction::Set {
++            action: match otp_action.take() {
++                None => OtpAction::Show {
++                    clip: std::mem::take(&mut clip),
++                },
++                Some(OtpAction::Set { .. }) => OtpAction::Set {
+                     force: std::mem::take(&mut force),
+                 },
+-                other => other,
++                Some(other) => other,
+             },
+         },
+         other => return Err(format!("unknown command {other}; see multipass --help")),
+@@ -251,6 +268,9 @@ fn parse(args: Vec<String>) -> Result<Parsed> {
+     if field.is_some() {
+         return Err("--field only applies to get".into());
+     }
++    if clip {
++        return Err("--clip only applies to get and otp".into());
++    }
+     if otp_action.is_some() {
+         return Err("--set and --clear only apply to otp".into());
+     }
+@@ -300,7 +320,7 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
+             );
+             save(&store, &passphrase)?;
+         }
+-        Command::Get { name, field } => {
++        Command::Get { name, field, clip } => {
+             let (store, _) = open(&path)?;
+             let entry = store
+                 .get(&name)
+@@ -312,7 +332,7 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
+                 Field::Otp => entry.otp.as_ref(),
+             }
+             .ok_or_else(|| format!("{name} has no value for that field"))?;
+-            print_value(value)?;
++            deliver(value, clip)?;
+         }
+         Command::List => {
+             let (store, _) = open(&path)?;
+@@ -330,7 +350,7 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
+         Command::Otp { name, action } => {
+             let (mut store, passphrase) = open(&path)?;
+             match action {
+-                OtpAction::Show => {
++                OtpAction::Show { clip } => {
+                     let uri = store
+                         .get(&name)
+                         .ok_or_else(|| format!("no entry named {name}"))?
+@@ -342,7 +362,7 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
+                         .duration_since(UNIX_EPOCH)
+                         .map_err(|_| "the system clock is set before 1970")?
+                         .as_secs();
+-                    print_value(&otp.code(now))?;
++                    deliver(&otp.code(now), clip)?;
+                     if io::stderr().is_terminal() {
+                         eprintln!("expires in {}s", otp.seconds_left(now));
+                     }
+@@ -466,6 +486,20 @@ fn strip_newline(mut s: String) -> String {
+     s
+ }
+ 
++/// Prints `value`, or with `clip` copies it to the clipboard for
++/// `clipboard::CLEAR_AFTER` and says so on stderr without showing it.
++fn deliver(value: &str, clip: bool) -> Result<()> {
++    if !clip {
++        return print_value(value);
++    }
++    clipboard::copy(value)?;
++    eprintln!(
++        "Copied to the clipboard; it clears in {}s",
++        clipboard::CLEAR_AFTER.as_secs()
++    );
++    Ok(())
++}
++
+ /// Prints a value with a trailing newline only on a terminal, so
+ /// `multipass get x | pbcopy` copies exactly the secret.
+ fn print_value(value: &str) -> Result<()> {
+@@ -522,6 +556,7 @@ mod tests {
+             Command::Get {
+                 name: "x".into(),
+                 field: Field::Username,
++                clip: false,
+             }
+         );
+         assert_eq!(
+@@ -545,7 +580,8 @@ mod tests {
+     #[test]
+     fn parses_the_otp_command() {
+         for (argv, action) in [
+-            ("otp github.com", OtpAction::Show),
++            ("otp github.com", OtpAction::Show { clip: false }),
++            ("otp github.com --clip", OtpAction::Show { clip: true }),
+             ("otp github.com --set", OtpAction::Set { force: false }),
+             ("otp --clear github.com", OtpAction::Clear),
+             (
+@@ -575,6 +611,15 @@ mod tests {
+             Command::Get {
+                 name: "github.com".into(),
+                 field: Field::Otp,
++                clip: false,
++            }
++        );
++        assert_eq!(
++            run_of("get --clip github.com --field username"),
++            Command::Get {
++                name: "github.com".into(),
++                field: Field::Username,
++                clip: true,
+             }
+         );
+     }
+@@ -590,6 +635,11 @@ mod tests {
+             "get x --username u",
+             "add x --field secret",
+             "get x --field password",
++            "add x --clip",
++            "list --clip",
++            "otp x --set --clip",
++            "otp x --clear --clip",
++            "get x --clip=yes",
+             "add x --force=yes",
+             "list --verbose",
+             "list --store",

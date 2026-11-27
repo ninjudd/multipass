@@ -1,0 +1,149 @@
+{
+ "version": 1,
+ "name": "Clipboard copy for secrets",
+ "project": "",
+ "pr": {
+  "repo": "ninjudd/multipass",
+  "number": 9,
+  "title": "Copy secrets and codes to the clipboard with --clip",
+  "head": "9e04e95942415745a9eec1f04c1c4a5ea448f946",
+  "headRef": "clipboard",
+  "base": "6c5f46322b6f620ad224d416a5abdd2f97d3b300",
+  "baseRef": "main"
+ },
+ "overview": {
+  "summary": [
+   "multipass is a command-line password manager that keeps every secret in one age-encrypted file. Until now, <code>get</code> and <code>otp</code> printed a value to stdout, and the README suggested piping it to <code>pbcopy</code> to copy it. A value copied that way stays on the clipboard until something replaces it, syncs to the user's other Apple devices through Universal Clipboard, and lands in clipboard-history apps.",
+   "This pull request adds a <code>--clip</code> flag to <code>get</code> and to <code>otp</code> when it shows a code. With it, multipass writes the value to the macOS clipboard itself, through AppKit's <code>NSPasteboard</code>, and never prints it. It works in three steps:",
+   "<ol><li><b>Copy with two markings.</b> The value is written as current-host-only, so Universal Clipboard does not send it to other devices, and tagged with <code>org.nspasteboard.ConcealedType</code>, which clipboard-history apps that follow nspasteboard.org's conventions skip.</li><li><b>Hand off the clearing.</b> multipass records the pasteboard's change count, a number macOS increments every time anything new is copied, and starts a detached copy of itself whose only argument is that number.</li><li><b>Clear only its own copy.</b> Thirty seconds later the detached process clears the clipboard, but only when the change count has not moved, so a later copy of the user's own survives. The secret never has to stay in memory to make that decision.</li></ol>",
+   "The Objective-C calls are the program's first <code>unsafe</code> code, kept in <code>src/clipboard.rs</code> behind a safe interface. <code>AGENTS.md</code> now counts Apple's system frameworks like the Rust standard library, so <code>cargo tree</code> still lists only multipass. Off macOS, <code>--clip</code> fails with an error."
+  ],
+  "cards": [
+   {
+    "id": "review",
+    "title": "Review so far",
+    "html": "<ul class=\"tight\"><li>The first review, of <code>9e04e95</code>, requested changes with one finding: the README says AppKit is trusted only for <code>--clip</code>, but the binary links AppKit at load time, so every command loads it. It is flagged on <code>README.md</code> line 7.</li><li>It listed three suggestions: say in the README that any app on the Mac can read the value until it clears, update the README's line count, and make the refusal of <code>otp --set --clip</code> clearer.</li><li>The secret's path was checked: it never reaches argv, the environment, a log line or an error, and a failed clearer clears the clipboard at once instead of leaving the secret behind.</li></ul>"
+   },
+   {
+    "id": "terms",
+    "title": "Terms",
+    "html": "<ul class=\"tight\"><li><b>Pasteboard</b>: AppKit's name for the clipboard. The general pasteboard is the one copy and paste use.</li><li><b>Change count</b>: a number the pasteboard increments whenever its contents are replaced. Comparing it tells whether anything was copied since.</li><li><b>Clearer</b>: the detached <code>multipass __clear-clipboard &lt;count&gt;</code> process that clears the clipboard after 30 seconds.</li><li><b><code>objc_msgSend</code></b>: the C function every Objective-C method call goes through. Rust calls it directly, cast to each method's exact signature.</li></ul>"
+   }
+  ]
+ },
+ "groups": [
+  {
+   "id": "clipboard",
+   "title": "The clipboard module",
+   "kicker": "Writing to the macOS pasteboard, marking the value, and clearing it later",
+   "intro": [
+    "<code>src/clipboard.rs</code> is new and holds everything that touches the clipboard. Its public interface is two functions: <code>copy</code>, which the command line calls with the value, and <code>clear_later</code>, which the detached clearer runs.",
+    "The file has two halves. The top half is ordinary Rust: the 30-second constant, the hidden command's name, the decision to clear only when the change count is unchanged, and the code that starts the clearer. The bottom half, <code>mod macos</code>, wraps the Objective-C runtime. It looks up AppKit classes by name and sends messages through <code>objc_msgSend</code>, so no binding crate is needed. A stub of the same module for other systems returns an error from <code>Pasteboard::general</code>, so <code>--clip</code> fails cleanly there."
+   ],
+   "checks": [
+    {
+     "kind": "context",
+     "text": "A test cannot use the real clipboard without replacing the user's copy, so the three tests create a private pasteboard with <code>pasteboardWithUniqueName</code> and take a lock so they run one at a time. The path from a real copy to the clearer wiping the general pasteboard is not covered by a test."
+    }
+   ],
+   "files": [
+    {
+     "path": "src/clipboard.rs",
+     "note": "New. Copies a value to the clipboard with its two markings and starts a detached process that clears it after 30 seconds.",
+     "checks": [
+      {
+       "kind": "verify",
+       "text": "When the clearer cannot start, <code>copy</code> clears the clipboard at once and returns an error that names no value, so a failure never leaves the secret behind and never prints it. Checked by reading every error string in the file.",
+       "line": 27
+      },
+      {
+       "kind": "context",
+       "text": "Comparing only the change count is what keeps a later copy of the user's own. <code>keeps_a_later_copy_of_your_own</code> is the test that fails if this ever clears unconditionally.",
+       "line": 50
+      },
+      {
+       "kind": "verify",
+       "text": "The clearer is found with <code>current_exe</code>, not a <code>PATH</code> lookup, its only argument is the change count, and its stdio is null so command substitution such as <code>$(multipass get x --clip)</code> does not wait 30 seconds for it. Checked by running <code>__clear-clipboard 0</code> in a release build: 30 seconds, exit 0, clipboard untouched.",
+       "line": 63
+      },
+      {
+       "kind": "context",
+       "text": "On Apple silicon, calling <code>objc_msgSend</code> as a variadic function passes arguments in the wrong registers, so each <code>send</code> helper casts it to the method's exact signature. A wrong return type here is undefined behaviour, so each call site's type parameter must match the method's declared type.",
+       "line": 102
+      },
+      {
+       "kind": "verify",
+       "text": "<code>prepareForNewContentsWithOptions:</code> returns <code>NSInteger</code> and <code>setString:forType:</code> returns <code>BOOL</code>, read here as <code>i8</code>, and <code>NSPasteboardContentsCurrentHostOnly</code> is <code>1</code>. Checked against AppKit's declarations; the three clipboard tests pass at this head.",
+       "line": 197
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cli",
+   "title": "Command-line wiring",
+   "kicker": "The --clip flag, the hidden clearing command, and where the value goes",
+   "intro": [
+    "<code>src/main.rs</code> parses the new flag and routes each value through one function, <code>deliver</code>, which either prints it as before or copies it and says so on stderr without showing it.",
+    "The parser accepts <code>--clip</code> anywhere on the command line, then attaches it to <code>get</code>, or to <code>otp</code> when it shows a code, and refuses it everywhere else, as it already does for <code>--force</code> and <code>--field</code>. Before any parsing, <code>main</code> checks for the hidden <code>__clear-clipboard</code> command, so the clearer never goes through the ordinary command table or <code>--help</code>."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": "src/main.rs",
+     "note": "Adds <code>--clip</code> to <code>get</code> and <code>otp</code>, the hidden clearing command, and <code>deliver</code>, which prints or copies a value.",
+     "checks": [
+      {
+       "kind": "context",
+       "text": "The clearer is this same binary started with <code>__clear-clipboard &lt;count&gt;</code>. The count is not a secret, so it is safe in argv, where <code>ps</code> shows it for 30 seconds.",
+       "line": 106
+      },
+      {
+       "kind": "context",
+       "text": "<code>otp x --set --clip</code> is refused with <code>--clip only applies to get and otp</code>, which can read as though <code>otp</code> should have accepted it. The review suggested naming the exact case.",
+       "line": 272
+      },
+      {
+       "kind": "verify",
+       "text": "<code>deliver</code> never writes the value to stdout or stderr when <code>clip</code> is set; it prints only the 30-second notice. Checked by reading every caller: <code>get</code> and <code>otp</code> are the only two.",
+       "line": 491
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "docs",
+   "title": "Documentation and rules",
+   "kicker": "What the README promises users and what AGENTS.md now allows",
+   "intro": [
+    "The README replaces its two <code>| pbcopy</code> examples with <code>--clip</code>, adds a paragraph on what the clipboard copy does and does not protect against, and drops \"Clipboard\" from the list of features not built yet. It also adds AppKit to the code a user trusts beyond this repository.",
+    "<code>AGENTS.md</code> adds one rule: Apple's system frameworks count like the standard library under the no-dependencies rule, and any new <code>unsafe</code> code goes in a module like <code>src/clipboard.rs</code>, with a comment on what each call requires of its arguments."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": "README.md",
+     "note": "Documents <code>--clip</code>, and names AppKit among the code a user trusts.",
+     "checks": [
+      {
+       "kind": "flag",
+       "text": "This line says AppKit is trusted only for <code>--clip</code>, but the binary links AppKit at load time, so <code>init</code>, <code>get</code> and <code>passwd</code> all load it, with or without the flag: 719 images load for <code>--help</code> at this head, against 110 at the base. Either load AppKit with <code>dlopen</code> only when <code>--clip</code> runs, or say here that every command on macOS loads it.",
+       "line": 7
+      },
+      {
+       "kind": "context",
+       "text": "The two markings keep the value off other devices and out of history apps that honor them. Any app running on this Mac can still read the clipboard during the 30 seconds.",
+       "line": 40
+      }
+     ]
+    },
+    {
+     "path": "AGENTS.md",
+     "note": "Counts Apple's system frameworks like the standard library, and keeps <code>unsafe</code> code in modules like <code>src/clipboard.rs</code>."
+    }
+   ]
+  }
+ ]
+}
