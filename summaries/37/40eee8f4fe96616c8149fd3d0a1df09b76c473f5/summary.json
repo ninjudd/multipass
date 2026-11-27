@@ -1,0 +1,221 @@
+{
+ "version": 1,
+ "name": "Session unlock",
+ "project": "session-unlock",
+ "pr": {
+  "repo": "ninjudd/multipass",
+  "number": 37,
+  "title": "Keep the store unlocked behind Touch ID between commands",
+  "head": "40eee8f4fe96616c8149fd3d0a1df09b76c473f5",
+  "headRef": "session-unlock",
+  "base": "f7d67ad00ecadba7b2922e6635bb5a54cda5dc30",
+  "baseRef": "session-unlock-objc",
+  "basePr": 36
+ },
+ "overview": {
+  "summary": [
+   "Today every <code>multipass</code> command asks for the passphrase, so looking up a username, a password, and a one-time code means typing it three times. This pull request keeps the store unlocked between commands without giving up what the prompt guarantees: a program running as you, an AI coding agent included, still cannot read or change an entry without a person at the Mac.",
+   "It works like this. After a command asks for the passphrase and succeeds, it starts a background <b>agent</b>, <code>multipass __agent</code>, as its own child process, and hands it the <b>vault key</b> over the child's stdin. The vault key is the random key that encrypts the store's files, and the passphrase encrypts the vault key, so the agent never needs the passphrase. Later commands ask the agent over a Unix socket instead of prompting. The agent shows a Touch ID or Apple Watch <b>sheet</b> that names the entry, such as \"multipass is trying to read github.com\", and answers only once a person approves that one request.",
+   "<ol><li><b>One entry per request.</b> <code>read</code>, <code>list</code>, and <code>edit</code> each need their own approval. A reply holds only the named entry, and a <code>save</code> that touches any other entry is refused.</li><li><b>A decline ends the session.</b> Cancelling a sheet, or leaving it for 60 seconds, replies <code>denied</code> and ends the agent. When no one can approve, as with the lid closed, the agent replies <code>unavailable</code> and the command asks for the passphrase.</li><li><b>Sessions end on their own.</b> The agent ends when the vault key reaches its deadline, 21 days after the key was made, on <code>multipass lock</code>, when another Mac rotates the key, and when the multipass executable changes on disk. It writes an <b>end note</b> beside its socket, so the next prompt can say why it asks again, such as <code>Passphrase (you declined a request): </code>.</li></ol>",
+   "<code>init</code>, <code>passwd</code>, and <code>rekey</code> always prompt, and <code>passwd</code> and <code>rekey</code> replace the agent. <code>MULTIPASS_NO_AGENT=1</code> and an SSH login, which sets <code>SSH_CONNECTION</code>, keep the prompt on every command. Off macOS the code compiles, but no agent starts."
+  ],
+  "cards": [
+   {
+    "id": "terms",
+    "title": "Terms on this page",
+    "html": "<ul class=\"tight\"><li><b>Agent</b>: the background <code>multipass __agent</code> process that holds the vault key between commands.</li><li><b>Vault key</b>: the random key that encrypts the store files. The passphrase encrypts it in the key file.</li><li><b>Sheet</b>: the macOS Touch ID or Apple Watch approval dialog.</li><li><b>Start message</b>: the deadline and the key file's text, written once to the agent's stdin.</li><li><b>End note</b>: <code>&lt;hash&gt;.ended</code>, beside the socket, saying why the last agent ended.</li><li><b>Stale</b>: the agent's key no longer opens the store, because a rotation ran elsewhere.</li></ul>"
+   },
+   {
+    "id": "review",
+    "title": "Review so far",
+    "html": "<ul class=\"tight\"><li>The first review, across three heads, opened six findings, and later heads fixed all six. The agent now replies before it exits, reads its keys without std's stdin buffer, lets <code>status</code> and <code>lock</code> reach another install's agent, and defers to a prompt while the old store file holds an unmerged save. A test docstring was reworded, and the plan now records what was built.</li><li>The latest head is signed off <code>clean</code>, with one suggestion on the plan's wording.</li><li>The owner's Touch ID checks are recorded in the plan's § 9. The checks deferred until after the merge are listed there too.</li></ul>"
+   }
+  ]
+ },
+ "groups": [
+  {
+   "id": "agent",
+   "title": "The agent and its protocol",
+   "kicker": "What the agent holds, who may talk to it, and what each message does",
+   "intro": [
+    "<code>src/agent.rs</code> holds both halves of the session agent. The <b>agent half</b> reads the start message from stdin, binds <code>~/.multipass/agent/&lt;hash&gt;.sock</code>, where the hash names the store, and answers each connection on its own thread. The <b>client half</b> is what every other command uses to connect, check the agent, and send one request.",
+    "Every request is one line of ASCII, followed by a counted run of bytes where it carries a name or store text. <code>read</code>, <code>list</code>, and <code>edit</code> go through the <code>Approver</code> trait, which Touch ID implements and the tests replace with a fake, one sheet at a time. <code>status</code> and <code>lock</code> need no approval: the first reveals only that an agent runs, and the second can only end it.",
+    "<div class=\"tblwrap\"><table class=\"tbl\"><thead><tr><th>Check</th><th>Where it happens</th></tr></thead><tbody><tr><td>The directory belongs to you and has mode 0700</td><td><code>check_dir</code>, on both sides, before every connect and bind</td></tr><tr><td>The other end runs as you</td><td><code>getpeereid</code>, on both sides</td></tr><tr><td>The agent runs the same executable file as the client</td><td><code>connect</code> with <code>Peer::SameBinary</code>, from <code>LOCAL_PEERPID</code> and <code>proc_pidpath</code>, comparing device, inode, size, and change time. <code>status</code> and <code>lock</code> use <code>Peer::SameUser</code>, which skips this check, because they send nothing.</td></tr><tr><td>The agent's own executable has not changed</td><td><code>unfit</code>, before every approval</td></tr></tbody></table></div>"
+   ],
+   "checks": [
+    {
+     "kind": "context",
+     "text": "The vault key never crosses the socket. A process running as you could bind the socket path while no agent runs, so the key goes only down the stdin pipe of a child the command started itself."
+    },
+    {
+     "kind": "context",
+     "text": "The session ends in two steps. <code>end</code> sets <code>ending</code>, records its own thread as <code>ender</code>, writes the end note, removes the socket, and wipes the keys. That thread's handler then writes its reply and sets <code>stopped</code>, and only then does <code>serve</code> return and the process exit. A concurrent request that finishes meanwhile does not stop <code>serve</code>."
+    }
+   ],
+   "files": [
+    {
+     "path": "src/agent.rs",
+     "note": "The whole agent: the start message, the socket and its checks, the request handlers, the end note, and the client.",
+     "checks": [
+      {
+       "kind": "verify",
+       "text": "<code>cargo test</code> passes at this head (153 passed, 1 ignored by design, and 1). The agent tests run a real agent on a socket in <code>/tmp</code> with a fake approver, so no sheet appears. One serves from a copy of the test binary at another path, and checks that <code>Peer::SameBinary</code> refuses it while <code>Peer::SameUser</code> reaches it."
+      },
+      {
+       "kind": "context",
+       "line": 371,
+       "text": "The start message is read from <code>/dev/stdin</code> with no buffer, so the only lasting copy of the keys is the string the agent pins and wipes."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "vault",
+   "title": "Opening the store with the keys alone",
+   "kicker": "How the agent reads and saves the package without the passphrase",
+   "intro": [
+    "A prompted command opens the package with the passphrase. The agent has only the key file's text, which <code>Session::agent_keys</code> gives it: the current vault key and the keys it replaced in the last 90 days. <code>Vault::open_with_keys</code> opens the package from those keys, and fails with <code>Error::Stale</code> when the package holds a key file or a store file of a generation the keys do not cover.",
+    "A session opened this way is <b>unlocked</b>. It may save store files, but it never rotates the key or writes a key file, because only the passphrase can encrypt one. <code>Session::session_deadline</code> is the key's creation time plus 21 days, so every Mac's session for one key ends at the same moment. <code>src/store.rs</code> gains <code>Store::only</code> for one-entry replies, and <code>Store::all_names</code> for the check that a <code>save</code> names only the edited entry.",
+    "While a package still has a move record, an older Mac may save to the old single-file store, and only a prompt can merge that save. The agent's open reads the move records, and <code>Session::old_file_changed</code> compares the old file's SHA-256 with its record. When they differ, the agent answers <code>unavailable</code>, so the command prompts and the prompt merges the change."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": "src/vault.rs",
+     "note": "The keys-only open, the agent's key text and deadline, and a shared helper that decrypts the store files.",
+     "checks": [
+      {
+       "kind": "context",
+       "text": "<code>writable</code> now passes for an unlocked session, and <code>rotate</code> still refuses one, because it has no passphrase. An agent starts only from a prompted session that is writable, so a read-only package never gets one."
+      }
+     ]
+    },
+    {
+     "path": "src/store.rs",
+     "note": "<code>only</code> and <code>all_names</code>, and <code>escape</code> and <code>unescape</code> made public for the sheet's text and the names list."
+    }
+   ]
+  },
+  {
+   "id": "platform",
+   "title": "Touch ID and the system calls",
+   "kicker": "The unsafe modules behind the agent's approval and hardening",
+   "intro": [
+    "These modules hold the new <code>unsafe</code> code, each behind a safe interface, as <code>AGENTS.md</code> requires. <code>src/touch_id.rs</code> loads LocalAuthentication with <code>dlopen</code> only in an agent, and asks with policy 4, a finger on Touch ID or a press on a paired watch, never the login password. Each request gets a fresh <code>LAContext</code>. <code>unavailable</code> comes only from <code>canEvaluatePolicy</code> before a sheet shows. Once a sheet shows, anything but a touch is <code>denied</code>, so a cancel never falls back to the passphrase.",
+    "LocalAuthentication answers in an Objective-C <b>block</b>, a callback object, on a queue of its own. <code>src/objc.rs</code> builds a global block by hand, with no captured state, and the block hands the result to the waiting agent thread through a channel. <code>src/sys.rs</code> wraps the libSystem calls: the peer's user and process, <code>setsid</code> so closing the terminal does not end the agent, <code>PT_DENY_ATTACH</code> against debuggers, no core files, <code>mlock</code>, and a <code>wipe</code> that the compiler cannot remove."
+   ],
+   "checks": [
+    {
+     "kind": "verify",
+     "text": "A probe program of the reviewer's own showed that, after a rename over a running executable's path, <code>proc_pidpath</code> still reports that path, so an upgrade in place passes the client's check and the old agent then detects the change itself."
+    }
+   ],
+   "files": [
+    {
+     "path": "src/touch_id.rs",
+     "note": "The approval itself: availability first, then one sheet, a 60-second wait, and <code>invalidate</code>."
+    },
+    {
+     "path": "src/objc.rs",
+     "note": "The global block that carries <code>evaluatePolicy</code>'s reply, and reading an <code>NSError</code>'s code."
+    },
+    {
+     "path": "src/sys.rs",
+     "note": "Safe wrappers for the peer checks and the agent's memory hardening, with fallbacks off macOS."
+    },
+    {
+     "path": "src/touch_id_other.rs",
+     "note": "Off macOS: nothing can approve, so no agent starts."
+    }
+   ]
+  },
+  {
+   "id": "commands",
+   "title": "The commands that use the agent",
+   "kicker": "Which commands ask the agent, and when they prompt instead",
+   "intro": [
+    "<code>src/main.rs</code> routes each command through a <code>Ctx</code>, which tries the agent first and prompts when it must. <code>get</code>, <code>history</code>, <code>list</code>, and <code>otp</code> read through the agent. <code>add</code>, <code>rm</code>, <code>restore</code>, <code>otp --set</code>, and <code>otp --clear</code> change one entry through an <code>edit</code> and a <code>save</code>. Each falls back to the passphrase on <code>unavailable</code>, <code>stale</code>, or no agent, and fails on <code>denied</code>.",
+    "A command that prompted starts a fresh agent once it succeeds. <code>status</code> prints <code>unlocked until …</code> or <code>locked</code> and the end note's reason. <code>lock</code> ends the session. The prompt's reason comes from what the command found when it tried the agent, recorded as <code>Tried</code>. When a command finds an agent that another multipass binary started, and then prompts, it ends that agent before it starts its own."
+   ],
+   "checks": [
+    {
+     "kind": "verify",
+     "text": "Driving the release build with <code>expect</code> under a temporary <code>HOME</code>, <code>MULTIPASS_NO_AGENT=1</code> and <code>SSH_CONNECTION</code> each kept the prompt and started no agent. <code>status</code> and <code>lock</code> reported no session, and an agent directory at mode 0755 was named and refused."
+    },
+    {
+     "kind": "context",
+     "text": "<code>upgrade</code> runs before any agent code. <code>install.sh</code> renames the new binary over the running binary's own path, so the old agent sees its executable change at the next request and ends with <code>multipass was updated</code>."
+    }
+   ],
+   "files": [
+    {
+     "path": "src/main.rs",
+     "note": "The agent-first open for each command, <code>status</code> and <code>lock</code>, and replacing the agent after <code>passwd</code> and <code>rekey</code>.",
+     "checks": []
+    }
+   ]
+  },
+  {
+   "id": "plan",
+   "title": "The plan and its Touch ID prototype",
+   "kicker": "The session-unlock plan, marked completed, and the prototype that settled § 6.5",
+   "intro": [
+    "This pull request merges the Touch ID prototype's branch at the head that the prototype's own pull request carries. That branch adds <code>touch-id-prototype/probe.rs</code>, a one-file program built with <code>rustc</code> outside the crate, and <code>run.sh</code>, which builds the program and runs the sheet tests. It also records in § 6.5 that LocalAuthentication shows its sheet for an agent that called <code>setsid</code>, so the agent keeps <code>setsid</code>.",
+    "On top of that, the plan is marked <code>completed</code>. § 2.11's rows now name the code each file gained, and a new § 9 records the departures from § 2, what the tests and the owner's hand checks verified, and the hand checks deferred until after the merge."
+   ],
+   "checks": [
+    {
+     "kind": "verify",
+     "text": "The prototype files, and the plan sections from the prototype's branch, are identical to the prototype pull request's head, which its own review signed off."
+    }
+   ],
+   "files": [
+    {
+     "path": "docs/projects/session-unlock/readme.md",
+     "note": "Marked <code>completed</code>, with § 2.11 updated and § 9 recording the outcome.",
+     "checks": [
+      {
+       "kind": "context",
+       "line": 345,
+       "text": "§ 9 says each departure is recorded in § 2.11, but § 2.11's rows name only some of them, such as <code>Store::only</code> and <code>unavailable</code> before a sheet. The <code>failed</code> reply, the UTC <code>status</code>, and the user-only check for <code>status</code> and <code>lock</code> appear only in § 9."
+      }
+     ]
+    },
+    {
+     "path": "docs/projects/session-unlock/touch-id-prototype/probe.rs",
+     "note": "The prototype: <code>dlopen</code>, typed <code>objc_msgSend</code>, and a hand-built global block, attached to the terminal or from a detached child.",
+     "collapsed": true
+    },
+    {
+     "path": "docs/projects/session-unlock/touch-id-prototype/run.sh",
+     "note": "Builds the probe and runs the attached, <code>setsid</code>, process-group, and closed-terminal sheet tests.",
+     "collapsed": true
+    }
+   ]
+  },
+  {
+   "id": "docs",
+   "title": "Documentation and rules",
+   "kicker": "What the README, AGENTS.md, and the passkeys plan now say",
+   "intro": [
+    "The README gains a section, \"Stay unlocked between commands\", on the touch for each request, when a session ends, <code>status</code>, <code>lock</code>, and what the agent exposes. It drops \"Session unlock\" from the list of work not built yet. <code>AGENTS.md</code> names the four modules that may hold <code>unsafe</code> code, and adds the rule that the agent gives the vault key to no one. The passkeys plan's sentence about the CLI now points at session unlock. The README's size line now says about 1,000 lines of cryptography and 5,800 of everything else, and it names LocalAuthentication beside AppKit."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": "README.md",
+     "note": "The new section on staying unlocked, and the trade it makes."
+    },
+    {
+     "path": "AGENTS.md",
+     "note": "The <code>unsafe</code> modules, and the agent's rule about the vault key."
+    },
+    {
+     "path": "docs/projects/passkeys/readme.md",
+     "note": "One sentence: the CLI asks for a touch while a session is unlocked."
+    }
+   ]
+  }
+ ]
+}
