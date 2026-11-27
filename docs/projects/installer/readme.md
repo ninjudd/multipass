@@ -17,7 +17,7 @@ The usual fix, a `curl … | bash` installer that downloads a binary, is itself 
 
 A new `install.sh` at the repository root installs a release into `~/.local/bin/multipass`. When `cargo` is on PATH, it downloads the release's source archive and builds it with `cargo build --release --locked --offline`, which takes about three seconds because multipass has no dependencies, so the only code it trusts beyond the tagged source is your own toolchain. Without `cargo`, it downloads the release's universal macOS binary and installs it only after `gh attestation verify` proves that the release workflow built it from the release's tag. When neither `cargo` nor `gh` is installed, it refuses and says how to get either one, unless you set `MULTIPASS_UNVERIFIED=1`. Run from a checkout, it builds that checkout instead and downloads nothing. A new release workflow publishes each version you merge: it tags `v<version>` from `Cargo.toml`, builds the binary on a pinned toolchain, attests it, and publishes an immutable GitHub release. The build is reproducible, and `install.sh verify` rebuilds a release on your Mac and compares the bytes. The installer never touches your stores, `~/.multipass`, or your shell's startup files.
 
-The installer itself is a release asset, attested with the binary. The project's domain, `getmultipass.dev`, serves no code: a small static Vercel project redirects `https://getmultipass.dev/install.sh` to the newest release's `install.sh` on GitHub (§ 2.9; how the project deploys is pending § 7.1). So the command you run is:
+The installer itself is a release asset, attested with the binary. The project's domain, `getmultipass.dev`, serves no code: a minimal Vercel project redirects `https://getmultipass.dev/install.sh` to the newest release's `install.sh` on GitHub (§ 2.9), deployed by hand (§ 7.1). So the command you run is:
 
 ```sh
 curl -fsSL https://getmultipass.dev/install.sh | bash
@@ -267,16 +267,16 @@ None of this changes the multipass binary, so commands cost what they cost today
 2. In the repository's settings, turn on immutable releases, and add a tag ruleset that blocks updating and deleting tags matching `v*`. Only the repository owner can change these.
 3. Publish the first release, `v0.1.0`, from the current version by running the release workflow by hand.
 4. Once the domain's nameservers point at Vercel, confirm auto-renew and the registrar lock at the registrar, and two-factor sign-in on the registrar account and for every member of the Vercel team. Add the CAA records from § 2.9 after reading which authorities Vercel's own records name.
-5. Create the Vercel project on that team, add `getmultipass.dev` and `www.getmultipass.dev` to it, and deploy `site/` as § 7.1 settles. Until step 3's release exists, the redirect leads to a missing file.
+5. Create the Vercel project on that team, add `getmultipass.dev` and `www.getmultipass.dev` to it, and deploy `site/` by hand with `vercel deploy --prod`, as § 7.1 decides. Until step 3's release exists, the redirect leads to a missing file.
 6. Check the release and domain rows of § 4, then point the README's Install section at the one-liner.
 
 ## 7. Open questions
 
 ### 7.1 How the domain's Vercel project deploys
 
-Undecided; the owner's to answer. The domain is `getmultipass.dev` on Vercel's DNS, and § 3 says why Vercel rather than GitHub Pages serves it. What is left is how `site/` reaches Vercel. The plan assumes a deploy by hand.
+Decided: by hand. The domain is `getmultipass.dev` on Vercel's DNS, and § 3 says why Vercel rather than GitHub Pages serves it. These were the ways `site/` could reach Vercel:
 
-- **By hand (recommended):** the owner runs `vercel deploy --prod` in `site/` when it changes, which is rarely, since the redirects always point at the newest release. No Vercel app gets access to the repository, and no workflow holds a Vercel token. What is served can drift from `main`, and the `curl -sI` rows of § 4 catch that.
+- **By hand (chosen):** the owner runs `vercel deploy --prod` in `site/` when it changes, which is rarely, since the redirects always point at the newest release. No Vercel app gets access to the repository, and no workflow holds a Vercel token. What is served can drift from `main`, and the `curl -sI` rows of § 4 catch that.
 - **Vercel's GitHub app:** `site/` deploys on every merge, so what is served always matches `main`. But Vercel's documentation lists the app's repository permissions as read and write on contents and on workflows, so a third party could then change any file, `release.yml` included.
 - **GitHub Pages instead of Vercel:** the repository's Pages site moves to the domain. § 3 gives the costs: a second party that can change what the domain serves, no HTTP redirects, fixed caching, and a change to Projector.
 
