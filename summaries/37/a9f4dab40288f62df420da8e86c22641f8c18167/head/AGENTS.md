@@ -1,0 +1,186 @@
+# Project guidelines
+
+multipass is a single-user password manager: a Rust CLI over a package of age files, unlocked by one passphrase, with no dependencies. [README.md](README.md) describes how it works for someone using it; keep it true when behaviour changes.
+
+## No dependencies
+
+multipass has no dependencies, not even dev-dependencies, and that is a feature people choose it for. CI fails if `cargo tree` shows anything but multipass itself.
+
+- **Do not add a crate**, for code or for tests, without the maintainer's explicit approval in the pull request. Write the code instead.
+- **Apple's system frameworks count like the standard library.** `src/clipboard.rs` loads AppKit with `dlopen` only when `--clip` needs the clipboard, rather than linking it, so no other command has AppKit in its process. `src/touch_id.rs` loads LocalAuthentication the same way, only when a session agent starts. `src/objc.rs` holds the unsafe Objective-C runtime helpers that both call, and `src/clipboard.rs` and `src/touch_id.rs` wrap them in safe interfaces. `src/sys.rs` wraps the libSystem calls the session agent needs in safe functions. Those four modules hold the program's only `unsafe` code. Keep any new `unsafe` code in a module like them, behind a safe interface, and say in a comment what each call requires of its arguments.
+- **Every primitive lives in `src/crypto`** and is checked against the official test vectors from its specification: FIPS 180-4 for SHA-1, SHA-256 and SHA-512 (with RFC 3174 for SHA-1), RFC 4231 for HMAC, RFC 5869 for HKDF, RFC 7914 for PBKDF2, scrypt and Salsa20/8, RFC 8439 for ChaCha20 and Poly1305, RFC 4226 for HOTP, RFC 6238 for TOTP, and RFC 4648 for base32 and base64. A change to a primitive keeps those tests and adds any vector that covers the changed path.
+- **In `src/crypto` and `src/age.rs`, never branch on secret data or index memory with it**, apart from scrypt's data-dependent lookups, which the algorithm requires. Compare MACs and tags with `crypto::ct_eq`. `src/age.rs` builds age's format from the primitives: it derives the scrypt key, unwraps the file key, derives the header and payload keys, and checks the header MAC. It may branch on the header's text and on lengths, which are public.
+- **Outside `src/crypto` and `src/age.rs`, keep secrets as text and do no cryptography on them.** The store's escaping and parsing, its UTF-8 check, `strip_newline`, `otpauth` URI parsing, and `src/vault.rs`'s reading and writing of the key file, which holds vault keys as text, branch on each character of a secret: escaping changes the text's length, and Rust's string handling branches on every byte. So hand a key to `src/crypto` as soon as its text is found, as `src/otp.rs` hands the setup key to `crypto::base32`, and put any computation on key material in `src/crypto`.
+- **Stay in age's passphrase (scrypt) mode.** Adding public-key recipients would bring back the quantum exposure the design avoids.
+
+## Compatibility with age
+
+- **Keep the store readable by stock age.** In a store package, `age -d key.*.age` with the passphrase must always print the key file's text, and `age -d store.*.age` with the text of its `key` line must print the store text, as the README's recovery section shows. `testdata/reference-*.age` were written by the reference implementation (the `age` crate, version 0.12.1) and `age::tests` must keep decrypting them. Those files hold only a fixed byte pattern under the published test passphrase in `age.rs`; they are the one exception to never committing an encrypted file.
+- **Check the other direction by hand when the format code changes.** The tests cannot run reference age without a dependency, so make a package with multipass and run those two steps with `age -d` (or the `age` crate in a scratch project outside this repository) before handing the change over.
+- **Change the store text only by bumping the version in its `multipass <n>` header** and teaching `Store::from_text` to read the old version. multipass writes format 3, which adds `modified`, tombstones, and history, and reads formats 1 to 3; the mergeable-store plan's § 2.1 lists what each format adds. Keep `Store::merge` commutative, associative, and idempotent, history included, because two Macs that merge the same files must write the same store.
+
+## Rules that protect secrets
+
+- **The session agent holds the vault key, and gives it to no one.** The key reaches an agent only through the stdin of a child that a prompted command started itself, never over the socket, and no reply carries it. The agent answers a request only after Touch ID or a watch approves that one request, on a sheet that names the entry, and it reads or changes only that entry. `src/agent.rs` holds these rules; keep any new request behind the same approval.
+
+- **Never put a secret or passphrase in argv, an environment variable, a log line or an error message.** Passphrases come from `/dev/tty` through `tty::read_hidden`; secrets come from a hidden prompt or stdin. Store errors name a line number, never the line.
+- **Never modify a file in the store package.** Write each file once, under a new name, through `store::write_private_durable`, which writes a temporary file with mode 0600, flushes it, renames it into place, and flushes the directory. Delete only files you read, and only after the file that replaces them is durable, so a file another Mac wrote meanwhile survives.
+- **Never commit a store or any other encrypted file**, even a test one with fake secrets. Tests build their stores in memory or in a temporary directory. The reference fixtures under `testdata/` are the one exception, as the age section says.
+
+## Tests
+
+Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test --locked`, and, when you change `install.sh` or `site/`, `tests/install.sh` or `tests/site.sh` before handing work over; CI runs all five plus the dependency check. `--locked` fails when `Cargo.lock` is out of date, as it is after a version bump that forgets it. `tests/install.sh` installs this checkout, and a release made from it through a `file://` mirror, with `HOME` in a temporary directory, so it needs no network. Tests use scrypt work factor 10 so they stay fast. The CLI always uses `age::DEFAULT_WORK_FACTOR` (18), about a third of a second in a release build.
+
+The CLI reads passphrases from `/dev/tty`, so it cannot be driven from a plain pipe. To exercise it without a terminal, use `expect` against a release build, and point `--store` at a path inside a temporary directory, which `init` creates as a package.
+
+## Releases
+
+- **Release by merging a pull request that raises `version` in `Cargo.toml` and `Cargo.lock`.** `.github/workflows/release.yml` then tags `v<version>` at the merge commit, builds and attests the universal binary, and publishes an immutable release. Never push a tag or create a release by hand. Run the workflow by hand from `main` only for the first release or to finish a run that failed; it skips a version that is already published.
+- **Change `RUST_VERSION` or `DEVELOPER_DIR` in `release.yml` only in a pull request of its own.** The Rust toolchain and the Xcode, whose SDK version the binary records, are part of what `install.sh verify` must match, so a toolchain change and a code change in one release would leave no way to tell which one changed the bytes. `DEVELOPER_DIR` names an Xcode on the runner image because the image's default Xcode moves without a change to the workflow; when the image drops that Xcode, the release fails until a pull request picks another one the image lists.
+- **The release workflow uses only GitHub's own actions, pinned by full commit SHA**, with a comment naming the version. Its `publish` job holds the write and signing permissions, so it never checks out the repository or runs its code; keep any new step that runs repository code in `build`.
+- **Keep the build reproducible.** `.github/scripts/build-release.sh` builds each target twice, at two paths, and fails when any byte differs. Build only inside the unpacked source with `CARGO_TARGET_DIR` beneath it, because `-oso_prefix .` makes the linker's recorded object paths, which feed the binary's UUID, relative to that directory.
+
+## Website
+
+- **`site/` holds the website for `getmultipass.dev`: one static page and the redirects in `site/vercel.json`.** `.github/workflows/site.yml` deploys it to Vercel on every merge that changes it. Vercel has no access to the repository; the workflow pushes with `VERCEL_TOKEN`, which only the `production` environment holds, and that environment admits only `main`.
+- **`site/` holds only `index.html` and `vercel.json`, and `vercel.json` never sets a build command, a framework, rewrites, or functions.** So no copy of `install.sh`, and no other file a redirect could hand to `curl | bash`, is ever served. Every redirect from a path ending in `install.sh` goes into `https://github.com/ninjudd/multipass/releases/`, and every other redirect stays on the site. `.github/scripts/check-site.sh static` enforces this, and `tests/site.sh` runs it against the bad sites in `tests/site/`. Add a case there when you find a new way around it.
+- **The Vercel CLI in `.github/vercel/` is a deployment tool for the website, never a dependency of multipass.** The no-dependencies rule is about crates and the binary, so it does not cover the CLI, but the CLI runs with the token: change its version only in `package.json`, regenerate `package-lock.json` with `npm install --ignore-scripts`, and pick a release at least two weeks old.
+
+<!-- projector:begin 33 -->
+## Projector conventions
+
+Projector generates this section. To change it, change the template in
+Projector and run `project init`.
+
+This repository keeps its project plans in Git with
+[Projector](https://github.com/ninjudd/projector). Read
+`docs/projects/README.md` before you change a plan. Use the `project` command
+to find and change projects instead of parsing plan files yourself, and run
+`project check` before you hand work over.
+
+Write new and substantially revised documentation in the Google developer
+documentation style: second person, present tense, active voice, sentence-case
+headings, exact identifiers in code font, and a command or example when it
+communicates more directly than prose. Keep the living documentation in
+`docs/` describing the behavior on the current branch, and update it in the
+change that alters that behavior. An existing document keeps its register until
+you revise it substantially.
+
+A plan under `docs/projects` is not living documentation. Update the plan of
+the project you are building as its decisions settle, in the change that
+settles them. Run `project done` in the pull request that carries the last of
+the project's code, so the project is `completed` when that pull request
+merges. Never open a separate pull request just to mark a shipped project
+completed, and do not wait for a release: Projector does not track releases,
+and a project held open for one tends to stay open. A `completed` plan records
+what was decided and built, so leave it as it is, and when later work changes
+behavior it describes, update the living documentation instead. A completed
+plan still records a result: when its outcome deferred a check until after the
+merge, record the check's result in the outcome once it runs.
+
+Write GitHub issues and review comments in the same style. Write a pull request
+body as prose that explains why the change exists, because a squash merge makes
+it the commit message. Match the line wrapping already used around a Markdown
+edit, and do not hard-wrap prose you post to GitHub, because GitHub renders
+line breaks.
+
+Open dependent work that is too large to review as one pull request as a
+GitHub stack with `gh stack`, as Projector's `implement` skill describes
+under "Stack dependent work". Fix stacked code on the branch that introduced
+it, and let `gh stack` carry the fix up right away by rebasing every layer
+above, so each layer stays on the current head of the one below and the
+stack can merge as a unit. Chain pull requests by base branch, and update
+them by merging, only where `gh stack` is unavailable.
+
+### Projector skills
+
+Follow these rules only when the Projector plugin is installed, which you can
+tell because its skills, such as `implement`, are available to you. Without
+the plugin, the rest of this section still applies.
+
+Build each change you will open a pull request for with the `implement`
+skill, `/projector:implement` in Claude Code or `$implement` in Codex,
+whether it follows a plan under `docs/projects` or only a description,
+however small. Its hand-over opens the pull request and subscribes the
+session to fix it, so review findings are fixed as they arrive rather than
+waiting for someone to notice that nothing is fixing them. Write each plan
+with the `spec` skill, whose hand-over opens the plan's pull request the
+same way.
+
+Projector's skills write their prose by its writing guide. Write the rest
+with the `write` skill, which reads the guide first: each comment, reply,
+and issue you post on GitHub, each commit message and pull request body you
+write outside `implement`, `spec`, or `fix-pr`, and each comment and
+docstring in code you change outside them. Use it whether or not the person
+asked for prose.
+
+Open every pull request as a draft, each layer of a stack included, and mark
+it ready with `project review ready` once your work on it is done. A draft
+says its author is still working, so marking it ready is what asks for its
+review. When the hand-over asks the person to test the change or to review
+a plan, keep it a draft until they answer that it looks good. Ready is not
+signed off: a clean review of the head labels the pull request `clean`, and
+only that is the sign-off.
+
+Talk with the person in the conversation as usual. When Projector's `ask`,
+`tell`, and `request` tools are available, also post anything they must not
+miss to the inbox, a decision with `ask`, news with `tell`, and work only
+they can do with `request`, and say it in your reply too. Always post it
+when it sits among a lot of other text, such as a decision in the middle of
+a long report, where the person could skim past it. Post news they need to
+act on, such as a failure that needs them, and anything that comes up while
+they are away. Leave out what they already see elsewhere, such as a pull
+request's state, which the panel lists. An item stays above their prompt
+until they answer or dismiss it, so keep the inbox for what matters, not as
+a log of everything you did.
+
+Post a request when the next step needs the person to do something you
+cannot do yourself, such as running a command you are not allowed to run,
+signing in to a service, or checking a change on a device you cannot reach,
+like their phone. Ask a question instead when you need their decision, and
+do the work yourself whenever you can. Write the request as what they should
+do, and put the steps in its detail as a numbered list, each step with what
+they should see, so their notes can name the step that failed. Post one
+request for the whole hand-off rather than a question and a notice for its
+parts, and keep working on anything it does not block. Give the request the
+options they choose from when they finish, each a short answer that fits the
+work, such as `Looks good` and `Some feedback` for a test; each marks it
+done, and they can always decline it instead. Give the request a start
+action only when you must prepare something before they can begin, such as
+installing a build on their phone, and leave it out otherwise. Do the slow
+part before you post the request, such as building the app, so the start
+action only installs and launches it and they are not left waiting once they
+press start. They press start when they are ready, and a message that starts
+`STARTED` arrives quoting the start action. Do the start action only then,
+do exactly what that message quotes and nothing more, and mark the request
+ready with the `ready` tool, or blocked with the `block` tool and what they
+should do first, such as unlocking the phone.
+
+When the person picks one of a question's options, the answer reaches you as
+a message that starts `ANSWER`. When they finish a request, its outcome
+reaches you as their prompt, quoting the request after its number in
+brackets, such as `[3] "Test the build"`, with the option they chose and any
+notes under it, or as a message that starts `DONE` and names the
+option. When they decline it, a message that starts `DECLINED` arrives. Read
+the option and the notes, and act on what they say before you go on, even
+when the request is done. A declined request is the person's no, so do not
+post it again unless they ask. When they reply to a question or a request
+instead, answer what they asked. Then withdraw the item with the `withdraw`
+tool if the reply settles it, revise it with the `revise` tool if the reply
+shows it was unclear or the choice or the work has changed, or leave it open
+while it still needs them. When a message that starts `DISCUSS` arrives, the
+person wrote to you about that item from outside the conversation. Answer
+it in the conversation, where they read your reply, then withdraw, revise,
+or leave the item open, as for a reply. A `DISCUSS` about a pull request or
+about the session needs no inbox action. When a message that starts
+`UNCLEAR` arrives, the person did not understand that item, so revise it
+with the `revise` tool to explain it more simply or to add the context they
+lack, keeping its number, rather than posting it again. Each time the person writes to you, also look
+over the other items you posted that are still open, and withdraw any that
+no longer need them, such as news that has gone stale. When the person says
+they dismissed or declined an item by mistake, restore it with the `restore`
+tool or `project inbox restore` rather than posting it again. Name an item
+to the tools by the number `ask`, `tell`, or `request` returned. The panel
+never shows that number, so in what you write to the person, name an item by
+what it asks, tells, or requests.
+<!-- projector:end -->
