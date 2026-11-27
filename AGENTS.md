@@ -27,9 +27,22 @@ multipass has no dependencies, not even dev-dependencies, and that is a feature 
 
 ## Tests
 
-Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` before handing work over; CI runs the same three plus the dependency check. Tests use scrypt work factor 10 so they stay fast. The CLI always uses `age::DEFAULT_WORK_FACTOR` (18), about a third of a second in a release build.
+Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test --locked`, and, when you change `install.sh` or `site/`, `tests/install.sh` or `tests/site.sh` before handing work over; CI runs all five plus the dependency check. `--locked` fails when `Cargo.lock` is out of date, as it is after a version bump that forgets it. `tests/install.sh` installs this checkout, and a release made from it through a `file://` mirror, with `HOME` in a temporary directory, so it needs no network. Tests use scrypt work factor 10 so they stay fast. The CLI always uses `age::DEFAULT_WORK_FACTOR` (18), about a third of a second in a release build.
 
 The CLI reads passphrases from `/dev/tty`, so it cannot be driven from a plain pipe. To exercise it without a terminal, use `expect` against a release build, and point `--store` at a temporary file.
+
+## Releases
+
+- **Release by merging a pull request that raises `version` in `Cargo.toml` and `Cargo.lock`.** `.github/workflows/release.yml` then tags `v<version>` at the merge commit, builds and attests the universal binary, and publishes an immutable release. Never push a tag or create a release by hand. Run the workflow by hand from `main` only for the first release or to finish a run that failed; it skips a version that is already published.
+- **Change `RUST_VERSION` or `DEVELOPER_DIR` in `release.yml` only in a pull request of its own.** The Rust toolchain and the Xcode, whose SDK version the binary records, are part of what `install.sh verify` must match, so a toolchain change and a code change in one release would leave no way to tell which one changed the bytes. `DEVELOPER_DIR` names an Xcode on the runner image because the image's default Xcode moves without a change to the workflow; when the image drops that Xcode, the release fails until a pull request picks another one the image lists.
+- **The release workflow uses only GitHub's own actions, pinned by full commit SHA**, with a comment naming the version. Its `publish` job holds the write and signing permissions, so it never checks out the repository or runs its code; keep any new step that runs repository code in `build`.
+- **Keep the build reproducible.** `.github/scripts/build-release.sh` builds each target twice, at two paths, and fails when any byte differs. Build only inside the unpacked source with `CARGO_TARGET_DIR` beneath it, because `-oso_prefix .` makes the linker's recorded object paths, which feed the binary's UUID, relative to that directory.
+
+## Website
+
+- **`site/` holds the website for `getmultipass.dev`: one static page and the redirects in `site/vercel.json`.** `.github/workflows/site.yml` deploys it to Vercel on every merge that changes it. Vercel has no access to the repository; the workflow pushes with `VERCEL_TOKEN`, which only the `production` environment holds, and that environment admits only `main`.
+- **`site/` holds only `index.html` and `vercel.json`, and `vercel.json` never sets a build command, a framework, rewrites, or functions.** So no copy of `install.sh`, and no other file a redirect could hand to `curl | bash`, is ever served. Every redirect from a path ending in `install.sh` goes into `https://github.com/ninjudd/multipass/releases/`, and every other redirect stays on the site. `.github/scripts/check-site.sh static` enforces this, and `tests/site.sh` runs it against the bad sites in `tests/site/`. Add a case there when you find a new way around it.
+- **The Vercel CLI in `.github/vercel/` is a deployment tool for the website, never a dependency of multipass.** The no-dependencies rule is about crates and the binary, so it does not cover the CLI, but the CLI runs with the token: change its version only in `package.json`, regenerate `package-lock.json` with `npm install --ignore-scripts`, and pick a release at least two weeks old.
 
 <!-- projector:begin 33 -->
 ## Projector conventions
