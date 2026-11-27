@@ -1,0 +1,139 @@
+{
+ "version": 1,
+ "name": "Installer and releases",
+ "project": "installer",
+ "pr": {
+  "repo": "ninjudd/multipass",
+  "number": 27,
+  "title": "Install multipass from a checkout or a release with install.sh",
+  "head": "c6ea61d3049616da1b5bdfe50d92107c6dd64a43",
+  "headRef": "installer",
+  "base": "d491604a5668ff717ba6e51ec51533c272028445",
+  "baseRef": "main"
+ },
+ "overview": {
+  "summary": [
+   "multipass is a single-user password manager, a Rust command-line tool with no dependencies. Until now, the only way to install it was to clone the repository and run <code>cargo install --path .</code>. Nothing recorded what was installed, so there was no way to tell whether a copy was current or to remove it cleanly.",
+   "This pull request adds <code>install.sh</code>, the installer that the <code>installer</code> plan designs. It is the bottom layer of a stack of four. The release workflow and <code>install.sh verify</code> (#28), <code>multipass upgrade</code> (#29), and the website (#30) build on it.",
+   "The installer works in one of two modes, chosen by where the script sits:",
+   "<ul><li><b>From a checkout.</b> When the script's directory holds multipass's <code>Cargo.toml</code>, it builds that checkout with <code>cargo build --release --locked --offline</code> and installs <code>~/.local/bin/multipass</code>.</li><li><b>From a release.</b> Run any other way, as <code>curl … | bash</code> will be, it installs a tagged release. With <code>cargo</code> on <code>PATH</code>, it builds the tag's source archive. Without <code>cargo</code>, it installs the prebuilt macOS binary only after <code>gh attestation verify</code> ties the binary to the release workflow on <code>main</code> and to the commit the tag names. It refuses when neither tool is present, unless <code>MULTIPASS_UNVERIFIED=1</code> is set.</li></ul>",
+   "Each install writes a <b>receipt</b>, a small <code>key value</code> file under <code>~/.local/share/multipass-install</code> that records the installed path, its SHA-256, the version, and how it was installed. A rerun, <code>status</code>, and <code>uninstall</code> read it. <code>uninstall</code> removes only a file whose SHA-256 still matches the receipt."
+  ],
+  "cards": [
+   {
+    "id": "review",
+    "title": "Review so far",
+    "html": "<p>The first Projector review, of <code>a729834</code>, found two defects in <code>install.sh</code>. Both are fixed at <code>c6ea61d</code>, and its review is clean:</p><ul class=\"tight\"><li><b>A release install over a checkout build.</b> A release install over a checkout build of the same version printed <code>current</code> and kept the checkout build. The current check now also requires the receipt's <code>method</code> to be other than <code>checkout</code>, and its <code>source</code> to be this release. <code>status</code> outside a checkout calls a checkout build <code>stale</code>.</li><li><b>A rerun without <code>MULTIPASS_BIN_DIR</code>.</b> Such a rerun wrote a second copy, and <code>uninstall</code> then missed the first. <code>set_bin_dir</code> now defaults to the directory of the file the receipt names, while that file still matches the receipt.</li></ul><p>This head also rebases the branch onto <code>main</code>, which leaves this pull request's own files as they were. CI's <code>test</code> job passed.</p>"
+   },
+   {
+    "id": "later",
+    "title": "Left to the stacked pull requests",
+    "html": "<ul class=\"tight\"><li><b>#28.</b> The release workflow and <code>install.sh verify</code>. Until a release exists, the attested-binary path cannot run end to end.</li><li><b>#29.</b> <code>multipass upgrade</code>, which reruns the released installer.</li><li><b>#30.</b> The website and the <code>check-site.sh</code> CI step.</li><li><b>Rollout step 7.</b> The one-line install goes into the README only once a release and the domain exist.</li></ul>"
+   }
+  ]
+ },
+ "groups": [
+  {
+   "id": "installer",
+   "title": "The installer script",
+   "kicker": "install.sh: two install modes, a receipt, and the status and uninstall commands",
+   "intro": [
+    "<code>install.sh</code> is a bash script that a user can pipe from <code>curl</code>. Every step is a function, and <code>main \"$@\"</code> is the last line. So a download that is cut short defines functions and runs nothing, and no command can read the rest of a piped script from stdin.",
+    "<code>cmd_install</code> picks the mode. In a checkout, it builds and compares the new binary's SHA-256 with the receipt, because a checkout can change without a version bump. For a release, it reads the version from <code>MULTIPASS_VERSION</code> or from where GitHub's <code>releases/latest</code> page redirects. It skips the install only when the receipt records that release from that repository, not a checkout build, and the file still matches. Before any command runs, <code>set_bin_dir</code> chooses the install directory: <code>MULTIPASS_BIN_DIR</code> when it is set, or else the directory of the file the receipt names, or else <code>~/.local/bin</code>. <code>place</code> checks <code>--version</code>, renames the binary into place, and writes the receipt."
+   ],
+   "checks": [
+    {
+     "kind": "verify",
+     "text": "The script runs under macOS's <code>/bin/bash</code> 3.2, which <code>multipass upgrade</code> will use. The review ran a checkout install, a mirrored release install, and a piped <code>bash -s -- status</code> with it."
+    }
+   ],
+   "files": [
+    {
+     "path": "install.sh",
+     "note": "The new installer. Read <code>set_bin_dir</code>, <code>cmd_install</code>, <code>install_release_binary</code>, <code>place</code>, and <code>cmd_uninstall</code> closely.",
+     "checks": [
+      {
+       "kind": "verify",
+       "line": 325,
+       "text": "A release install after a checkout install of the same version now fetches, builds, and installs with <code>method source</code>, and a rerun prints <code>current</code>. The review reproduced this against a <code>file://</code> source mirror in a temporary <code>HOME</code>, and <code>tests/install.sh</code> now checks it."
+      },
+      {
+       "kind": "verify",
+       "line": 371,
+       "text": "Outside a checkout, <code>status</code> prints <code>stale</code> for a checkout build even at the newest release's version. The review checked this with a fake <code>curl</code> answering the <code>releases/latest</code> redirect, as the test does."
+      },
+      {
+       "kind": "verify",
+       "line": 145,
+       "text": "After <code>MULTIPASS_BIN_DIR=~/bin ./install.sh</code>, a plain rerun prints <code>current ~/bin/multipass</code> and writes no second copy. <code>uninstall</code> then removes <code>~/bin/multipass</code>. The review reproduced this in a temporary <code>HOME</code>."
+      },
+      {
+       "kind": "verify",
+       "line": 201,
+       "text": "With neither <code>gh</code> nor <code>MULTIPASS_UNVERIFIED=1</code>, the binary path stops with status 69 before it downloads anything. <code>tests/install.sh</code> checks this, and it passed locally and in CI."
+      },
+      {
+       "kind": "context",
+       "line": 188,
+       "text": "A source build accepts an archive only when its <code>Cargo.lock</code> lists one package, multipass itself. With <code>--offline</code> and <code>--locked</code>, that means the build compiles nothing from outside the tagged source."
+      },
+      {
+       "kind": "context",
+       "line": 83,
+       "text": "<code>--proto '=https,file'</code> applies to redirects too, so a download never falls back to plain HTTP. <code>file://</code> is allowed so that a test can use a local mirror."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "tests",
+   "title": "The installer's test and CI",
+   "kicker": "tests/install.sh runs every install path in a temporary HOME, and CI runs it",
+   "intro": [
+    "<code>tests/install.sh</code> moves <code>HOME</code> into a temporary directory and keeps <code>CARGO_HOME</code> and <code>RUSTUP_HOME</code> pointing at the real toolchains. It installs the checkout, and checks that a rerun without <code>MULTIPASS_BIN_DIR</code> goes to the directory the receipt names. It then installs a release made from the checkout through a <code>file://</code> mirror, over a checkout build of the same version. The mirror serves a <code>git archive</code> of <code>HEAD</code> for the source path. On macOS, it also serves the built binary with a <code>SHA256SUMS</code> file for the binary path, run with neither <code>cargo</code> nor <code>gh</code> on <code>PATH</code>. Last, it checks that no other file under <code>HOME</code> changed.",
+    "CI adds <code>--locked</code> to <code>cargo test</code>, so a version bump that forgets <code>Cargo.lock</code> fails in its pull request, and adds a step that runs the test."
+   ],
+   "checks": [
+    {
+     "kind": "verify",
+     "text": "The test passed locally, and the head's CI <code>test</code> job passed. It needs no network: <code>MULTIPASS_VERSION</code> is set, a fake <code>curl</code> answers the one <code>status</code> run that reads the newest release, and the binary path runs without <code>gh</code>."
+    }
+   ],
+   "files": [
+    {
+     "path": "tests/install.sh",
+     "note": "The installer's end-to-end test: rows, the receipt, the rerun, shadowing, a hand-modified binary, the binary-path refusals, and <code>uninstall</code>."
+    },
+    {
+     "path": ".github/workflows/ci.yml",
+     "note": "Runs <code>cargo test --locked</code> and <code>tests/install.sh</code>. The actions stay pinned by commit SHA, and permissions stay <code>contents: read</code>."
+    }
+   ]
+  },
+  {
+   "id": "docs",
+   "title": "README, agent rules, and the plan",
+   "kicker": "The README documents the checkout install, and the plan records three details the build settled",
+   "intro": [
+    "The README's Install section replaces <code>cargo install --path .</code> with <code>./install.sh</code>, <code>status</code>, and <code>uninstall</code>. The one-line install waits for rollout step 7. The README's trust paragraph is unchanged and still true, because a checkout build trusts only the Rust toolchain.",
+    "The plan moves to <code>in-progress</code> with priority <code>now</code>, and records what the build settled. A checkout rerun compares bytes rather than versions. A checkout build never counts as a release. <code>status</code> from a checkout reads nothing from the network. <code>MULTIPASS_BIN_DIR</code> defaults to the receipt's directory. <code>MULTIPASS_ARCHIVE_URL</code> lets the test mirror a source archive."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": "README.md",
+     "note": "The Install section now documents <code>./install.sh</code>, its rows, the receipt, <code>status</code>, <code>uninstall</code>, and that a rerun keeps the <code>MULTIPASS_BIN_DIR</code> chosen before."
+    },
+    {
+     "path": "AGENTS.md",
+     "note": "The Tests paragraph names <code>cargo test --locked</code> and adds <code>tests/install.sh</code> to the checks to run before handing work over."
+    },
+    {
+     "path": "docs/projects/installer/readme.md",
+     "note": "Status and priority, plus amendments to § 2.1 steps 1 and 3, the <code>status</code> row and the settings table in § 2.2, and § 2.8."
+    }
+   ]
+  }
+ ]
+}
