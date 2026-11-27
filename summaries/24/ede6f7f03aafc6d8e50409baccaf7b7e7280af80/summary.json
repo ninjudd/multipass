@@ -1,0 +1,130 @@
+{
+ "version": 1,
+ "name": "Password generation",
+ "project": "password-generation",
+ "pr": {
+  "repo": "ninjudd/multipass",
+  "number": 24,
+  "title": "Offer made-up syllables in memorable passwords with --syllables",
+  "head": "ede6f7f03aafc6d8e50409baccaf7b7e7280af80",
+  "headRef": "pwgen-syllables",
+  "base": "387b49362fd8435fe99aa081e7e0c2876c91d30e",
+  "baseRef": "pwgen-core",
+  "basePr": 23
+ },
+ "overview": {
+  "summary": [
+   "multipass can make new passwords with <code>generate</code> and <code>add --generate</code>, added in the layer beneath this one. One kind is the <em>memorable</em> password: several words from the EFF's large list of 7,776 words, joined by a separator, such as <code>oxidize-tattered-flier-rebound-anyone</code>.",
+   "1Password's memorable passwords can use short made-up syllables instead of real words. This layer adds that as <code>--syllables</code>, an option of <code>--words</code>. Each word becomes three letters: a consonant, a vowel, and a consonant, such as <code>fip-wol-ruk-tes-bam</code>. Separators and <code>--capitalize</code> work as they do for words.",
+   "A syllable is weaker than a word. There are 20 × 5 × 20 = 2,000 syllables, worth 11.0 bits each, against 12.9 bits for a word. So <code>--words</code> with <code>--syllables</code> and no count makes 6 syllables, 65.8 bits, rather than the 5 that words default to, which would be only 54.8 bits and draw the weak-password warning. The README advises about 1.2 syllables for each word you would have used. The strength line on stderr counts the units as <code>syllables</code>.",
+   "The owner has decided to include syllables, and the plan, now <code>ready</code> in the base branch, records that with 6 syllables as the default."
+  ],
+  "cards": [
+   {
+    "id": "terms",
+    "title": "Terms",
+    "html": "<ul class=\"tight\"><li><b>Recipe</b>: the kind of password and its settings, built from the options. It holds no secret, so its strength can be printed.</li><li><b>Bits</b>: the base-2 logarithm of how many passwords a recipe can make, each equally likely.</li><li><b><code>below(n)</code></b>: draws an index from 0 to n − 1 with no bias, by drawing again when a random 16-bit value would favor some indexes.</li><li><b><code>pick</code></b>: reads one entry of a table by scanning every entry with a mask, so which memory is read does not depend on the secret index.</li></ul>"
+   },
+   {
+    "id": "strength",
+    "title": "Strength by count",
+    "html": "<div class=\"tblwrap\"><table class=\"tbl\"><thead><tr><th>Count</th><th>Words</th><th>Syllables</th></tr></thead><tbody><tr><td>4</td><td>51.7</td><td>43.9</td></tr><tr><td>5 (default)</td><td>64.6</td><td>54.8</td></tr><tr><td>6</td><td>77.5</td><td>65.8</td></tr><tr><td>10</td><td>129.2</td><td>109.7</td></tr><tr><td>15</td><td>193.9</td><td>164.5</td></tr></tbody></table></div><p class=\"note\">Bits with hyphens and no capitalization. Under 64 bits the strength line adds a warning.</p>"
+   }
+  ]
+ },
+ "groups": [
+  {
+   "id": "draw",
+   "title": "Drawing a syllable",
+   "kicker": "The syllable alphabet, the draw, and the strength count in the crypto module",
+   "intro": [
+    "<code>src/crypto/generate.rs</code> turns random bytes into a password. A memorable recipe's <code>Words</code> now carries a <code>list</code>, either <code>WordList::Eff</code> or <code>WordList::Syllables</code>, and the drawing loop branches on it. That branch is on the recipe, which is public, so it reveals nothing about the password.",
+    "For a syllable, the loop draws each of the three letters with the same <code>below</code> and <code>pick</code> the rest of the generator uses, from <code>CONSONANTS</code> (20 letters, all but <code>q</code>) and <code>VOWELS</code> (5). It writes them into the same nine-byte slot a word uses, with a fixed length of 3, so the step that squeezes out padding works unchanged.",
+    "The strength uses <code>word_count(list)</code>, which for syllables is computed from the two tables. Nothing filters out real or offensive syllables, so every one of the 2,000 is possible and the count is exact."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": "src/crypto/generate.rs",
+     "note": "Adds the letter tables and <code>WordList</code>, draws a syllable in <code>draw_words</code>, and counts syllables in <code>word_count</code> and <code>entropy</code>. One new test checks the syllable shape and that nearly all 2,000 syllables turn up.",
+     "checks": [
+      {
+       "kind": "verify",
+       "line": 410,
+       "text": "Each letter goes through <code>below</code>, the rejection draw, and <code>pick</code>, the masked read, so there is no <code>% n</code> and no table lookup indexed by the secret. Checked by reading, and against the <code>AGENTS.md</code> exception for the redraw decision."
+      },
+      {
+       "kind": "verify",
+       "line": 110,
+       "text": "20 × 5 × 20 = 2,000 syllables, and each is a distinct fixed-width string, so <code>log2(2000)</code> per syllable is exact. Hand-computed figures matched the release build: 68.4 bits for 6 syllables with <code>--capitalize one</code>, 76.4 bits for 5 with <code>digit-or-symbol</code>."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "options",
+   "title": "The --syllables option",
+   "kicker": "Parsing the flag, building the recipe, and naming the unit in the strength line",
+   "intro": [
+    "<code>src/main.rs</code> parses <code>--syllables</code> as a flag that takes no value and lists it in the help under <code>--words</code>. <code>src/generator.rs</code> holds it in <code>Options</code>, counts it among the options that need <code>--words</code>, sets the recipe's list from it, defaults the count to 6 instead of 5, and prints <code>syllables</code> instead of <code>words</code> in the strength line.",
+    "Because it is one of the word options, <code>--syllables</code> alone or with <code>--pin</code> fails with <code>--syllables needs --words</code>, and on any command but <code>generate</code> and <code>add --generate</code> it fails as the other password options do."
+   ],
+   "checks": [
+    {
+     "kind": "verify",
+     "text": "Driven against a release build with a temporary store: <code>add site.example --generate --words 6 --syllables --capitalize one</code> printed only the strength line, and <code>get</code> returned a six-syllable password with one capital. <code>--syllables=yes</code>, <code>--syllables</code> without <code>--words</code>, and <code>add x --syllables</code> each failed with a message."
+    }
+   ],
+   "files": [
+    {
+     "path": "src/generator.rs",
+     "note": "Adds the <code>syllables</code> option, defaults the count to 6 with it in <code>Options::recipe</code>, picks the list in <code>words_recipe</code>, and names the unit in <code>strength</code>. Tests pin the 6-syllable strength line, for an explicit count and for none, and the error without <code>--words</code>.",
+     "checks": [
+      {
+       "kind": "context",
+       "line": 66,
+       "text": "Listing <code>--syllables</code> in <code>word_flags</code> is what makes it an error without <code>--words</code>."
+      },
+      {
+       "kind": "verify",
+       "line": 95,
+       "text": "The 6 applies only when <code>--words</code> gives no count: on the release build, <code>--words --syllables</code> made 6 syllables at 65.8 bits, <code>--words 5 --syllables</code> still made 5 at 54.8 with the warning, and <code>--words</code> alone still made 5 words at 64.6."
+      }
+     ]
+    },
+    {
+     "path": "src/main.rs",
+     "note": "Parses <code>--syllables</code>, refuses an inline value, and adds it to the help text with its default of 6."
+    }
+   ]
+  },
+  {
+   "id": "docs",
+   "title": "README and plan",
+   "kicker": "Describing the option for users and in the plan",
+   "intro": [
+    "The README's option table gains a <code>--syllables</code> row with an example and the strength per syllable, and its <code>--words</code> row gives the 6-syllable default. In the plan, the <code>--syllables</code> row (§ 2.2) gains the same example and says the strength line counts the units as <code>syllables</code>. The base branch already records the owner's decision and the 6-syllable default in the plan's <code>--words</code> row and § 6."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": "README.md",
+     "note": "Adds the <code>--syllables</code> row to the option table, with an example and how many syllables match a word count, and gives the 6-syllable default in the <code>--words</code> row.",
+     "checks": [
+      {
+       "kind": "verify",
+       "line": 84,
+       "text": "\"About 1.2 syllables for each word\" holds at every count: a word is worth 1.18 syllables, so rounding 1.2 times the word count up always reaches the words' strength. Checked by computing every count from 3 to 15; the examples hold, 6 syllables at 65.8 bits against 64.6 for 5 words, and 12 at 131.6 against 129.2 for 10."
+      }
+     ]
+    },
+    {
+     "path": "docs/projects/password-generation/readme.md",
+     "note": "The plan's <code>--syllables</code> row (§ 2.2) gains an example and the strength-line unit. Rebasing onto the base's decision resolved a conflict in this row, dropping \"Awaits the owner\" and the note that the feature was one commit.",
+     "checks": []
+    }
+   ]
+  }
+ ]
+}
