@@ -47,6 +47,8 @@ github.com
 | `key` | The 32-byte P-256 private key, as CryptoKit's raw representation |
 | `created` | The registration date, for `list` |
 
+An entry holds at most one `passkey` field, so each entry still describes one account. A second account on the same site gets its own entry, named `<rp id> <user name>`, such as `github.com octocat-work`. Every entry holds at least one of `secret`, `otp`, and `passkey`.
+
 The extension always reports a signature counter of 0, which the WebAuthn specification allows for keys that sync.
 
 ### 2.3 The Keychain item
@@ -80,8 +82,8 @@ multipass does not merge. When two devices save before iCloud syncs, iCloud keep
 | `scripts/build-xcframework.sh` | New. Builds the static library for macOS, iOS, and the iOS simulator, and bundles the three into one XCFramework for Xcode. |
 | `src/crypto/base64.rs` | `encode` and `decode` stop branching on the data and indexing memory with it, because the `passkey` field's `key` is a private key. Each 6-bit value maps to its character, and each character to its value and an invalid flag, with masked arithmetic in place of `ALPHABET` and the `match` in `value`. Every rejection, the stray-bits check included, folds into that flag, and `decode` branches on it once, after the last character. The RFC 4648 tests stay and must still pass. |
 | `src/ffi.rs` | New. A C interface over `Store`: open with a passphrase, find a passkey, add an entry, save, and free. |
-| `src/store.rs` | Format 3: the `passkey` field, and reading formats 1 to 3. |
-| `src/main.rs` | `list` marks entries that hold a passkey; `get --field passkey` prints the site and creation date, never the key. |
+| `src/store.rs` | Format 3: the `passkey` field, at most one per entry, with every entry holding at least one of `secret`, `otp`, and `passkey`. Reads formats 1 to 3. |
+| `src/main.rs` | `list` marks entries that hold a passkey; `get --field passkey` prints the site and creation date, never the key. `passkey <name> --clear` removes only the passkey, and fails when that would leave the entry empty. |
 | `apple/` | New. One Xcode project, in Swift, that builds the app and its extension for iOS and macOS from shared sources, as a SwiftUI multiplatform app: shared SwiftUI views, with a thin per-platform `ASCredentialProviderViewController` subclass in each extension. It uses only Apple's frameworks: AuthenticationServices for the provider, CryptoKit for keys and signatures, LocalAuthentication and Security for Face ID, Touch ID, and the Keychain item, and Foundation's file coordination for iCloud Drive. The app's settings show the store's path, resolve sync conflicts, and remove the Keychain item. |
 | `.github/workflows/ci.yml` | Builds the XCFramework and both apps on `macos-latest`, unsigned. |
 | `AGENTS.md` | Documents the app's build, and changes three rules the design would otherwise break. The dependency rule allows Apple's system frameworks like the Rust standard library, and third-party code stays banned on every platform, including Swift packages. "Every primitive lives in `src/crypto`" exempts the primitives Apple's frameworks provide to `apple/`, CryptoKit's P-256 key generation and `P256.Signing`, and only those. "Passphrases come from `/dev/tty` through `tty::read_hidden`" adds the extension's two sources, its own passphrase field and the per-device Keychain item that only Face ID or Touch ID reads (§ 2.3), and the CLI keeps `/dev/tty` as its only source. The ban on passphrases in argv, environment variables, logs, and errors stays and covers the extension. |
@@ -108,10 +110,13 @@ multipass does not merge. When two devices save before iCloud syncs, iCloud keep
 | Remove the item from the app's settings, then sign in | The extension asks for the passphrase again |
 | `age -d` on the store | Shows `multipass 3` and the entry's `passkey` line |
 | `multipass rm` the entry, then try the sign-in again | multipass offers no passkey for the site |
+| `multipass passkey github.com --clear` on an entry that also holds a password | The passkey is gone, `get github.com` still prints the password, and the site no longer sees the passkey |
+| `multipass passkey <name> --clear` on an entry that holds only a passkey | Fails, and the entry is unchanged; `rm` removes it |
+| Register a second account's passkey on a site that already has one | The new passkey lands in its own entry, `<rp id> <user name>`, and both accounts sign in |
 | Register a passkey in Safari on the iPhone, wait for iCloud Drive to sync, then sign in on the Mac | The Mac's extension finds the passkey and signs in |
 | Register on both devices while one is offline, then bring it online | The app reports a conflict and saves nothing until you choose a version. Neither registration is lost. |
 
-Tests: format 3 round-trips through `to_text` and `from_text`, and a literal format 2 store still opens. The C interface rejects a null or unterminated string. The extension's signature verifies under the public key it registered, checked with CryptoKit in a Swift unit test that runs on both platforms. The library's random bytes come from the system on iOS as well as macOS, checked by the same test that checks them on the Mac. Installing a build on a phone for these checks waits for the user to ask.
+Tests: format 3 round-trips through `to_text` and `from_text`, and a literal format 2 store still opens. The reader rejects an entry with two `passkey` lines, and an entry with none of `secret`, `otp`, and `passkey`, which catches a writer that stacks a second account's passkey onto the first entry. The C interface rejects a null or unterminated string. The extension's signature verifies under the public key it registered, checked with CryptoKit in a Swift unit test that runs on both platforms. The library's random bytes come from the system on iOS as well as macOS, checked by the same test that checks them on the Mac. Installing a build on a phone for these checks waits for the user to ask.
 
 ## 5. Cost
 
@@ -119,7 +124,7 @@ Each sign-in decrypts the store once after the Face ID or Touch ID prompt. That 
 
 ## 6. Open questions
 
-Question 5 blocks the plan until the prototype in § 8 answers it, and questions 7 to 9 wait on the user. Questions 1 to 4 and 6 are decided.
+Question 5 blocks the plan until the prototype in § 8 answers it, and question 7 waits on the user. Questions 1 to 4, 6, 8, and 9 are decided.
 
 1. **Apple frameworks and "no dependencies".** Decided: sign with CryptoKit. Apple's system frameworks count like the Rust standard library, and third-party code stays banned.
 2. **Platforms.** Decided: the Mac and iPhone together, with the store synced through iCloud Drive as § 2.4 describes.
@@ -128,8 +133,8 @@ Question 5 blocks the plan until the prototype in § 8 answers it, and questions
 5. **Reaching the iCloud container from the extension.** § 2.4 has the extension read the store from the app's iCloud container. Whether an AutoFill extension may open that container directly, or needs the app to keep a copy in a shared App Group container, is unverified. Owner: the implementer, through a prototype, before this plan goes `ready`.
 6. **How one project builds both apps.** Decided: a SwiftUI multiplatform app. If the prototype shows that Mac Catalyst would share more of the extension's code, the implementer switches to Catalyst and records why here. The unmodified iPad build on the Mac ("Designed for iPad") is ruled out, because it runs only on Apple-silicon Macs and may not run the extension.
 7. **Naming a new passkey's entry.** When a site registers a passkey, the extension must choose an entry. Recommended: use the site's relying party ID, such as `github.com`, as the name. When an entry with that name exists, add the `passkey` field to it, grouped with its password and one-time password as `otp` is. Owner: the user.
-8. **One passkey per entry, or several.** A second account on the same site registers a second passkey for the same relying party ID. Recommended: one passkey per entry, with the second account's entry named `<rp id> <user name>`, such as `github.com octocat-work`, so each entry still describes one account. Owner: the user.
-9. **Removing a passkey without its entry.** `rm` deletes a whole entry, including its password. Recommended: `multipass passkey <name> --clear`, which mirrors `otp --clear`. An entry must then hold at least one of `secret`, `otp`, and `passkey`, so `--clear` fails when it would leave the entry empty. Owner: the user.
+8. **One passkey per entry, or several.** Decided: one passkey per entry, with a second account's entry named `<rp id> <user name>`, as § 2.2 describes.
+9. **Removing a passkey without its entry.** Decided: `multipass passkey <name> --clear` removes only the passkey, and fails when that would leave the entry empty.
 
 ## 7. Background
 
