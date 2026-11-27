@@ -405,7 +405,7 @@ cmd_uninstall() {
     warn_row "user-owned" "$(tilde "$path") no longer matches what the installer wrote, so it stays"
   fi
   [ -f "$RECEIPT" ] || rmdir "$RECEIPT_DIR" 2>/dev/null || true
-  row "kept" "your stores, such as ~/.multipass/store.age"
+  row "kept" "your stores, such as ~/.multipass/store.multipass"
 }
 
 buildinfo_field() {
