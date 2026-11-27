@@ -1,0 +1,319 @@
+diff --git a/README.md b/README.md
+index f227cc2..87c64b4 100644
+--- a/README.md
++++ b/README.md
+@@ -65,9 +65,10 @@ multipass: PIN, 6 digits: 19.9 bits -- weak for a password you cannot rate-limit
+ | `--symbols <chars>` | all 32 ASCII punctuation characters | The symbols to use, for a site that accepts only some. |
+ | `--exclude <chars>` | | Characters never to use. |
+ | `--no-lookalikes` | | Leaves out `0`, `O`, `o`, `1`, `l`, `I`, and `\|`. |
+-| `--words [<n>]` | `5` | Memorable words instead, from 3 to 15, drawn from the EFF's large word list of 7,776 words. |
++| `--words [<n>]` | `5`, or `6` with `--syllables` | Memorable words instead, from 3 to 15, drawn from the EFF's large word list of 7,776 words. |
+ | `--separator <sep>` | `hyphen` | With `--words`: `hyphen`, `space`, `period`, `comma`, `underscore`, `digit`, or `digit-or-symbol`. The last two draw a new character for each gap. |
+ | `--capitalize <how>` | `none` | With `--words`: `first` capitalizes every word, and `one` capitalizes one word chosen at random. |
++| `--syllables` | | With `--words`: made-up syllables of a consonant, a vowel, and a consonant, such as `fip-wol-ruk-tes-bam`, instead of real words. Each is shorter than a word and weaker, 11.0 bits against 12.9, so use about 1.2 syllables for each word you would have used: 6 match 5 words, and 12 match 10. |
+ | `--pin [<n>]` | `6` | A PIN instead, from 4 to 64 digits. |
+ 
+ Every character, word, and separator is drawn from `/dev/urandom` without bias, and the strength line counts exactly the passwords that meet the options. A password under 64 bits gets a warning: that is too weak to survive an attacker who can guess offline, though a PIN that a bank's servers rate-limit is still fine.
+diff --git a/docs/projects/password-generation/readme.md b/docs/projects/password-generation/readme.md
+index 21b57f8..4560ed2 100644
+--- a/docs/projects/password-generation/readme.md
++++ b/docs/projects/password-generation/readme.md
+@@ -63,7 +63,7 @@ The loops in steps 4.1 and 4.3 decide whether to draw again from a value that is
+ | `--words [<n>]` | memorable | `5`, or `6` with `--syllables` | Words, from 3 to 15, as in 1Password. The count may be left out. The default clears 64 bits either way: 5 words are 64.6 bits, but 5 syllables would be only 54.8, so 6 syllables, 65.8 bits, is the default with `--syllables`. |
+ | `--separator <sep>` | memorable | `hyphen` | What goes between words: `hyphen`, `space`, `period`, `comma`, `underscore`, `digit`, or `digit-or-symbol`. The last two draw a new random character for each gap. |
+ | `--capitalize <which>` | memorable | `none` | `none`, `first` (the first letter of every word), or `one` (the first letter of one randomly chosen word). |
+-| `--syllables` | memorable | off | Uses short pronounceable syllables instead of full words (§ 2.4). |
++| `--syllables` | memorable | off | Uses short pronounceable syllables instead of full words (§ 2.4), such as `fip-wol-ruk-tes-bam`. The strength line counts them as `syllables`. |
+ | `--pin [<n>]` | PIN | `6` | Digits, from 4 to 64. The count may be left out. |
+ 
+ With no kind option, `generate` and `add --generate` make random characters. An option for another kind is an error, such as `--separator` with `--length`. 1Password's random type has three toggles, letters, numbers, and symbols. Splitting letters into uppercase and lowercase gives sites that require both a way to say so, and each set that is on must appear at least once, as sites that list required characters expect. The strength line counts only the passwords that meet those requirements.
+diff --git a/src/crypto/generate.rs b/src/crypto/generate.rs
+index 55be73f..8c0f088 100644
+--- a/src/crypto/generate.rs
++++ b/src/crypto/generate.rs
+@@ -21,6 +21,9 @@ pub const SYMBOLS: &[u8] = b"!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
+ pub const DIGITS: &[u8] = b"0123456789";
+ pub const UPPERCASE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+ pub const LOWERCASE: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
++/// Every consonant but `q`, which reads oddly without a `u` after it.
++pub const CONSONANTS: &[u8] = b"bcdfghjklmnprstvwxyz";
++pub const VOWELS: &[u8] = b"aeiou";
+ 
+ /// The EFF's large word list, one lowercase word per line.
+ const EFF_LARGE: &str = include_str!("wordlist/eff_large.txt");
+@@ -60,10 +63,20 @@ pub struct Cell {
+ #[derive(Debug, Clone, PartialEq)]
+ pub struct Words {
+     pub count: usize,
++    pub list: WordList,
+     pub separator: Separator,
+     pub capitalize: Capitalize,
+ }
+ 
++#[derive(Debug, Clone, Copy, PartialEq)]
++pub enum WordList {
++    /// The EFF's large word list.
++    Eff,
++    /// Made-up syllables: a consonant from [`CONSONANTS`], a vowel from
++    /// [`VOWELS`], and another consonant.
++    Syllables,
++}
++
+ #[derive(Debug, Clone, Copy, PartialEq)]
+ pub enum Separator {
+     /// The same character between every pair of words.
+@@ -90,9 +103,12 @@ pub struct Generated {
+     pub len: usize,
+ }
+ 
+-/// The number of entries in the word list.
+-pub fn word_count() -> usize {
+-    EFF_LARGE.lines().count()
++/// The number of entries in `list`.
++pub fn word_count(list: WordList) -> usize {
++    match list {
++        WordList::Eff => EFF_LARGE.lines().count(),
++        WordList::Syllables => CONSONANTS.len() * VOWELS.len() * CONSONANTS.len(),
++    }
+ }
+ 
+ /// Draws a password from the operating system's generator.
+@@ -132,7 +148,9 @@ pub fn entropy(recipe: &Recipe) -> f64 {
+                 Capitalize::One => (words.count as f64).log2(),
+                 Capitalize::None | Capitalize::First => 0.0,
+             };
+-            words.count as f64 * (word_count() as f64).log2() + gaps * separator + capitalize
++            words.count as f64 * (word_count(words.list) as f64).log2()
++                + gaps * separator
++                + capitalize
+         }
+     }
+ }
+@@ -384,14 +402,23 @@ fn draw_words(words: &Words, source: &mut Source) -> io::Result<Generated> {
+     let mut bytes = vec![0u8; width];
+     let mut real = vec![0usize; width];
+     for w in 0..words.count {
+-        let (mut word, len) = pick_word(&rows, &lens, below(rows.len(), source)?);
++        let (mut word, len) = match words.list {
++            WordList::Eff => pick_word(&rows, &lens, below(rows.len(), source)?),
++            WordList::Syllables => {
++                let mut syllable = [0u8; WORD_WIDTH];
++                for (b, letters) in syllable.iter_mut().zip([CONSONANTS, VOWELS, CONSONANTS]) {
++                    *b = pick(letters, below(letters.len(), source)?);
++                }
++                (syllable, 3)
++            }
++        };
+         let upper = match words.capitalize {
+             Capitalize::None => 0,
+             Capitalize::First => usize::MAX,
+             Capitalize::One => ct_eq_mask(w, capitalized),
+         };
+-        // Every word starts with a lowercase ASCII letter, which this makes
+-        // uppercase.
++        // Every word and syllable starts with a lowercase ASCII letter, which
++        // this makes uppercase.
+         word[0] -= 0x20 & upper as u8;
+         for (b, &byte) in word.iter().enumerate() {
+             bytes[w * slot + b] = byte;
+@@ -651,6 +678,7 @@ mod tests {
+         let words = |separator, capitalize| {
+             Recipe::Words(Words {
+                 count: 5,
++                list: WordList::Eff,
+                 separator,
+                 capitalize,
+             })
+@@ -719,6 +747,7 @@ mod tests {
+         ] {
+             let recipe = Recipe::Words(Words {
+                 count: 5,
++                list: WordList::Eff,
+                 separator,
+                 capitalize,
+             });
+@@ -765,6 +794,40 @@ mod tests {
+         parts
+     }
+ 
++    #[test]
++    fn syllables_are_consonant_vowel_consonant() {
++        let recipe = Recipe::Words(Words {
++            count: 5,
++            list: WordList::Syllables,
++            separator: Separator::Fixed(b'-'),
++            capitalize: Capitalize::None,
++        });
++        assert_eq!(word_count(WordList::Syllables), 2000);
++        assert_eq!(bits(&recipe), "54.8");
++        let mut fill = stream(6);
++        let mut seen = std::collections::BTreeSet::new();
++        for _ in 0..2000 {
++            let s = draw(&recipe, &mut fill);
++            let parts: Vec<&str> = s.split('-').collect();
++            assert_eq!(parts.len(), 5, "{s}");
++            for part in parts {
++                let b = part.as_bytes();
++                assert!(
++                    b.len() == 3
++                        && CONSONANTS.contains(&b[0])
++                        && VOWELS.contains(&b[1])
++                        && CONSONANTS.contains(&b[2]),
++                    "{s}"
++                );
++                seen.insert(part.to_string());
++            }
++        }
++        // 10,000 draws miss any one of the 2,000 syllables with chance
++        // (1999/2000)^10000, under 1 percent, so a draw that never reaches
++        // some letters shows up as far fewer distinct syllables.
++        assert!(seen.len() > 1950, "{}", seen.len());
++    }
++
+     #[test]
+     fn pins_are_digits() {
+         let mut fill = stream(5);
+diff --git a/src/generator.rs b/src/generator.rs
+index 4600aec..654fbb4 100644
+--- a/src/generator.rs
++++ b/src/generator.rs
+@@ -3,7 +3,8 @@
+ //! a drawn password into text.
+ 
+ use crate::crypto::generate::{
+-    self, Capitalize, Cell, Chars, DIGITS, LOWERCASE, Recipe, SYMBOLS, Separator, UPPERCASE, Words,
++    self, Capitalize, Cell, Chars, DIGITS, LOWERCASE, Recipe, SYMBOLS, Separator, UPPERCASE,
++    WordList, Words,
+ };
+ 
+ /// Characters that are easy to misread for one another.
+@@ -31,6 +32,7 @@ pub struct Options {
+     pub words: Option<Option<usize>>,
+     pub separator: Option<String>,
+     pub capitalize: Option<String>,
++    pub syllables: bool,
+     /// `Some(None)` for `--pin` without a length.
+     pub pin: Option<Option<usize>>,
+ }
+@@ -61,6 +63,7 @@ impl Options {
+         [
+             (self.separator.is_some(), "--separator"),
+             (self.capitalize.is_some(), "--capitalize"),
++            (self.syllables, "--syllables"),
+         ]
+         .into_iter()
+         .filter_map(|(given, flag)| given.then_some(flag))
+@@ -87,7 +90,10 @@ impl Options {
+             return Err(format!("{flag} needs --words"));
+         }
+         let recipe = if let Some(count) = self.words {
+-            self.words_recipe(count.unwrap_or(5))?
++            // 5 syllables are only 54.8 bits, so the default for syllables is
++            // the 6 that clear 64 bits, as 5 words do.
++            let default = if self.syllables { 6 } else { 5 };
++            self.words_recipe(count.unwrap_or(default))?
+         } else if let Some(length) = self.pin {
+             let length = length.unwrap_or(6);
+             in_range("--pin", length, 4, 64)?;
+@@ -131,6 +137,11 @@ impl Options {
+         };
+         Ok(Recipe::Words(Words {
+             count,
++            list: if self.syllables {
++                WordList::Syllables
++            } else {
++                WordList::Eff
++            },
+             separator,
+             capitalize,
+         }))
+@@ -240,10 +251,14 @@ pub fn strength(recipe: &Recipe) -> String {
+                 Capitalize::First => ", each capitalized",
+                 Capitalize::One => ", one capitalized",
+             };
++            let unit = match words.list {
++                WordList::Eff => "words",
++                WordList::Syllables => "syllables",
++            };
+             format!(
+-                "memorable, {} words from {} with {separator}{capitalize}",
++                "memorable, {} {unit} from {} with {separator}{capitalize}",
+                 words.count,
+-                thousands(generate::word_count())
++                thousands(generate::word_count(words.list))
+             )
+         }
+         Recipe::Pin { length } => format!("PIN, {length} digits"),
+@@ -306,6 +321,22 @@ mod tests {
+             }),
+             "PIN, 6 digits: 19.9 bits -- weak for a password you cannot rate-limit"
+         );
++        assert_eq!(
++            strength_of(Options {
++                words: Some(Some(6)),
++                syllables: true,
++                ..Options::default()
++            }),
++            "memorable, 6 syllables from 2,000 with hyphens: 65.8 bits"
++        );
++        assert_eq!(
++            strength_of(Options {
++                words: Some(None),
++                syllables: true,
++                ..Options::default()
++            }),
++            "memorable, 6 syllables from 2,000 with hyphens: 65.8 bits"
++        );
+     }
+ 
+     #[test]
+@@ -347,6 +378,13 @@ mod tests {
+             }),
+             "--separator needs --words"
+         );
++        assert_eq!(
++            err(Options {
++                syllables: true,
++                ..Options::default()
++            }),
++            "--syllables needs --words"
++        );
+         assert_eq!(
+             err(Options {
+                 words: Some(None),
+diff --git a/src/main.rs b/src/main.rs
+index 9f1431d..c5fe9cb 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -61,6 +61,8 @@ Password options, for generate and add --generate:
+                         digit-or-symbol [default: hyphen]
+     --capitalize <how>  none, first (every word) or one (one word)
+                         [default: none]
++    --syllables         Made-up three-letter syllables instead of real words,
++                        6 unless --words gives a count
+   --pin [<n>]           A PIN instead, from 4 to 64 digits [default: 6]
+ 
+ Options:
+@@ -252,11 +254,12 @@ fn parse(args: Vec<String>) -> Result<Parsed> {
+             "--separator" => options.separator = Some(take_value(&flag, inline, &mut args)?),
+             "--capitalize" => options.capitalize = Some(take_value(&flag, inline, &mut args)?),
+             "--generate" | "--no-uppercase" | "--no-lowercase" | "--no-digits" | "--no-symbols"
+-            | "--no-lookalikes"
++            | "--no-lookalikes" | "--syllables"
+                 if inline.is_some() =>
+             {
+                 return Err(format!("{flag} takes no value"));
+             }
++            "--syllables" => options.syllables = true,
+             "--generate" => generate = true,
+             "--no-uppercase" => options.no_uppercase = true,
+             "--no-lowercase" => options.no_lowercase = true,
+@@ -863,6 +866,8 @@ mod tests {
+             "generate --separator space",
+             "generate --words --pin",
+             "generate --length 3",
++            "generate --syllables",
++            "generate --words --syllables=yes",
+         ] {
+             assert!(parse(args(bad)).is_err(), "{bad:?} parsed");
+         }
