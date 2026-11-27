@@ -1,0 +1,90 @@
+{
+ "version": 1,
+ "name": "Shared vaults plan",
+ "project": "shared-vaults",
+ "pr": {
+  "repo": "ninjudd/multipass",
+  "number": 13,
+  "title": "Plan shared vaults",
+  "head": "492d0bc2097e7700efc06b65809ec2ac9aefe65a",
+  "headRef": "shared-vaults-spec",
+  "base": "e8ccf3c38406792be3ff7993597385a6fc734296",
+  "baseRef": "session-unlock-spec",
+  "basePr": 11
+ },
+ "overview": {
+  "summary": [
+   "multipass is a password manager for one person: today a single age file encrypted under one passphrase, and, once the plans in the pull request beneath this one ship, a <b>package</b> (a folder of files that are written once and never changed) whose files a random <b>vault key</b> encrypts. This pull request adds a plan, and no code, for letting several people share one package, such as a household's recovery codes.",
+   "The plan keeps every entry under the symmetric vault key and uses public-key cryptography only to hand each new vault key to each member:",
+   "<ol><li><b>Each member has an identity.</b> It is an age hybrid post-quantum key pair, ML-KEM-768 with X25519 (age's <code>mlkem768x25519</code> recipient type), kept in the package in <code>identity.&lt;member&gt;.age</code> under that member's own passphrase.</li><li><b>Each new vault key goes out as grants.</b> Whoever rotates the key writes one <code>grant.&lt;gen&gt;.&lt;member&gt;.age</code> per member, encrypted to that member's public recipient.</li><li><b>The member list is inside the store.</b> A new store format 4 adds <code>member</code> records beside entries, so the plan expects only vault-key holders to change who gets the next key.</li><li><b>Joining needs a fingerprint read aloud.</b> A newcomer writes a plaintext join request, and a member admits them after both read the same fingerprint out of band.</li><li><b>Removal means leaving someone out of the next rotation.</b> The removal rotation does not carry the old key forward, and the plan lists what a removed member keeps.</li></ol>",
+   "The plan is a <code>draft</code> at priority <code>later</code>, and nothing in it is scheduled. Its seven open questions, including hand-written cryptography against Apple's CryptoKit, are deferred on purpose."
+  ],
+  "cards": [
+   {
+    "id": "terms",
+    "title": "Terms on this page",
+    "html": "<ul class=\"tight\"><li><b>Vault key</b>: the random 256-bit key that encrypts the store files, from the vault-key plan. It rotates at least every 21 days.</li><li><b>Generation</b>: one vault key and the files written under it, named by a random id.</li><li><b>Identity</b> and <b>recipient</b>: a member's private and public key in age's terms.</li><li><b>Grant</b>: one generation's key file text, encrypted to one member's recipient.</li><li><b>Tombstone</b>: the dated marker a removed record leaves so a merge does not bring it back, from the mergeable-store plan.</li></ul>"
+   },
+   {
+    "id": "review",
+    "title": "What the review found",
+    "html": "<p>The Projector review of <code>492d0bc</code> requested changes, with four open threads:</p><ul class=\"tight\"><li><b>Forged and replayed grants</b> (P1): grants are not authenticated, so anyone who knows a recipient can plant a vault key, and a removed member can get back in.</li><li><b>Rule documents</b> (P2): the plan reverses <code>AGENTS.md</code> and <code>README.md</code> rules without a changes-by-file section.</li><li><b><code>passwd</code></b> (P2): changing a passphrase keeps the same identity, so it no longer locks out someone who learned the old one.</li><li><b>Format 4</b> (P2): a <code>member</code> record looks like an entry named <code>member …</code>.</li></ul><p class=\"note\">It also lists five suggestions in the review body.</p>"
+   }
+  ]
+ },
+ "groups": [
+  {
+   "id": "plan",
+   "title": "The shared-vaults plan",
+   "kicker": "One new plan document, read against the plans and rule documents it builds on",
+   "intro": [
+    "The whole change is one plan, <code>docs/projects/shared-vaults/readme.md</code>. Sections 2.1 to 2.5 lay out the package's new files, how a member opens the vault, the member list, joining and removing, and what removal cannot undo. Section 2.7 weighs about 1,500 lines of new constant-time cryptography in <code>src/crypto</code> against calling CryptoKit, and section 3 explains the rejected alternatives.",
+    "Read it beside the plans it depends on, all in this stack: the mergeable store (store format 3 and <code>Store::merge</code>, where the newest <code>modified</code> stamp wins), the vault key (the package, key files, and rotation), and session unlock (an agent that holds the vault key). <code>AGENTS.md</code> and <code>README.md</code> matter too, because they currently describe multipass as single-user, passphrase-only, and without sharing."
+   ],
+   "checks": [
+    {
+     "kind": "verify",
+     "text": "<code>project check</code> prints <code>Project plans are valid.</code> at this head, and <code>git diff --check</code> against the merge base prints nothing. Both were run in a scratch worktree of the head."
+    },
+    {
+     "kind": "verify",
+     "text": "Section 7's claim that the Rust <code>age</code> crate 0.12.1 implements only <code>tagpq</code> and no <code>mlkem768x25519</code> matches that crate's source."
+    }
+   ],
+   "files": [
+    {
+     "path": "docs/projects/shared-vaults/readme.md",
+     "note": "The new plan: package layout, opening, the member list in format 4, membership, removal, implementation choices, and open questions.",
+     "collapsed": false,
+     "checks": [
+      {
+       "kind": "flag",
+       "line": 57,
+       "text": "§ 2.3 claims only a vault-key holder can change who gets the key, but grants are unauthenticated public-key encryption. A sync service that saw a join request, or a removed member, can write a grant with a key of its own and a store file that adds itself, and the next open adopts it. A removed member can also replay an old grant. Open review thread (P1)."
+      },
+      {
+       "kind": "flag",
+       "line": 20,
+       "text": "Public-key grants reverse <code>AGENTS.md</code>'s passphrase-only and single-user rules and <code>README.md</code>'s no-sharing and no-public-keys claims, and the plan has no changes-by-file section saying how they change. Open review thread (P2)."
+      },
+      {
+       "kind": "flag",
+       "line": 26,
+       "text": "The plan never says what <code>passwd</code> does in a shared vault. Re-encrypting the identity file keeps the same identity, so an old passphrase and an old copy of the file still open every later grant. Open review thread (P2)."
+      },
+      {
+       "kind": "flag",
+       "line": 48,
+       "text": "A <code>member &lt;id&gt;</code> line has the same shape as an entry named <code>member …</code>, which entry names allow today, and § 2.3 gives <code>Store::from_text</code> no rule to tell them apart. Open review thread (P2)."
+      },
+      {
+       "kind": "context",
+       "line": 157,
+       "text": "§ 6 defers every question on purpose: the user owns 1 to 5, and the implementer owns 6 and 7. A <code>draft</code> plan claims no readiness, so these do not block review."
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}
