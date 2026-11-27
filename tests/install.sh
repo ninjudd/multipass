@@ -237,6 +237,17 @@ if [ "$(uname -s)" = Darwin ]; then
   printf 'rustc-release %s\nrustflags -C link-arg=-Wl,-oso_prefix,.\nmacosx_deployment_target 11.0 x\n' "$RUST" >"$INFO"
   run env PATH="$WORK/fake-rustup:$PATH" bash "$WORK/release/install.sh" verify
   expect_status 65 "verify with a deployment target that is not a version"
+
+  # A slice that differs exits 65 and names each field that differs, even
+  # where xcodebuild fails, as it does with only the Command Line Tools.
+  printf '#!/bin/sh\nexit 1\n' >"$WORK/fake-rustup/xcodebuild"
+  chmod +x "$WORK/fake-rustup/xcodebuild"
+  printf 'rustc-release %s\nrustc-commit-hash 0000\nxcode Xcode 0.0\nsdk 0.0\nrustflags -C link-arg=-Wl,-oso_prefix,.\nmacosx_deployment_target 11.0\n' "$RUST" >"$INFO"
+  run env PATH="$WORK/fake-rustup:$PATH" bash "$WORK/release/install.sh" verify
+  expect_status 65 "verify of a slice that differs"
+  expect_row differs "slice does not match the release" "verify of a slice that differs"
+  expect_row xcode "the release used Xcode 0.0, this Mac has none" "verify of a slice that differs"
+  expect_row sdk "the release used 0.0" "verify of a slice that differs"
 fi
 
 run bash "$WORK/release/install.sh" uninstall

@@ -471,13 +471,15 @@ cmd_verify() {
   fi
   warn_row "differs" "v$version $arch slice does not match the release: sha256 $ours here, $theirs in the release"
   # Name what differs between the release's build and this Mac's, which
-  # usually explains the bytes.
+  # usually explains the bytes. A probe may fail, as xcodebuild does with
+  # only the Command Line Tools, and then the field reads as none rather
+  # than ending the script before the rows that remain.
   local here
   for field in rustc-commit-hash xcode sdk; do
     case "$field" in
-      rustc-commit-hash) here="$(rustup run "$rust" rustc -vV | awk -F ': ' '$1 == "commit-hash" { print $2 }')" ;;
-      xcode) here="$(xcodebuild -version 2>/dev/null | paste -s -d ' ' -)" ;;
-      sdk) here="$(xcrun --sdk macosx --show-sdk-version 2>/dev/null)" ;;
+      rustc-commit-hash) here="$(rustup run "$rust" rustc -vV 2>/dev/null | awk -F ': ' '$1 == "commit-hash" { print $2 }')" || here="" ;;
+      xcode) here="$(xcodebuild -version 2>/dev/null | paste -s -d ' ' -)" || here="" ;;
+      sdk) here="$(xcrun --sdk macosx --show-sdk-version 2>/dev/null)" || here="" ;;
     esac
     [ "$here" = "$(buildinfo_field "$field" "$info")" ] ||
       row "$field" "the release used $(buildinfo_field "$field" "$info"), this Mac has ${here:-none}"
