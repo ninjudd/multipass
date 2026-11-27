@@ -1,0 +1,957 @@
+diff --git a/README.md b/README.md
+index b3d65b4..db4a1a6 100644
+--- a/README.md
++++ b/README.md
+@@ -24,6 +24,9 @@ Every line of multipass is in this repository, cryptography included: about 1,00
+ cargo install --path .
+ ```
+ 
++> [!WARNING]
++> Once this multipass has moved your store into a package, do not go back to a multipass from before the package. For up to 30 days an older multipass still reads and saves the old `store.age` beside the package, and the package merges its changes. After the old file is retired, an older multipass finds no store at `~/.multipass/store.age`, so every command fails, and its `init` would create a new, empty store beside the package.
++
+ ## Use
+ 
+ ```sh
+@@ -41,6 +44,8 @@ Every command asks for the passphrase. To use a different store, set `MULTIPASS_
+ 
+ The store is a folder, `~/.multipass/store.multipass`, that holds a key file, `key.<generation>.age`, encrypted under your passphrase, and a store file, `store.<generation>.<id>.age`, encrypted under the vault key in the key file. Finder shows it as an ordinary folder. Move or copy the whole folder, never one file out of it, because a store file opens only with the key file of its generation.
+ 
++A store from an earlier multipass is a single file, `~/.multipass/store.age`. The first command that asks for your passphrase moves it into `~/.multipass/store.multipass` and prints `Moved … into …`. To move a store elsewhere, point `--store` or `MULTIPASS_STORE` at the old file, and its package appears beside it, with the same name ending in `.multipass`. multipass leaves the old file where it is, because another Mac on an older multipass may still save to it, and merges any change made to it at the next prompt. Once the old file has gone 30 days unchanged, multipass deletes it. While `--store` or `MULTIPASS_STORE` still names the old file, multipass opens the package and reminds you to update it. A multipass from before the package cannot open one.
++
+ When a passphrase prompt finds the vault key 14 or more days old, multipass replaces it: it writes a new key file and a new store file, and deletes the old ones. So the key in use is always under 21 days old. `passwd` always replaces the key, so your old passphrase opens nothing written afterwards, and `rekey` replaces it at once, for example when you think someone copied it. Neither reveals or changes your passphrase.
+ 
+ `--clip` on `get` and `otp` copies the value instead of printing it, and clears the clipboard 30 seconds later, unless you have copied something else since. It marks the value as concealed and as this Mac only, so Universal Clipboard does not send it to your other Apple devices, and clipboard-history apps that honor the marking skip it. Until it clears, any app running on this Mac can still read it: the markings only keep it off your other devices and out of the history apps that honor them. `--clip` works only on macOS. Piping to `pbcopy` also works, but `pbcopy` cannot mark the value, so it syncs and lands in clipboard history.
+diff --git a/docs/projects/vault-key/readme.md b/docs/projects/vault-key/readme.md
+index 8d96efc..dc5e7cc 100644
+--- a/docs/projects/vault-key/readme.md
++++ b/docs/projects/vault-key/readme.md
+@@ -1,5 +1,5 @@
+ ---
+-status: in-progress
++status: completed
+ priority: now
+ ---
+ 
+@@ -213,3 +213,16 @@ Opening at a prompt runs scrypt at work factor 18 once per key file, normally on
+ ## 6. Open questions
+ 
+ None. Every decision here is the user's: the package, files that are never modified, one store per file, the 21-day key rotating from 14 days, rotation on `passwd`, and `rekey`.
++
++## 7. Outcome
++
++Built as two stacked pull requests on the mergeable store: the package, key file, saves, rotation, `passwd`, and `rekey` first, then the move from a single-file store. `src/vault.rs` holds both, and its tests drive two package directories through a copier that plays a sync service, in every order of the two sides' changes and syncs. The build settled these details, which the sections above leave open or state differently:
++
++- **The move record's fields.** A move record holds `file`, the old store's file name in the package's directory, `sha256` of its bytes, `since`, the Unix second the hash was recorded, and the old store's decrypted text as the snapshot. The 30 unchanged days in § 2.6 count from `since`, not from the old file's modification time, which a sync service can change without changing the file.
++- **The move keeps a format 3 store's stamps.** § 2.6 says the move reads the old store "as format 3 with `modified 0`". A store from formats 1 and 2 does read that way, but the mergeable store's release writes format 3 to the single file, with real stamps, tombstones, and history, and the move keeps them, so a removal made before the move stays a removal. An old file found without a move record still imports at `modified 0`, as § 2.6 says, so it adds only what the package lacks.
++- **The old file is opened with every passphrase typed at the prompt.** A `passwd` after the move puts the package under the new passphrase while an older multipass on another Mac keeps the old file under the old one, so the check tries the passphrase and, when one was asked for, the other passphrase. When neither opens a changed old file, the prompt warns and leaves the record as it is.
++- **A move record whose old file is gone is deleted.** Another Mac retired the old file, so nothing remains to check.
++- **`.DS_Store` is ignored without a warning**, like a `.tmp` file, because Finder writes one into any folder it shows, and the package is an ordinary folder until the passkeys plan's app declares it.
++- **A read-only open says so.** When some key file stays closed, the command prints `opened read-only; another passphrase was set on another Mac`, and a command that saves fails before it asks for anything, with § 2.3's message.
++- **The 21-day expiry has no effect in the CLI yet.** Rotation from day 14 means a prompt never finds a key older than 14 days without replacing it, so only session unlock's agent, which ends its session at expiry, reads the 21 days. Its plan carries that check.
++- **The by-hand checks.** A store made by `main`'s multipass moved at the first `list`, printed `Moved …`, and the next `list` printed the `note: … update MULTIPASS_STORE` line. A save to the old file by that older multipass merged with `… changed after the move; merged its changes`. The reference `age` crate, version 0.12.1, in a scratch project outside the repository, decrypted the key file with the passphrase, the store file and the move record with the key's text, and printed `multipass-key 1`, `multipass 3`, and `multipass-moved 1`. Stock `age` was not installed, so the Go implementation was not run.
+diff --git a/src/crypto/sha256.rs b/src/crypto/sha256.rs
+index 1e4c105..6b17139 100644
+--- a/src/crypto/sha256.rs
++++ b/src/crypto/sha256.rs
+@@ -90,6 +90,18 @@ fn compress(state: &mut [u32; 8], block: &[u8; 64]) {
+     }
+ }
+ 
++/// The SHA-256 of `data` as 64 lower-case hex digits. Use it only for public
++/// data, such as a file's ciphertext: the hex table lookup is indexed by the
++/// digest.
++pub fn hex_digest(data: &[u8]) -> String {
++    const HEX: &[u8; 16] = b"0123456789abcdef";
++    Sha256::digest(data)
++        .iter()
++        .flat_map(|b| [HEX[usize::from(b >> 4)], HEX[usize::from(b & 15)]])
++        .map(char::from)
++        .collect()
++}
++
+ /// HKDF-SHA-256 with a 32-byte output, the only length age uses.
+ pub fn hkdf(salt: &[u8], ikm: &[u8], info: &[u8]) -> [u8; 32] {
+     let prk = hmac::<Sha256>(salt, &[ikm]);
+@@ -135,6 +147,7 @@ mod tests {
+             ),
+         ];
+         for (input, expected) in cases {
++            assert_eq!(hex_digest(input), expected);
+             assert_eq!(Sha256::digest(input).to_vec(), hex(expected));
+         }
+     }
+diff --git a/src/main.rs b/src/main.rs
+index a430a63..e2b252f 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -7,7 +7,7 @@ mod tty;
+ mod vault;
+ 
+ use std::io::{self, IsTerminal, Read, Write};
+-use std::path::{Path, PathBuf};
++use std::path::PathBuf;
+ use std::process::ExitCode;
+ use std::time::{SystemTime, UNIX_EPOCH};
+ 
+@@ -320,9 +320,19 @@ fn parse(args: Vec<String>) -> Result<Parsed> {
+ }
+ 
+ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
+-    let path =
++    let place =
+         package_path(store.or_else(|| std::env::var_os("MULTIPASS_STORE").map(PathBuf::from)))?;
+-    let vault = Vault::new(&path, age::DEFAULT_WORK_FACTOR);
++    let path = place.package;
++    if place.named_old && path.exists() {
++        if let Some(old) = &place.old {
++            eprintln!(
++                "note: {} moved to {}; update MULTIPASS_STORE or --store",
++                old.display(),
++                path.display()
++            );
++        }
++    }
++    let vault = Vault::new(&path, age::DEFAULT_WORK_FACTOR).with_old(place.old.clone());
+     let now = now_ms()?;
+     let save = |session: &mut Session| session.save(&vault, now).map_err(|e| e.to_string());
+ 
+@@ -331,6 +341,13 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
+             if path.exists() {
+                 return Err(format!("a store already exists at {}", path.display()));
+             }
++            if let Some(old) = place.old.as_ref().filter(|old| old.is_file()) {
++                return Err(format!(
++                    "a store already exists at {}; any other command moves it into {}",
++                    old.display(),
++                    path.display()
++                ));
++            }
+             vault
+                 .init(&new_passphrase()?, now)
+                 .map_err(|e| e.to_string())?;
+@@ -527,15 +544,20 @@ fn open(vault: &Vault, now: u64, settle: bool) -> Result<Session> {
+             }
+         }
+     };
+-    let mut session = vault.open(&mut ask, now).map_err(|e| e.to_string())?;
+-    for warning in &session.warnings {
+-        eprintln!("multipass: {warning}");
++    let (mut session, moved) = vault
++        .open_or_move(&mut ask, now)
++        .map_err(|e| e.to_string())?;
++    if let (Some(old), true) = (vault.old(), moved) {
++        eprintln!("Moved {} into {}", old.display(), vault.path().display());
+     }
+     if session.writable().is_err() {
+         eprintln!("multipass: opened read-only; another passphrase was set on another Mac");
+     } else if settle {
+         session.settle(vault, now).map_err(|e| e.to_string())?;
+     }
++    for warning in &session.warnings {
++        eprintln!("multipass: {warning}");
++    }
+     Ok(session)
+ }
+ 
+@@ -656,33 +678,45 @@ fn civil_from_days(days: u64) -> (u64, u64, u64) {
+     (era * 400 + year_of_era + u64::from(month <= 2), month, day)
+ }
+ 
+-/// The store package to open: the path `--store` or `MULTIPASS_STORE`
+-/// names, or `~/.multipass/store.multipass`. A single-file store from an
+-/// earlier multipass, at the named path or at `~/.multipass/store.age`, is
+-/// refused until it can be moved into a package.
+-fn package_path(named: Option<PathBuf>) -> Result<PathBuf> {
+-    let single_file = |path: &Path| {
+-        format!(
+-            "{} is a single-file store from an earlier multipass, which this build cannot open",
+-            path.display()
+-        )
+-    };
++/// Where the store lives. `--store` or `MULTIPASS_STORE` names a package,
++/// or a single-file store from an earlier multipass, whose package is the
++/// same path ending in `.multipass`. Without either, the package is
++/// `~/.multipass/store.multipass`, moved from `~/.multipass/store.age`.
++fn package_path(named: Option<PathBuf>) -> Result<Place> {
+     if let Some(path) = named {
+-        return if path.is_file() {
+-            Err(single_file(&path))
++        // A file is a single-file store from before the package: its
++        // package sits beside it, named for it.
++        return Ok(if path.is_file() {
++            Place {
++                package: path.with_extension("multipass"),
++                old: Some(path),
++                named_old: true,
++            }
+         } else {
+-            Ok(path)
+-        };
++            Place {
++                package: path,
++                old: None,
++                named_old: false,
++            }
++        });
+     }
+     let home =
+         std::env::var_os("HOME").ok_or("HOME is not set; pass --store or set MULTIPASS_STORE")?;
+     let dir = PathBuf::from(home).join(".multipass");
+-    let package = dir.join("store.multipass");
+-    let old = dir.join("store.age");
+-    if !package.exists() && old.is_file() {
+-        return Err(single_file(&old));
+-    }
+-    Ok(package)
++    Ok(Place {
++        package: dir.join("store.multipass"),
++        old: Some(dir.join("store.age")),
++        named_old: false,
++    })
++}
++
++/// Where the store lives: its package, the single-file store from before
++/// the package that it was or will be moved from, and whether `--store` or
++/// `MULTIPASS_STORE` named that old file rather than the package.
++struct Place {
++    package: PathBuf,
++    old: Option<PathBuf>,
++    named_old: bool,
+ }
+ 
+ /// Returns an error naming the entry when it already has a one-time password
+diff --git a/src/vault.rs b/src/vault.rs
+index b24e9bb..6a9c1ff 100644
+--- a/src/vault.rs
++++ b/src/vault.rs
+@@ -5,6 +5,8 @@
+ //! store.multipass/
+ //!     key.<gen>.age            the vault key, under your passphrase
+ //!     store.<gen>.<id>.age     a whole store, under generation <gen>'s key
++//!     moved.<gen>.<id>.age     while an old single-file store sits beside
++//!                              the package: what it held when last checked
+ //! ```
+ //!
+ //! The passphrase unlocks a key file, which holds a random vault key, the
+@@ -27,10 +29,15 @@ use std::io;
+ use std::path::{Path, PathBuf};
+ 
+ use crate::age;
+-use crate::crypto::random;
++use crate::crypto::{self, random};
+ use crate::store::{self, Cutoffs, Store};
+ 
+ const KEY_HEADER: &str = "multipass-key 1";
++const MOVED_HEADER: &str = "multipass-moved 1";
++
++/// An old single-file store is deleted once it has gone this long unchanged
++/// after the move, so a Mac on an older multipass has time to save to it.
++const OLD_FILE_DAYS: u64 = 30;
+ 
+ /// A day in seconds, the unit of the key file's times.
+ const DAY: u64 = 24 * 60 * 60;
+@@ -147,6 +154,54 @@ impl KeyFile {
+     }
+ }
+ 
++/// The text of a move record, `moved.<gen>.<id>.age`: which old single-file
++/// store sits beside the package, the SHA-256 of its bytes when it was last
++/// checked, when that was, and a snapshot of the store text it held then.
++/// The hash is of ciphertext, so it is public.
++#[derive(Debug, Clone, PartialEq, Eq)]
++struct MoveRecord {
++    /// The old file's name, in the package's directory.
++    file: String,
++    sha256: String,
++    /// When `sha256` was recorded, in Unix seconds.
++    since: u64,
++    /// The old store's decrypted text, in whichever format it was written.
++    snapshot: String,
++}
++
++impl MoveRecord {
++    fn to_text(&self) -> String {
++        format!(
++            "{MOVED_HEADER}\nfile {}\nsha256 {}\nsince {}\n{}",
++            self.file, self.sha256, self.since, self.snapshot
++        )
++    }
++
++    fn from_text(text: &str) -> Option<MoveRecord> {
++        let mut rest = text;
++        let mut line = || {
++            let (line, tail) = rest.split_once('\n')?;
++            rest = tail;
++            Some(line)
++        };
++        if line()? != MOVED_HEADER {
++            return None;
++        }
++        let file = line()?.strip_prefix("file ")?.to_string();
++        let sha256 = line()?.strip_prefix("sha256 ")?.to_string();
++        let since = parse_time(line()?.strip_prefix("since ")?)?;
++        if file.is_empty() || file.contains('/') || sha256.len() != 64 {
++            return None;
++        }
++        Some(MoveRecord {
++            file,
++            sha256,
++            since,
++            snapshot: rest.to_string(),
++        })
++    }
++}
++
+ fn parse_time(s: &str) -> Option<u64> {
+     if s.len() > 1 && s.starts_with('0') {
+         return None;
+@@ -174,6 +229,7 @@ struct Listed {
+ struct Listing {
+     keys: Vec<Listed>,
+     stores: Vec<Listed>,
++    moved: Vec<Listed>,
+     /// Names that match no kind, which `open` warns about and leaves alone.
+     foreign: Vec<String>,
+ }
+@@ -201,6 +257,9 @@ pub struct Vault {
+     /// The scrypt work factor for key files: `age::DEFAULT_WORK_FACTOR` in
+     /// the CLI, and lower in tests.
+     key_work_factor: u8,
++    /// The old single-file store that the package may have been moved from,
++    /// checked at a prompt even when no move record names it.
++    old: Option<PathBuf>,
+     /// Durable writes and removals done so far, and, in tests, the count at
+     /// which to stop, to simulate a crash.
+     steps: Cell<usize>,
+@@ -218,9 +277,14 @@ pub struct Session {
+     known: BTreeMap<String, (Key, Option<u64>)>,
+     key_files: Vec<PathBuf>,
+     store_files: Vec<PathBuf>,
++    /// The move records read, with their paths.
++    moves: Vec<(PathBuf, MoveRecord)>,
+     /// The passphrase a new key file is written under, and when it was set.
+     /// `None` when some key file did not open, so nothing may be written.
+     passphrase: Option<(String, u64)>,
++    /// Every passphrase typed at this prompt, which may open an old
++    /// single-file store written before a `passwd`.
++    typed: Vec<String>,
+     /// What `open` saw that you should know, such as files it left alone.
+     pub warnings: Vec<String>,
+ }
+@@ -235,6 +299,9 @@ pub enum Error {
+     ReadOnly,
+     /// A file named here did not parse or authenticate. The name is public.
+     Damaged(String),
++    /// The old single-file store named here did not parse. The error names a
++    /// line number, never the line.
++    OldStore(String, store::Error),
+     /// A test's simulated crash.
+     #[cfg(test)]
+     Stopped,
+@@ -259,6 +326,7 @@ impl fmt::Display for Error {
+                 "another passphrase was set on another Mac; type it to save"
+             ),
+             Error::Damaged(name) => write!(f, "{name} is damaged or has been tampered with"),
++            Error::OldStore(name, e) => write!(f, "{name}: {e}"),
+             #[cfg(test)]
+             Error::Stopped => write!(f, "stopped"),
+             Error::Vanished => write!(f, "the store changed while it was being read"),
+@@ -287,12 +355,52 @@ impl Vault {
+         Vault {
+             dir: dir.into(),
+             key_work_factor,
++            old: None,
+             steps: Cell::new(0),
+             #[cfg(test)]
+             stop_after: None,
+         }
+     }
+ 
++    /// Names the old single-file store that the package was, or may have
++    /// been, moved from, so a prompt checks it even without a move record.
++    pub fn with_old(mut self, old: Option<PathBuf>) -> Self {
++        self.old = old;
++        self
++    }
++
++    pub fn path(&self) -> &Path {
++        &self.dir
++    }
++
++    pub fn old(&self) -> Option<&Path> {
++        self.old.as_deref()
++    }
++
++    /// Opens the package, or, when there is none yet and the old
++    /// single-file store exists, moves that store into one. Returns the
++    /// session and whether it moved.
++    pub fn open_or_move(
++        &self,
++        ask: &mut dyn FnMut(Ask) -> io::Result<Option<String>>,
++        now_ms: u64,
++    ) -> Result<(Session, bool)> {
++        match self.old.as_ref() {
++            Some(old) if !self.dir.exists() && old.is_file() => {
++                Ok((self.move_in(&old.clone(), ask, now_ms)?, true))
++            }
++            _ => Ok((self.open(ask, now_ms)?, false)),
++        }
++    }
++
++    /// The directory beside the package, which holds the old store file.
++    fn parent(&self) -> PathBuf {
++        match self.dir.parent() {
++            Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
++            _ => PathBuf::from("."),
++        }
++    }
++
+     #[cfg(test)]
+     fn dir(&self) -> &Path {
+         &self.dir
+@@ -327,6 +435,19 @@ impl Vault {
+         if self.dir.exists() {
+             return Err(Error::Exists(self.dir.clone()));
+         }
++        self.build(passphrase, &Store::new(), None, now_ms)
++    }
++
++    /// Builds a package holding a new key under `passphrase`, `store`, and
++    /// `record` when there is one, in `<name>.tmp`, then renames it into
++    /// place. A `.tmp` directory left by a crash is removed first.
++    fn build(
++        &self,
++        passphrase: &str,
++        store: &Store,
++        record: Option<&MoveRecord>,
++        now_ms: u64,
++    ) -> Result<()> {
+         let tmp = self.tmp_dir();
+         if tmp.exists() {
+             fs::remove_dir_all(&tmp).map_err(Error::Io)?;
+@@ -339,13 +460,54 @@ impl Vault {
+             retired: Vec::new(),
+         };
+         self.write_key_file(&tmp, &file, passphrase)?;
+-        self.write_store_file(&tmp, &key, &Store::new(), Cutoffs::at(now_ms))?;
++        self.write_store_file(&tmp, &key, store, Cutoffs::at(now_ms))?;
++        if let Some(record) = record {
++            self.write_move_record(&tmp, &key, record)?;
++        }
+         self.step()?;
+         fs::rename(&tmp, &self.dir).map_err(Error::Io)?;
+-        if let Some(parent) = self.dir.parent().filter(|p| !p.as_os_str().is_empty()) {
+-            store::sync_dir(parent).map_err(Error::Io)?;
+-        }
+-        Ok(())
++        store::sync_dir(&self.parent()).map_err(Error::Io)
++    }
++
++    /// Moves the single-file store at `old` into a new package: asks for its
++    /// passphrase, builds the package holding its entries and a move record,
++    /// and leaves `old` in place, because another Mac on an older multipass
++    /// may still save to it. Returns the package, opened.
++    pub fn move_in(
++        &self,
++        old: &Path,
++        ask: &mut dyn FnMut(Ask) -> io::Result<Option<String>>,
++        now_ms: u64,
++    ) -> Result<Session> {
++        let passphrase = ask(Ask::Passphrase)
++            .map_err(Error::Io)?
++            .ok_or(Error::WrongPassphrase)?;
++        let bytes = fs::read(old).map_err(Error::Io)?;
++        let (store, text) = match open_old(old, &bytes, std::slice::from_ref(&passphrase))? {
++            Some(opened) => opened,
++            None => return Err(Error::WrongPassphrase),
++        };
++        let record = MoveRecord {
++            file: file_name(old),
++            sha256: crypto::sha256::hex_digest(&bytes),
++            since: seconds(now_ms),
++            snapshot: text,
++        };
++        self.build(&passphrase, &store, Some(&record), now_ms)?;
++        let mut again = |_: Ask| Ok(Some(passphrase.clone()));
++        self.open(&mut again, now_ms)
++    }
++
++    fn write_move_record(&self, dir: &Path, key: &Key, record: &MoveRecord) -> Result<PathBuf> {
++        let bytes = age::encrypt(
++            key.text.as_bytes(),
++            record.to_text().as_bytes(),
++            age::VAULT_WORK_FACTOR,
++        )
++        .map_err(Error::Io)?;
++        let name = format!("moved.{}.{}.age", key.generation, random::id()?);
++        self.write(dir, &name, &bytes)?;
++        Ok(dir.join(name))
+     }
+ 
+     fn tmp_dir(&self) -> PathBuf {
+@@ -411,11 +573,18 @@ impl Vault {
+                         path,
+                     })
+                 }
++                ["moved", generation, id, "age"] if is_id(generation) && is_id(id) => {
++                    listing.moved.push(Listed {
++                        generation: generation.to_string(),
++                        path,
++                    })
++                }
+                 _ => listing.foreign.push(name),
+             }
+         }
+         listing.keys.sort_by(|a, b| a.path.cmp(&b.path));
+         listing.stores.sort_by(|a, b| a.path.cmp(&b.path));
++        listing.moved.sort_by(|a, b| a.path.cmp(&b.path));
+         listing.foreign.sort();
+         Ok(listing)
+     }
+@@ -510,6 +679,7 @@ impl Vault {
+             (Some(first), _, _) => (passphrase.to_string(), first),
+             _ => unreachable!("a key file opened with the first passphrase"),
+         };
++        let passphrase_typed = passphrase;
+         let passphrase = unopened.is_empty().then_some(writer);
+ 
+         let now = seconds(now_ms);
+@@ -561,6 +731,28 @@ impl Vault {
+             return Err(Error::StillSyncing);
+         }
+ 
++        let mut moves = Vec::new();
++        for listed in &listing.moved {
++            let Some((key, _)) = known.get(&listed.generation) else {
++                warnings.push(format!(
++                    "left {} alone: no key this passphrase opens is of its generation",
++                    file_name(&listed.path)
++                ));
++                continue;
++            };
++            let bytes = fs::read(&listed.path)?;
++            let record = age::decrypt(key.text.as_bytes(), &bytes)
++                .ok()
++                .and_then(|plain| String::from_utf8(plain).ok())
++                .and_then(|text| MoveRecord::from_text(&text))
++                .ok_or_else(|| Error::Damaged(file_name(&listed.path)))?;
++            moves.push((listed.path.clone(), record));
++        }
++
++        let mut typed = vec![passphrase_typed.to_string()];
++        if let Some(Some(second)) = other.as_ref() {
++            typed.push(second.clone());
++        }
+         Ok(Session {
+             store: {
+                 let mut merged = Store::merge(&stores);
+@@ -571,12 +763,32 @@ impl Vault {
+             known,
+             key_files: opened.into_iter().map(|(path, _, _)| path).collect(),
+             store_files,
++            moves,
+             passphrase,
++            typed,
+             warnings,
+         })
+     }
+ }
+ 
++/// Decrypts an old single-file store with the first of `passphrases` that
++/// opens it, returning the store and its text, or `None` when none does.
++fn open_old(path: &Path, bytes: &[u8], passphrases: &[String]) -> Result<Option<(Store, String)>> {
++    for passphrase in passphrases {
++        match age::decrypt(passphrase.as_bytes(), bytes) {
++            Ok(plain) => {
++                let text = String::from_utf8(plain).map_err(|_| Error::Damaged(file_name(path)))?;
++                let store =
++                    Store::from_text(&text).map_err(|e| Error::OldStore(file_name(path), e))?;
++                return Ok(Some((store, text)));
++            }
++            Err(age::Error::WrongPassphrase) => continue,
++            Err(_) => return Err(Error::Damaged(file_name(path))),
++        }
++    }
++    Ok(None)
++}
++
+ /// Decrypts a key file with `passphrase`, or returns `None` when the
+ /// passphrase does not open it.
+ fn read_key_file(path: &Path, passphrase: &str) -> Result<Option<KeyFile>> {
+@@ -634,22 +846,136 @@ impl Session {
+     }
+ 
+     /// Rotates when the current key is 14 or more days old or more than one
+-    /// key file opened, and otherwise compacts when more than one store
+-    /// file was merged. A read-only session does neither.
++    /// key file opened, then checks an old single-file store beside the
++    /// package, and compacts when more than one store file is left. A
++    /// read-only session does none of these.
+     pub fn settle(&mut self, vault: &Vault, now_ms: u64) -> Result<Settled> {
+         if self.passphrase.is_none() {
+             return Ok(Settled::Nothing);
+         }
+         let age = seconds(now_ms).saturating_sub(self.current.created);
++        let mut settled = Settled::Nothing;
+         if age >= ROTATE_AFTER_DAYS * DAY || self.key_files.len() > 1 {
+             self.rotate(vault, now_ms, None)?;
+-            Ok(Settled::Rotated)
+-        } else if self.store_files.len() > 1 {
++            settled = Settled::Rotated;
++        }
++        self.check_old_file(vault, now_ms)?;
++        if self.store_files.len() > 1 {
+             self.save(vault, now_ms)?;
+-            Ok(Settled::Compacted)
+-        } else {
+-            Ok(Settled::Nothing)
++            if settled == Settled::Nothing {
++                settled = Settled::Compacted;
++            }
++        }
++        Ok(settled)
++    }
++
++    /// Compares the old single-file store beside the package with what the
++    /// move record last saw. When it changed, because a Mac on an older
++    /// multipass saved to it after the move, its changes join the store,
++    /// stamped now. When it has gone 30 days unchanged, it is deleted, and
++    /// then the record. An old file with no record, such as one a sync
++    /// service brought back after it was retired, adds only what the store
++    /// lacks.
++    fn check_old_file(&mut self, vault: &Vault, now_ms: u64) -> Result<()> {
++        let now = seconds(now_ms);
++        if self.moves.is_empty() {
++            let Some(old) = vault.old.as_ref().filter(|old| old.is_file()) else {
++                return Ok(());
++            };
++            let bytes = fs::read(old).map_err(Error::Io)?;
++            let Some((found, text)) = open_old(old, &bytes, &self.typed)? else {
++                self.warnings.push(format!(
++                    "left {} alone: this passphrase does not open it",
++                    old.display()
++                ));
++                return Ok(());
++            };
++            let mut zeroed = Store::new();
++            for name in found.names() {
++                zeroed.insert(name, found.get(name).expect("a live name").clone(), 0);
++            }
++            self.store = Store::merge(&[self.store.clone(), zeroed]);
++            self.save(vault, now_ms)?;
++            let record = MoveRecord {
++                file: file_name(old),
++                sha256: crypto::sha256::hex_digest(&bytes),
++                since: now,
++                snapshot: text,
++            };
++            let path = vault.write_move_record(&vault.dir, &self.current, &record)?;
++            self.moves.push((path, record));
++            self.warnings.push(format!(
++                "{} was not recorded as moved; added the entries the store lacked",
++                old.display()
++            ));
++            return Ok(());
++        }
++
++        for (path, record) in std::mem::take(&mut self.moves) {
++            let old = vault.parent().join(&record.file);
++            let bytes = match fs::read(&old) {
++                Ok(bytes) => bytes,
++                Err(e) if e.kind() == io::ErrorKind::NotFound => {
++                    // Another Mac retired the old file; the record is done.
++                    vault.remove(&path)?;
++                    continue;
++                }
++                Err(e) => return Err(Error::Io(e)),
++            };
++            let hash = crypto::sha256::hex_digest(&bytes);
++            if hash == record.sha256 {
++                if now >= record.since + OLD_FILE_DAYS * DAY {
++                    vault.remove(&old)?;
++                    vault.remove(&path)?;
++                } else {
++                    self.moves.push((path, record));
++                }
++                continue;
++            }
++            let Some((changed, text)) = open_old(&old, &bytes, &self.typed)? else {
++                self.warnings.push(format!(
++                    "{} changed after the move, but this passphrase does not open it",
++                    old.display()
++                ));
++                self.moves.push((path, record));
++                continue;
++            };
++            let snapshot = Store::from_text(&record.snapshot)
++                .map_err(|e| Error::OldStore(file_name(&path), e))?;
++            let mut names: Vec<&str> = changed.names().chain(snapshot.names()).collect();
++            names.sort_unstable();
++            names.dedup();
++            for name in names {
++                let (now_entry, then) = (changed.get(name), snapshot.get(name));
++                if now_entry == then {
++                    continue;
++                }
++                let stamp = self.store.stamp(now_ms);
++                match now_entry {
++                    Some(entry) => {
++                        self.store.insert(name, entry.clone(), stamp);
++                    }
++                    None => {
++                        self.store.remove(name, stamp);
++                    }
++                }
++            }
++            self.save(vault, now_ms)?;
++            let updated = MoveRecord {
++                file: record.file.clone(),
++                sha256: hash,
++                since: now,
++                snapshot: text,
++            };
++            let written = vault.write_move_record(&vault.dir, &self.current, &updated)?;
++            vault.remove(&path)?;
++            self.moves.push((written, updated));
++            self.warnings.push(format!(
++                "{} changed after the move; merged its changes",
++                old.display()
++            ));
+         }
++        Ok(())
+     }
+ 
+     /// Writes the store as a new file under the current key, then deletes
+@@ -699,9 +1025,19 @@ impl Session {
+         vault.write_key_file(&vault.dir, &file, &passphrase)?;
+         let cutoffs = self.cutoffs(now_ms);
+         let written = vault.write_store_file(&vault.dir, &key, &self.store, cutoffs)?;
++        let mut moves = Vec::new();
++        for (_, record) in &self.moves {
++            moves.push((
++                vault.write_move_record(&vault.dir, &key, record)?,
++                record.clone(),
++            ));
++        }
+         for path in std::mem::take(&mut self.store_files) {
+             vault.remove(&path)?;
+         }
++        for (path, _) in std::mem::replace(&mut self.moves, moves) {
++            vault.remove(&path)?;
++        }
+         for path in std::mem::take(&mut self.key_files) {
+             vault.remove(&path)?;
+         }
+@@ -1505,4 +1841,212 @@ mod tests {
+             Err(Error::NoStore(_))
+         ));
+     }
++
++    /// Writes `text` as a single-file store, as an earlier multipass did.
++    fn write_old(path: &Path, pass: &str, text: &str) {
++        fs::write(
++            path,
++            age::encrypt(pass.as_bytes(), text.as_bytes(), FAST).unwrap(),
++        )
++        .unwrap();
++    }
++
++    fn old_text(path: &Path, pass: &str) -> String {
++        String::from_utf8(age::decrypt(pass.as_bytes(), &fs::read(path).unwrap()).unwrap()).unwrap()
++    }
++
++    /// A package beside an old single-file store holding `text`, not moved
++    /// yet.
++    fn beside_old(text: &str) -> (Vault, PathBuf) {
++        let root = temp_dir();
++        let old = root.join("store.age");
++        write_old(&old, "pass", text);
++        let vault = new_vault(&root).with_old(Some(old.clone()));
++        (vault, old)
++    }
++
++    fn open_or_move(vault: &Vault, pass: &str, now: u64) -> (Session, bool) {
++        let (mut session, moved) = vault.open_or_move(&mut answers(pass, None), now).unwrap();
++        session.settle(vault, now).unwrap();
++        (session, moved)
++    }
++
++    #[test]
++    fn moves_stores_of_every_format_into_a_package_and_keeps_the_old_file() {
++        for text in [
++            "multipass 1\nexample.com\n\tsecret s1\n\tusername u\n",
++            "multipass 2\nexample.com\n\tsecret s1\n\totp otpauth://totp/x?secret=JBSWY3DPEHPK3PXP\n",
++            "multipass 3\nexample.com\n\tmodified 5\n\tsecret s1\nold\n\tmodified 6\n\tdeleted\n",
++        ] {
++            let (vault, old) = beside_old(text);
++            let (session, moved) = open_or_move(&vault, "pass", T0);
++            assert!(moved, "{text}");
++            assert_eq!(session.store.names().collect::<Vec<_>>(), ["example.com"]);
++            assert_eq!(
++                session.store.get("example.com").unwrap().secret.as_deref(),
++                Some("s1")
++            );
++            assert!(session.warnings.is_empty(), "{:?}", session.warnings);
++            assert_eq!(old_text(&old, "pass"), text, "the old file is untouched");
++            assert_eq!(count(vault.dir(), "key."), 1);
++            assert_eq!(count(vault.dir(), "store."), 1);
++            assert_eq!(count(vault.dir(), "moved."), 1);
++            // A format 3 store keeps its stamps and tombstones; earlier
++            // formats read as `modified 0`.
++            let modified = session.store.version("example.com").unwrap().modified;
++            assert_eq!(
++                modified,
++                if text.starts_with("multipass 3") {
++                    5
++                } else {
++                    0
++                }
++            );
++
++            let (session, moved) = open_or_move(&vault, "pass", T0 + S);
++            assert!(!moved);
++            assert!(session.warnings.is_empty(), "{:?}", session.warnings);
++        }
++    }
++
++    #[test]
++    fn a_wrong_passphrase_moves_nothing() {
++        let (vault, old) = beside_old("multipass 2\nx\n\tsecret 1\n");
++        assert!(matches!(
++            vault.open_or_move(&mut answers("typo", None), T0),
++            Err(Error::WrongPassphrase)
++        ));
++        assert!(!vault.dir().exists());
++        assert!(old.exists());
++    }
++
++    #[test]
++    fn merges_a_save_made_to_the_old_file_after_the_move() {
++        let (vault, old) = beside_old("multipass 2\nx\n\tsecret 1\ny\n\tsecret 2\n");
++        open_or_move(&vault, "pass", T0);
++        // Another Mac, on an older multipass, adds z and removes y.
++        write_old(&old, "pass", "multipass 2\nx\n\tsecret 1\nz\n\tsecret 3\n");
++
++        let later = T0 + DAY_MS;
++        let (session, _) = open_or_move(&vault, "pass", later);
++        assert_eq!(session.store.names().collect::<Vec<_>>(), ["x", "z"]);
++        assert!(
++            session
++                .store
++                .version("y")
++                .is_some_and(|v| v.entry.is_none())
++        );
++        assert_eq!(session.warnings.len(), 1, "{:?}", session.warnings);
++        assert!(session.warnings[0].ends_with("changed after the move; merged its changes"));
++        assert!(old.exists());
++        assert_eq!(count(vault.dir(), "moved."), 1);
++
++        // The next prompt finds the old file as the new record saw it.
++        let (session, _) = open_or_move(&vault, "pass", later + S);
++        assert!(session.warnings.is_empty(), "{:?}", session.warnings);
++        assert_eq!(session.store.names().collect::<Vec<_>>(), ["x", "z"]);
++
++        // It goes once it has been unchanged for 30 days, and not before.
++        open_or_move(&vault, "pass", later + 30 * DAY_MS - S);
++        assert!(old.exists());
++        assert_eq!(count(vault.dir(), "moved."), 1);
++        let (session, _) = open_or_move(&vault, "pass", later + 30 * DAY_MS);
++        assert!(!old.exists());
++        assert_eq!(count(vault.dir(), "moved."), 0);
++        assert_eq!(session.store.names().collect::<Vec<_>>(), ["x", "z"]);
++    }
++
++    #[test]
++    fn a_rotation_keeps_one_move_record_with_the_same_contents() {
++        let (vault, _old) = beside_old("multipass 2\nx\n\tsecret 1\n");
++        let (session, _) = open_or_move(&vault, "pass", T0);
++        let before = session.moves[0].1.clone();
++        let mut session = vault.open(&mut answers("pass", None), T0 + S).unwrap();
++        session.rotate(&vault, T0 + S, None).unwrap();
++        assert_eq!(count(vault.dir(), "moved."), 1);
++        let generation = &session.current.generation;
++        assert!(
++            files(vault.dir()).contains(&file_name(&session.moves[0].0)),
++            "the record in the session is the one on disk"
++        );
++        assert!(file_name(&session.moves[0].0).starts_with(&format!("moved.{generation}.")));
++        let session = vault.open(&mut answers("pass", None), T0 + 2 * S).unwrap();
++        assert_eq!(session.moves.len(), 1);
++        assert_eq!(session.moves[0].1, before);
++        assert!(session.warnings.is_empty(), "{:?}", session.warnings);
++    }
++
++    #[test]
++    fn an_old_file_without_a_record_adds_only_what_the_store_lacks() {
++        let root = temp_dir();
++        let vault = new_vault(&root);
++        vault.init("pass", T0).unwrap();
++        add(&vault, "pass", "x", "new", T0 + 1);
++        let old = root.join("store.age");
++        write_old(
++            &old,
++            "pass",
++            "multipass 2\nx\n\tsecret stale\nb\n\tsecret 2\n",
++        );
++        let vault = new_vault(&root).with_old(Some(old.clone()));
++
++        let (session, moved) = open_or_move(&vault, "pass", T0 + S);
++        assert!(!moved);
++        assert_eq!(session.store.names().collect::<Vec<_>>(), ["b", "x"]);
++        assert_eq!(
++            session.store.get("x").unwrap().secret.as_deref(),
++            Some("new")
++        );
++        assert_eq!(session.warnings.len(), 1, "{:?}", session.warnings);
++        assert!(session.warnings[0].contains("was not recorded as moved"));
++        assert_eq!(count(vault.dir(), "moved."), 1);
++        let (session, _) = open_or_move(&vault, "pass", T0 + 2 * S);
++        assert!(session.warnings.is_empty(), "{:?}", session.warnings);
++    }
++
++    #[test]
++    fn a_move_cut_short_at_any_step_leaves_the_old_file_and_moves_next_time() {
++        let text = "multipass 2\nx\n\tsecret 1\n";
++        for n in 0.. {
++            let (mut vault, old) = beside_old(text);
++            vault.stop_after = Some(n);
++            let result = vault.open_or_move(&mut answers("pass", None), T0);
++            assert_eq!(old_text(&old, "pass"), text);
++            let vault = Vault::new(vault.dir.clone(), FAST).with_old(Some(old.clone()));
++            let (session, _) = open_or_move(&vault, "pass", T0 + S);
++            assert_eq!(session.store.names().collect::<Vec<_>>(), ["x"]);
++            assert!(session.warnings.is_empty(), "{:?}", session.warnings);
++            assert_eq!(count(vault.dir(), "moved."), 1);
++            match result {
++                Err(Error::Stopped) => assert!(n < 4),
++                Ok(_) => break,
++                Err(e) => panic!("{e}"),
++            }
++        }
++    }
++
++    #[test]
++    fn move_records_round_trip() {
++        let record = MoveRecord {
++            file: "store.age".into(),
++            sha256: "a".repeat(64),
++            since: 1_764_000_000,
++            snapshot: "multipass 2\nx\n\tsecret 1\n".into(),
++        };
++        assert_eq!(
++            MoveRecord::from_text(&record.to_text()),
++            Some(record.clone())
++        );
++        for bad in [
++            record
++                .to_text()
++                .replace("multipass-moved 1", "multipass-moved 2"),
++            record
++                .to_text()
++                .replace("file store.age", "file ../store.age"),
++            record.to_text().replace(&"a".repeat(64), "abc"),
++        ] {
++            assert_eq!(MoveRecord::from_text(&bad), None, "{bad}");
++        }
++    }
+ }
