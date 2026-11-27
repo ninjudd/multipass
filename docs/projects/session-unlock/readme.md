@@ -342,7 +342,7 @@ The passkeys plan's prototype answers these before this mode is built:
 
 ## 9. Outcome
 
-Built in the pull request that completed this project, on top of the vault-key plan's package. The design in § 2 holds, with these departures, each recorded in § 2.11:
+Built in the pull request that completed this project, on top of the vault-key plan's package. The design in § 2 holds, with these departures, which this section records:
 
 - **Replies carry the entry's whole version.** A `read` or `edit` reply holds the entry's history and, for a removed entry, its tombstone, so `history`, `get --previous`, and `restore` work through the agent as they do after a prompt.
 - **A `failed <n>` reply.** It carries a vault error's message, which names files and never a secret, when the agent cannot open or save the package.
