@@ -40,7 +40,7 @@ multipass passwd                                 # change the passphrase
 multipass rekey                                  # replace the vault key now
 ```
 
-Every command asks for the passphrase. To use a different store, set `MULTIPASS_STORE` or pass `--store` with the path of its folder.
+The first command asks for the passphrase, and on a Mac with Touch ID or an Apple Watch, later commands ask for a touch instead, as [Stay unlocked between commands](#stay-unlocked-between-commands) describes. To use a different store, set `MULTIPASS_STORE` or pass `--store` with the path of its folder.
 
 The store is a folder, `~/.multipass/store.multipass`, that holds a key file, `key.<generation>.age`, encrypted under your passphrase, and a store file, `store.<generation>.<id>.age`, encrypted under the vault key in the key file. Finder shows it as an ordinary folder. Move or copy the whole folder, never one file out of it, because a store file opens only with the key file of its generation.
 
@@ -49,6 +49,21 @@ A store from an earlier multipass is a single file, `~/.multipass/store.age`. Th
 When a passphrase prompt finds the vault key 14 or more days old, multipass replaces it: it writes a new key file and a new store file, and deletes the old ones. So the key in use is always under 21 days old. When multipass cannot write to the folder, as in a read-only backup, `get`, `list`, `history` and `otp` still read the store, after a `could not write to <folder>` warning, and commands that save fail with that error before they ask for anything. `passwd` always replaces the key, so your old passphrase opens nothing written afterwards, and `rekey` replaces it at once, for example when you think someone copied it. Neither reveals or changes your passphrase.
 
 `--clip` on `get` and `otp` copies the value instead of printing it, and clears the clipboard 30 seconds later, unless you have copied something else since. It marks the value as concealed and as this Mac only, so Universal Clipboard does not send it to your other Apple devices, and clipboard-history apps that honor the marking skip it. Until it clears, any app running on this Mac can still read it: the markings only keep it off your other devices and out of the history apps that honor them. `--clip` works only on macOS. Piping to `pbcopy` also works, but `pbcopy` cannot mark the value, so it syncs and lands in clipboard history.
+
+## Stay unlocked between commands
+
+On a Mac with Touch ID or a paired Apple Watch, a command that asks for the passphrase also starts a background agent, `multipass __agent`, that keeps the store unlocked. Each later `get`, `list`, `history`, `otp`, `add`, `rm`, or `restore` asks only for a touch of Touch ID or a press on the watch, on a sheet that names the entry, such as "multipass is trying to read github.com". One touch covers one request, and the agent hands over or changes only the entry the sheet names. `init`, `passwd`, and `rekey` always ask for the passphrase.
+
+```sh
+multipass get github.com     # Passphrase: … and an agent starts
+multipass get github.com     # a Touch ID sheet, then the password
+multipass status             # unlocked until 2026-12-17 14:32:00 UTC
+multipass lock               # Locked: the next command asks for the passphrase
+```
+
+The session ends when the vault key expires, at most 21 days after it was made, on a restart, on `multipass lock`, when you cancel a sheet or leave it for 60 seconds, when another Mac replaces the vault key, and when multipass is upgraded. The next command then asks for the passphrase and says why, such as `Passphrase (you declined a request): `. When neither Touch ID nor a watch can answer, as with the lid closed, a command asks for the passphrase and the session stays. Over SSH no agent is asked or started.
+
+What this trades: a program running as you, an AI coding agent included, still cannot read or change an entry, because each request puts a sheet on your screen that only a finger or the watch can approve. Cancel any sheet you did not expect; that ends the session. A person past your Mac's own lock screen can use the store with an enrolled finger, without the passphrase, until the session ends. The agent holds the vault key in memory, locked out of swap and away from debuggers and core files, but root or a kernel exploit could copy it. If you think the Mac was compromised, run `multipass rekey`. Set `MULTIPASS_NO_AGENT=1` to be asked for the passphrase every time.
 
 ## Get an earlier password back
 
@@ -153,7 +168,6 @@ If you lose the passphrase, no one can recover the store. That is the point.
 ## Not built yet
 
 - **Export to 1Password.** Send an entry to 1Password with `op item create`, and delete it locally once it lands.
-- **Session unlock.** Unlock once per session, the way `ssh-agent` does, instead of asking for the passphrase on every command. The vault key is what makes this possible: an agent could hold it without holding the passphrase.
 - **Memory wiping.** Wipe secrets from memory once a command is done.
 - **Echo after Ctrl-C.** Restore terminal echo when you press Ctrl-C at a passphrase prompt. Until then, if your terminal stops showing what you type, run `stty echo` or `reset`.
 
