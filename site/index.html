@@ -71,9 +71,9 @@
   <p>This domain only redirects to the newest release on GitHub. To skip it, use GitHub's URL directly:</p>
   <pre><code>curl -fsSL https://github.com/ninjudd/multipass/releases/latest/download/install.sh | bash</code></pre>
   <p>To pin a release, so a later one cannot change what you run, name its tag and its version:</p>
-  <pre><code>curl -fsSL https://getmultipass.dev/v0.1.0/install.sh | MULTIPASS_VERSION=0.1.0 bash</code></pre>
+  <pre><code>curl -fsSL https://github.com/ninjudd/multipass/releases/download/v0.1.0/install.sh | MULTIPASS_VERSION=0.1.0 bash</code></pre>
   <p>To check the installer before you run it, download it with its attestation bundle and verify it:</p>
-  <pre><code>curl -fsSLO https://getmultipass.dev/install.sh
+  <pre><code>curl -fsSLO https://github.com/ninjudd/multipass/releases/latest/download/install.sh
 curl -fsSLO https://github.com/ninjudd/multipass/releases/latest/download/multipass.sigstore.json
 gh attestation verify install.sh --bundle multipass.sigstore.json --repo ninjudd/multipass \
   --signer-workflow ninjudd/multipass/.github/workflows/release.yml --source-ref refs/heads/main
