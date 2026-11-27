@@ -42,8 +42,10 @@ Commands:
       --force           Replace the entry's one-time password if it has one
     --clear             Remove the entry's one-time password
   list                  List entry names, one per line
-  rm <name>             Remove an entry. Its secrets stay recoverable with
-                        get --previous for 30 days
+  rm <name>             Remove an entry. restore brings it back for 30 days
+  restore <name>        Bring back an entry removed in the past 30 days,
+                        with its secret, username, notes and one-time
+                        password
   passwd                Change the store's passphrase
 
 Options:
@@ -73,6 +75,9 @@ enum Command {
     },
     List,
     Rm {
+        name: String,
+    },
+    Restore {
         name: String,
     },
     Otp {
@@ -270,6 +275,7 @@ fn parse(args: Vec<String>) -> Result<Parsed> {
         }
         "history" => Command::History { name: name()? },
         "rm" => Command::Rm { name: name()? },
+        "restore" => Command::Restore { name: name()? },
         "otp" => Command::Otp {
             name: name()?,
             action: match otp_action.take() {
@@ -402,6 +408,20 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
             store
                 .remove(&name, stamp)
                 .ok_or_else(|| format!("no entry named {name}"))?;
+            save(&store, &passphrase)?;
+        }
+        Command::Restore { name } => {
+            let (mut store, passphrase) = open(&path, now)?;
+            let version = store
+                .version(&name)
+                .ok_or_else(|| format!("no removed entry named {name}"))?;
+            if version.entry.is_some() {
+                return Err(format!("{name} is not removed"));
+            }
+            let stamp = stamp(&store, now);
+            store.restore(&name, stamp).ok_or_else(|| {
+                format!("{name} was removed more than 30 days ago and cannot be restored")
+            })?;
             save(&store, &passphrase)?;
         }
         Command::Otp { name, action } => {
@@ -697,6 +717,12 @@ mod tests {
         assert_eq!(run_of("init"), Command::Init);
         assert_eq!(run_of("list"), Command::List);
         assert_eq!(
+            run_of("restore github.com"),
+            Command::Restore {
+                name: "github.com".into()
+            }
+        );
+        assert_eq!(
             run_of("add github.com --username octocat --force"),
             Command::Add {
                 name: "github.com".into(),
@@ -834,11 +860,15 @@ mod tests {
             "history",
             "history x y",
             "history x --clip",
+            "restore",
+            "restore x y",
+            "restore x --force",
+            "restore x --previous 1",
         ] {
             assert!(parse(args(bad)).is_err(), "{bad:?} parsed");
         }
         // The store text cannot hold an entry with no name.
-        for command in ["add", "get", "rm", "otp", "history"] {
+        for command in ["add", "get", "rm", "restore", "otp", "history"] {
             let argv = vec![command.to_string(), String::new()];
             assert!(parse(argv).is_err(), "{command} with an empty name parsed");
         }

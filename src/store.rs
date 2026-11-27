@@ -14,6 +14,8 @@
 //! old-bank
 //!     modified 1764160000456
 //!     deleted
+//!     secret correct horse battery staple
+//!     username me@example.com
 //!     previous-secret 1764160000456 correct horse battery staple
 //! ```
 //!
@@ -26,7 +28,9 @@
 //! Unix epoch when it last changed, which is what lets two copies of the
 //! store merge entry by entry. A live entry has a `secret`, an `otp`, or
 //! both. A removed entry is a tombstone, marked `deleted`, so a merge can
-//! tell a removal from an entry it has never seen. `previous-secret` and
+//! tell a removal from an entry it has never seen. For 30 days the removed
+//! entry's fields follow `deleted`, so it can be restored whole.
+//! `previous-secret` and
 //! `previous-otp` keep the values an entry used to hold, each after the time
 //! it was replaced. Formats 1 and 2, which multipass still reads, have
 //! neither `modified` nor history, and format 1 has no `otp` field.
@@ -51,8 +55,8 @@ pub const DAY: u64 = 24 * 60 * 60 * 1000;
 /// before it is forgotten.
 const TOMBSTONE_DAYS: u64 = 120;
 
-/// How long a tombstone keeps the removed entry's secrets, so `rm` can be
-/// undone the way a "recently deleted" folder allows.
+/// How long a tombstone keeps the removed entry and its secrets, so `rm` can
+/// be undone the way a "recently deleted" folder allows.
 const REMOVED_SECRET_DAYS: u64 = 30;
 
 /// A live entry keeps every value replaced within this many days, and at
@@ -62,7 +66,7 @@ const HISTORY_KEPT: usize = 10;
 
 /// One account: its secret, its one-time password, or both, and what goes
 /// with them.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Entry {
     pub secret: Option<String>,
     pub username: Option<String>,
@@ -96,6 +100,10 @@ pub struct Version {
     pub modified: u64,
     /// `None` is a tombstone.
     pub entry: Option<Entry>,
+    /// A tombstone's entry as it was when removed, kept until
+    /// `Cutoffs::removed_secrets` so `restore` can bring it back whole.
+    /// Always `None` beside a live entry.
+    pub removed: Option<Entry>,
     pub history: History,
 }
 
@@ -104,8 +112,8 @@ pub struct Version {
 pub struct Cutoffs {
     /// Tombstones modified before this are dropped, with their history.
     pub tombstones: u64,
-    /// Tombstones modified before this keep their marker but lose their
-    /// history, so a removed secret is gone for good.
+    /// Tombstones modified before this keep their marker but lose the
+    /// removed entry and their history, so a removed secret is gone for good.
     pub removed_secrets: u64,
     /// History replaced before this is dropped, past the newest ten.
     pub history: u64,
@@ -133,19 +141,19 @@ impl Version {
     /// breaks a tie between two versions with the same stamp.
     fn current_text(&self) -> String {
         let mut out = format!("\tmodified {}\n", self.modified);
-        match &self.entry {
-            None => out.push_str("\tdeleted\n"),
-            Some(entry) => {
-                let fields = [
-                    ("secret", entry.secret.as_ref()),
-                    ("username", entry.username.as_ref()),
-                    ("otp", entry.otp.as_ref()),
-                    ("notes", entry.notes.as_ref()),
-                ];
-                for (field, value) in fields {
-                    if let Some(value) = value {
-                        out.push_str(&format!("\t{field} {}\n", escape(value)));
-                    }
+        if self.entry.is_none() {
+            out.push_str("\tdeleted\n");
+        }
+        if let Some(entry) = self.entry.as_ref().or(self.removed.as_ref()) {
+            let fields = [
+                ("secret", entry.secret.as_ref()),
+                ("username", entry.username.as_ref()),
+                ("otp", entry.otp.as_ref()),
+                ("notes", entry.notes.as_ref()),
+            ];
+            for (field, value) in fields {
+                if let Some(value) = value {
+                    out.push_str(&format!("\t{field} {}\n", escape(value)));
                 }
             }
         }
@@ -188,14 +196,15 @@ impl Version {
         let mut joined = Version {
             modified: winner.modified,
             entry: winner.entry.clone(),
+            removed: winner.removed.clone(),
             history,
         };
         joined.normalize();
         joined
     }
 
-    /// True when this is a tombstone whose removed secrets `cutoffs` has
-    /// expired.
+    /// True when this is a tombstone whose removed entry and secrets
+    /// `cutoffs` has expired.
     fn removed_secrets_expired(&self, cutoffs: Cutoffs) -> bool {
         self.entry.is_none() && self.modified < cutoffs.removed_secrets
     }
@@ -256,10 +265,24 @@ impl Store {
     }
 
     /// Replaces a live entry with a tombstone stamped `stamp`, which keeps
-    /// the entry's secrets as history until `Cutoffs::removed_secrets`.
+    /// the entry, and its secrets as history, until
+    /// `Cutoffs::removed_secrets`.
     pub fn remove(&mut self, name: &str, stamp: u64) -> Option<Entry> {
         self.get(name)?;
         self.put(name.into(), None, stamp)
+    }
+
+    /// Brings back the entry a tombstone keeps, stamped `stamp`, and returns
+    /// it. Returns `None` when `name` is live or unknown, or when its 30 days
+    /// have passed by `stamp`.
+    pub fn restore(&mut self, name: &str, stamp: u64) -> Option<&Entry> {
+        let version = self.versions.get(name)?;
+        if version.removed_secrets_expired(Cutoffs::at(stamp)) {
+            return None;
+        }
+        let entry = version.removed.clone()?;
+        self.put(name.into(), Some(entry), stamp);
+        self.get(name)
     }
 
     fn put(&mut self, name: String, entry: Option<Entry>, stamp: u64) -> Option<Entry> {
@@ -280,9 +303,11 @@ impl Store {
             history.otps.extend(old.history.otps);
             old.entry
         });
+        let removed = if entry.is_none() { old.clone() } else { None };
         let mut version = Version {
             modified: stamp,
             entry,
+            removed,
             history,
         };
         version.normalize();
@@ -346,6 +371,7 @@ impl Store {
             .retain(|_, version| version.entry.is_some() || version.modified >= cutoffs.tombstones);
         for version in self.versions.values_mut() {
             if version.removed_secrets_expired(cutoffs) {
+                version.removed = None;
                 version.history = History::default();
             }
             for list in [&mut version.history.secrets, &mut version.history.otps] {
@@ -535,9 +561,6 @@ impl Pending {
             list.push(Previous { replaced, value });
             return Some(());
         }
-        if self.deleted {
-            return None;
-        }
         let slot = match key {
             "secret" => &mut self.entry.secret,
             "username" => &mut self.entry.username,
@@ -559,16 +582,22 @@ impl Pending {
     fn finish(self, store: &mut Store) -> Result<(), Error> {
         let invalid = Error::Format { line: self.line };
         let modified = self.modified.ok_or(Error::Format { line: self.line })?;
-        let entry = if self.deleted {
-            None
-        } else if self.entry.secret.is_none() && self.entry.otp.is_none() {
-            return Err(invalid);
-        } else {
+        let fields = if self.entry.secret.is_some() || self.entry.otp.is_some() {
             Some(self.entry)
+        } else if self.deleted && self.entry == Entry::default() {
+            None
+        } else {
+            return Err(invalid);
+        };
+        let (entry, removed) = if self.deleted {
+            (None, fields)
+        } else {
+            (fields, None)
         };
         let mut version = Version {
             modified,
             entry,
+            removed,
             history: self.history,
         };
         version.normalize();
@@ -801,6 +830,7 @@ mod tests {
              old-bank\n\
              \tmodified 6000\n\
              \tdeleted\n\
+             \tsecret tr0ub4dor\n\
              \tprevious-secret 6000 tr0ub4dor\n"
         );
     }
@@ -892,14 +922,19 @@ mod tests {
             ("multipass 3\nname\n\tmodified \n\tsecret x\n", 3),
             ("multipass 3\nname\n\tmodified 1\n\tmodified 1\n", 4),
             ("multipass 3\nname\n\tmodified 1\n\tusername u\n", 2),
-            // A tombstone holds no field.
-            (
-                "multipass 3\nname\n\tmodified 1\n\tdeleted\n\tsecret x\n",
-                5,
-            ),
+            // A tombstone's removed entry follows `deleted`, and needs a
+            // secret or an otp like a live entry.
             (
                 "multipass 3\nname\n\tmodified 1\n\tsecret x\n\tdeleted\n",
                 5,
+            ),
+            (
+                "multipass 3\nname\n\tmodified 1\n\tdeleted\n\tusername u\n",
+                2,
+            ),
+            (
+                "multipass 3\nname\n\tmodified 1\n\tdeleted\n\tsecret x\n\tsecret y\n",
+                6,
             ),
             ("multipass 3\nname\n\tmodified 1\n\tdeleted\n\tdeleted\n", 5),
             ("multipass 3\nname\n\tmodified 1\n\tdeleted x\n", 4),
@@ -1033,6 +1068,54 @@ mod tests {
     }
 
     #[test]
+    fn restore_brings_back_the_whole_entry_for_30_days() {
+        let removed = Entry {
+            secret: Some("hunter2".into()),
+            username: Some("octocat".into()),
+            notes: Some("recovery codes".into()),
+            otp: Some(OTP.into()),
+        };
+        let restored_at = |at: u64| {
+            let mut store = Store::new();
+            store.insert("x", removed.clone(), DAY);
+            store.remove("x", 2 * DAY);
+            // Through the text, as the CLI reads it back before restoring.
+            let mut store = Store::from_text(&store.to_text(Cutoffs::at(2 * DAY))).unwrap();
+            let entry = store.restore("x", at).cloned();
+            (entry, store)
+        };
+        let (entry, store) = restored_at(32 * DAY);
+        assert_eq!(entry.as_ref(), Some(&removed));
+        assert_eq!(store.get("x"), Some(&removed));
+        assert_eq!(store.version("x").unwrap().modified, 32 * DAY);
+        // The restored values are current again, so they leave the history.
+        assert_eq!(store.version("x").unwrap().history, History::default());
+        assert_eq!(restored_at(32 * DAY + 1).0, None);
+
+        let mut store = sample();
+        assert_eq!(store.restore("github.com", 7000), None);
+        assert_eq!(store.restore("missing", 7000), None);
+        assert_eq!(store.restore("old-bank", 7000), Some(&secret("tr0ub4dor")));
+        assert_eq!(store.restore("old-bank", 8000), None);
+    }
+
+    #[test]
+    fn a_merge_orders_a_restore_after_the_removal() {
+        let mut removed = Store::new();
+        removed.insert("x", secret("a"), 10);
+        removed.remove("x", 20);
+        let mut restored = removed.clone();
+        let stamp = restored.stamp(15);
+        restored.restore("x", stamp);
+        for stores in [
+            [removed.clone(), restored.clone()],
+            [restored.clone(), removed.clone()],
+        ] {
+            assert_eq!(Store::merge(&stores).get("x"), Some(&secret("a")));
+        }
+    }
+
+    #[test]
     fn re_adding_after_30_days_leaves_the_removed_secrets_behind() {
         // No write runs between the removal and the new entry, so the store
         // still holds the removed secret when the name is added again.
@@ -1069,8 +1152,9 @@ mod tests {
         store.expire(Cutoffs::at(now));
         assert_eq!(store, written);
         assert_eq!(secrets(&store, "recent").len(), 1);
+        assert!(store.version("recent").unwrap().removed.is_some());
         assert!(secrets(&store, "expired").is_empty());
-        assert!(store.version("expired").is_some());
+        assert_eq!(store.version("expired").unwrap().removed, None);
         assert!(store.version("forgotten").is_none());
         assert_eq!(secrets(&store, "live").len(), 10);
     }
@@ -1097,12 +1181,19 @@ mod tests {
                 continue;
             }
             let modified = rng.below(4);
-            let entry = (rng.below(3) != 0).then(|| Entry {
+            let fields = |rng: &mut Rng| Entry {
                 secret: Some(values[rng.below(3) as usize].into()),
                 username: (rng.below(2) == 0).then(|| "u".into()),
                 notes: None,
                 otp: (rng.below(2) == 0).then(|| otps[rng.below(2) as usize].into()),
-            });
+            };
+            // A tombstone keeps its removed entry, or has lost it to the
+            // 30-day cutoff.
+            let (entry, removed) = match rng.below(6) {
+                0 => (None, None),
+                1 => (None, Some(fields(rng))),
+                _ => (Some(fields(rng)), None),
+            };
             let mut history = History::default();
             for _ in 0..rng.below(3) {
                 history.secrets.push(Previous {
@@ -1119,6 +1210,7 @@ mod tests {
             let mut version = Version {
                 modified,
                 entry,
+                removed,
                 history,
             };
             version.normalize();
