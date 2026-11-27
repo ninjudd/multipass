@@ -2,15 +2,21 @@
 //! the modules that use a framework.
 //!
 //! A framework is loaded with `dlopen` only when a command needs it, so a
-//! command that never uses it runs without it in the process. Every function
-//! here is `unsafe` because the runtime cannot check that a receiver
-//! responds to a selector with the types the caller names; each caller says
-//! why its call is sound.
+//! command that never uses it runs without it in the process.
+//!
+//! These are the unsafe building blocks, not a safe interface. `send`
+//! through `send3`, `new_string`, and `release` are `unsafe`: the runtime
+//! cannot check that a receiver answers a selector with the argument and
+//! return types the caller names, so the caller must know that it does, and
+//! must own any object it releases. `load` is `unsafe` because `dlopen`
+//! runs the library's initializers, so the caller must name a system
+//! framework. `class` and `with_pool` are safe. The modules that call these,
+//! such as `src/clipboard.rs`, wrap them in safe interfaces.
 
 use std::ffi::{CStr, c_char, c_int, c_void};
 
 pub type Id = *mut c_void;
-pub type Sel = *mut c_void;
+type Sel = *mut c_void;
 
 const RTLD_LAZY: c_int = 1;
 const NS_UTF8_STRING_ENCODING: usize = 4;
@@ -33,7 +39,13 @@ unsafe extern "C" {
 /// Loads the framework at `path` into the process, naming it as `what` in
 /// the error. The handle is never closed, because a framework that defines
 /// Objective-C classes cannot be unloaded.
-pub fn load(path: &CStr, what: &str) -> Result<(), String> {
+///
+/// # Safety
+///
+/// `dlopen` runs the library's initializers in this process, so `path` must
+/// be the absolute path of a system framework under
+/// `/System/Library/Frameworks`.
+pub unsafe fn load(path: &CStr, what: &str) -> Result<(), String> {
     // `dlopen` takes a NUL-terminated path, and `dlerror` returns either
     // null or a NUL-terminated message, valid until the next `dl` call on
     // this thread, so it is copied at once.

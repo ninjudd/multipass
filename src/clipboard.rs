@@ -91,7 +91,8 @@ mod macos {
     fn load_appkit() -> Result<(), String> {
         static LOADED: OnceLock<Result<(), String>> = OnceLock::new();
         LOADED
-            .get_or_init(|| crate::objc::load(APPKIT, "AppKit for the clipboard"))
+            // `APPKIT` is the absolute path of a system framework.
+            .get_or_init(|| unsafe { crate::objc::load(APPKIT, "AppKit for the clipboard") })
             .clone()
     }
 
