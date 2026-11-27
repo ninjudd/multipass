@@ -89,7 +89,7 @@ multipass: PIN, 6 digits: 19.9 bits -- weak for a password you cannot rate-limit
 | `--symbols <chars>` | all 32 ASCII punctuation characters | The symbols to use, for a site that accepts only some. |
 | `--exclude <chars>` | | Characters never to use. |
 | `--no-lookalikes` | | Leaves out `0`, `O`, `o`, `1`, `l`, `I`, and `\|`. |
-| `--words [<n>]` | `5` | Memorable words instead, from 3 to 15, drawn from the EFF's large word list of 7,776 words. |
+| `--words [<n>]` | `5`, or `6` with `--syllables` | Memorable words instead, from 3 to 15, drawn from the EFF's large word list of 7,776 words. |
 | `--separator <sep>` | `hyphen` | With `--words`: `hyphen`, `space`, `period`, `comma`, `underscore`, `digit`, or `digit-or-symbol`. The last two draw a new character for each gap. |
 | `--capitalize <how>` | `none` | With `--words`: `first` capitalizes every word, and `one` capitalizes one word chosen at random. |
 | `--syllables` | | With `--words`: made-up syllables of a consonant, a vowel, and a consonant, such as `fip-wol-ruk-tes-bam`, instead of real words. Each is shorter than a word and weaker, 11.0 bits against 12.9, so use about 1.2 syllables for each word you would have used: 6 match 5 words, and 12 match 10. |

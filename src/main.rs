@@ -90,7 +90,8 @@ Password options, for generate and add --generate:
                         digit-or-symbol [default: hyphen]
     --capitalize <how>  none, first (every word) or one (one word)
                         [default: none]
-    --syllables         Made-up three-letter syllables instead of real words
+    --syllables         Made-up three-letter syllables instead of real words,
+                        6 unless --words gives a count
   --pin [<n>]           A PIN instead, from 4 to 64 digits [default: 6]
 
 Options:

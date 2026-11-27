@@ -90,7 +90,10 @@ impl Options {
             return Err(format!("{flag} needs --words"));
         }
         let recipe = if let Some(count) = self.words {
-            self.words_recipe(count.unwrap_or(5))?
+            // 5 syllables are only 54.8 bits, so the default for syllables is
+            // the 6 that clear 64 bits, as 5 words do.
+            let default = if self.syllables { 6 } else { 5 };
+            self.words_recipe(count.unwrap_or(default))?
         } else if let Some(length) = self.pin {
             let length = length.unwrap_or(6);
             in_range("--pin", length, 4, 64)?;
@@ -321,6 +324,14 @@ mod tests {
         assert_eq!(
             strength_of(Options {
                 words: Some(Some(6)),
+                syllables: true,
+                ..Options::default()
+            }),
+            "memorable, 6 syllables from 2,000 with hyphens: 65.8 bits"
+        );
+        assert_eq!(
+            strength_of(Options {
+                words: Some(None),
                 syllables: true,
                 ..Options::default()
             }),
