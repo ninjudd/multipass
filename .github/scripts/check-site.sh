@@ -102,7 +102,9 @@ check_static() {
 # <expected>, under the releases URL, and that no cache may keep it.
 check_redirect() {
   local url="$1" expected="$2" headers status location cache
-  headers="$(curl -sS --proto '=https' -o /dev/null -D - "$url" | tr -d '\r')" || {
+  # A time limit, so a request that hangs fails the check rather than holding
+  # the site job, as vercel-api.sh limits its requests.
+  headers="$(curl -sS --proto '=https' --max-time 30 -o /dev/null -D - "$url" | tr -d '\r')" || {
     problem "could not reach $url"
     return
   }

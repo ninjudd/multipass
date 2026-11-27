@@ -101,6 +101,35 @@ api 403 POST /v1/projects/prj_1/rollback/dpl_1
 [ -z "$OUT" ] || fail "vercel-api.sh printed the body of a 403 to stdout"
 grep -q 'answered HTTP 403' "$FAKE/stderr" || fail "vercel-api.sh did not name the 403: $(cat "$FAKE/stderr")"
 
+# check-site.sh live, against a fake curl that answers each install.sh path
+# as the real site does, or with $LIVE_STATUS in place of the 307. Every
+# request carries a time limit, so a hung request cannot hold the site job.
+mkdir "$FAKE/live"
+cat >"$FAKE/live/curl" <<EOF
+#!/bin/sh
+printf '%s\n' "\$*" >>"$FAKE/live/requests"
+for url; do :; done
+case "\$url" in
+  */v0.0.0/install.sh) location=https://github.com/ninjudd/multipass/releases/download/v0.0.0/install.sh ;;
+  *) location=https://github.com/ninjudd/multipass/releases/latest/download/install.sh ;;
+esac
+printf 'HTTP/2 %s\r\nlocation: %s\r\ncache-control: public, max-age=0, must-revalidate\r\n\r\n' "\${LIVE_STATUS:-307}" "\$location"
+EOF
+chmod +x "$FAKE/live/curl"
+live() {
+  : >"$FAKE/live/requests"
+  set +e
+  OUT="$(env PATH="$FAKE/live:$PATH" LIVE_STATUS="$1" "$CHECK" live https://example.test 2>&1)"
+  STATUS=$?
+  set -e
+}
+live 307
+[ "$STATUS" = 0 ] || fail "check-site.sh live rejected the site's own answers: $OUT"
+[ "$(grep -c -- '--max-time' "$FAKE/live/requests")" = 2 ] ||
+  fail "check-site.sh live sent a request with no time limit: $(cat "$FAKE/live/requests")"
+live 200
+[ "$STATUS" = 1 ] || fail "check-site.sh live exited $STATUS for a 200 in place of a redirect"
+
 # serving-deployment.sh, the rollback target. Only a 404 may leave it empty;
 # a 200 without an ID would leave a failed promotion live.
 SERVING="$ROOT/.github/scripts/serving-deployment.sh"
