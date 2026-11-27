@@ -11,6 +11,7 @@ on:
       - .github/workflows/site.yml
       - .github/vercel/**
       - .github/scripts/check-site.sh
+      - .github/scripts/vercel-api.sh
   workflow_dispatch:
 
 permissions:
@@ -52,17 +53,17 @@ jobs:
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
         run: |
-          # The token goes to curl on stdin, never in its arguments.
-          response="$(printf 'Authorization: Bearer %s\n' "$VERCEL_TOKEN" |
-            curl -sS --proto '=https' -H @- -w '\n%{http_code}' \
-              "https://api.vercel.com/v4/aliases/$DOMAIN?teamId=$VERCEL_ORG_ID")"
-          status="${response##*$'\n'}"
+          set +e
+          alias="$(.github/scripts/vercel-api.sh GET "/v4/aliases/$DOMAIN")"
+          status=$?
+          set -e
           case "$status" in
-            200) deployment="$(printf '%s\n' "${response%$'\n'*}" | jq -r '.deploymentId // empty')" ;;
-            # Before the first deploy, the domain has no alias to roll back to.
-            404) deployment="" ;;
+            0) deployment="$(printf '%s\n' "$alias" | jq -r '.deploymentId // empty')" ;;
+            # Before the first promotion, the domain has no alias to roll
+            # back to.
+            4) deployment="" ;;
             *)
-              echo "::error::could not read which deployment $DOMAIN serves: HTTP $status"
+              echo "::error::could not read which deployment $DOMAIN serves"
               exit 1
               ;;
           esac
@@ -84,29 +85,36 @@ jobs:
             exit 1
           fi
           echo "url=$url" >>"$GITHUB_OUTPUT"
+      # Through the API, because the CLI's promote and rollback first look up
+      # the token's user, which a team-scoped token cannot read.
       - name: Promote it to the domain
         id: promote
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
           URL: ${{ steps.deploy.outputs.url }}
-        run: '"$VERCEL_CLI" promote "$URL" --yes'
+        run: |
+          id="$(.github/scripts/vercel-api.sh GET "/v13/deployments/${URL#https://}" | jq -r '.id // empty')"
+          if [ -z "$id" ]; then
+            echo "::error::Vercel has no deployment at $URL"
+            exit 1
+          fi
+          echo "id=$id" >>"$GITHUB_OUTPUT"
+          .github/scripts/vercel-api.sh POST "/v10/projects/$VERCEL_PROJECT_ID/promote/$id" >/dev/null
+      # Promotion finishes after the request returns, so wait for the alias,
+      # as the CLI's promote waits for up to three minutes.
       - name: Check that the domain serves the new deployment
         id: serving
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
-          URL: ${{ steps.deploy.outputs.url }}
+          NEW: ${{ steps.promote.outputs.id }}
         run: |
-          api() {
-            printf 'Authorization: Bearer %s\n' "$VERCEL_TOKEN" |
-              curl -fsS --proto '=https' -H @- "https://api.vercel.com$1"
-          }
-          host="${URL#https://}"
-          new="$(api "/v13/deployments/$host?teamId=$VERCEL_ORG_ID" | jq -r '.id')"
-          serving="$(api "/v4/aliases/$DOMAIN?teamId=$VERCEL_ORG_ID" | jq -r '.deploymentId // empty')"
-          if [ "$serving" != "$new" ]; then
-            echo "::error::$DOMAIN serves ${serving:-no deployment}, not the new deployment $new"
-            exit 1
-          fi
+          for _ in $(seq 36); do
+            serving="$(.github/scripts/vercel-api.sh GET "/v4/aliases/$DOMAIN" | jq -r '.deploymentId // empty')" || serving=""
+            [ "$serving" != "$NEW" ] || exit 0
+            sleep 5
+          done
+          echo "::error::$DOMAIN serves ${serving:-no deployment} after three minutes, not the new deployment $NEW"
+          exit 1
       # Checked with curl, not the CLI, so a bad redirect the CLI deployed
       # is caught all the same.
       - name: Check the live redirects
@@ -117,4 +125,15 @@ jobs:
         env:
           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
           PREVIOUS: ${{ steps.previous.outputs.deployment }}
-        run: '"$VERCEL_CLI" rollback "$PREVIOUS" --yes'
+        run: |
+          .github/scripts/vercel-api.sh POST "/v1/projects/$VERCEL_PROJECT_ID/rollback/$PREVIOUS" >/dev/null
+          for _ in $(seq 36); do
+            serving="$(.github/scripts/vercel-api.sh GET "/v4/aliases/$DOMAIN" | jq -r '.deploymentId // empty')" || serving=""
+            if [ "$serving" = "$PREVIOUS" ]; then
+              echo "::error::rolled $DOMAIN back to $PREVIOUS"
+              exit 1
+            fi
+            sleep 5
+          done
+          echo "::error::asked Vercel to roll $DOMAIN back to $PREVIOUS, but it still serves ${serving:-no deployment}"
+          exit 1
