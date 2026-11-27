@@ -126,8 +126,12 @@ check_redirect() {
 # vercel.json's headers say. A positive s-maxage fails, because a shared
 # cache uses it in place of max-age.
 cache_revalidates() {
-  local directive directives max_age="" s_maxage="" must=""
-  IFS=, read -ra directives <<<"$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -d ' \t')"
+  local value directive directives max_age="" s_maxage="" must=""
+  value="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -d ' \t')"
+  # An empty value has no directives, and bash 3.2 treats the empty array
+  # as unbound under set -u, so it is refused here rather than by a crash.
+  [ -n "$value" ] || return 1
+  IFS=, read -ra directives <<<"$value"
   for directive in "${directives[@]}"; do
     case "$directive" in
       no-store | no-cache) return 0 ;;

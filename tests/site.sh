@@ -39,12 +39,17 @@ for value in "no-store" "No-Cache" "public, max-age=0, must-revalidate" "max-age
     FAILURES=$((FAILURES + 1))
   }
 done
-for value in "" "public" "public, max-age=0" "public, max-age=60, must-revalidate" \
+# A refusal prints nothing, so one that crashes, as an unbound variable does
+# under set -u, does not count as refusing.
+for value in "" " " "public" "public, max-age=0" "public, max-age=60, must-revalidate" \
   "public, max-age=0, must-revalidate, s-maxage=86400" 'no-cache="set-cookie", max-age=600' "max-age=0, proxy-revalidate"; do
-  ! "$CHECK" cache "$value" || {
+  if errors="$("$CHECK" cache "$value" 2>&1)"; then
     echo "FAIL: check-site.sh cache accepted \"$value\"" >&2
     FAILURES=$((FAILURES + 1))
-  }
+  elif [ -n "$errors" ]; then
+    echo "FAIL: check-site.sh cache failed on \"$value\" without applying the rule: $errors" >&2
+    FAILURES=$((FAILURES + 1))
+  fi
 done
 
 # vercel-api.sh, against a fake curl that logs its arguments and stdin and

@@ -24,7 +24,9 @@ case "$path" in
   *\?*) url="https://api.vercel.com$path&teamId=$VERCEL_ORG_ID" ;;
   *) url="https://api.vercel.com$path?teamId=$VERCEL_ORG_ID" ;;
 esac
-args=(-sS --proto '=https' -H @- -X "$method" -w '\n%{http_code}')
+# A time limit, so a request that hangs cannot stretch the workflow's
+# three-minute waits while the job holds the site concurrency group.
+args=(-sS --proto '=https' --max-time 30 -H @- -X "$method" -w '\n%{http_code}')
 # The endpoints the workflow posts to take no body, as the CLI sends them.
 [ "$method" = GET ] || args+=(-H 'Content-Type: application/json' --data '{}')
 

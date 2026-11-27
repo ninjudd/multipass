@@ -67,6 +67,11 @@ jobs:
               exit 1
               ;;
           esac
+          # The ID goes into later API paths, so anything but an ID stops here.
+          if [ -n "$deployment" ] && ! [[ "$deployment" =~ ^dpl_[A-Za-z0-9]+$ ]]; then
+            echo "::error::the alias of $DOMAIN names $deployment, not a deployment ID"
+            exit 1
+          fi
           echo "deployment=$deployment" >>"$GITHUB_OUTPUT"
       # A rollback turns off the automatic assignment of production domains
       # until a deployment is promoted, so a plain deploy --prod after one
@@ -94,8 +99,8 @@ jobs:
           URL: ${{ steps.deploy.outputs.url }}
         run: |
           id="$(.github/scripts/vercel-api.sh GET "/v13/deployments/${URL#https://}" | jq -r '.id // empty')"
-          if [ -z "$id" ]; then
-            echo "::error::Vercel has no deployment at $URL"
+          if ! [[ "$id" =~ ^dpl_[A-Za-z0-9]+$ ]]; then
+            echo "::error::Vercel named ${id:-no deployment} for $URL, not a deployment ID"
             exit 1
           fi
           echo "id=$id" >>"$GITHUB_OUTPUT"
