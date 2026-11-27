@@ -293,8 +293,8 @@ impl Vault {
         }
     }
 
-    #[cfg(test)]
-    fn dir(&self) -> &Path {
+    /// The package's directory.
+    pub fn dir(&self) -> &Path {
         &self.dir
     }
 

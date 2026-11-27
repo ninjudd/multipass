@@ -324,7 +324,11 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
         package_path(store.or_else(|| std::env::var_os("MULTIPASS_STORE").map(PathBuf::from)))?;
     let vault = Vault::new(&path, age::DEFAULT_WORK_FACTOR);
     let now = now_ms()?;
-    let save = |session: &mut Session| session.save(&vault, now).map_err(|e| e.to_string());
+    let save = |session: &mut Session| {
+        session
+            .save(&vault, now)
+            .map_err(|e| write_error(&vault, e))
+    };
 
     match command {
         Command::Init => {
@@ -369,7 +373,7 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
             clip,
             previous,
         } => {
-            let session = open(&vault, now, true)?;
+            let session = open(&vault, now, Settle::Try)?;
             let store = &session.store;
             let value = match previous {
                 Some(n) => previous_value(store, &name, field, n)?,
@@ -389,7 +393,7 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
             deliver(value, clip)?;
         }
         Command::History { name } => {
-            let session = open(&vault, now, true)?;
+            let session = open(&vault, now, Settle::Try)?;
             let version = session
                 .store
                 .version(&name)
@@ -397,7 +401,7 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
             print!("{}", history_text(version));
         }
         Command::List => {
-            let session = open(&vault, now, true)?;
+            let session = open(&vault, now, Settle::Try)?;
             for name in session.store.names() {
                 println!("{name}");
             }
@@ -428,7 +432,7 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
         }
         Command::Otp { name, action } => {
             let mut session = match action {
-                OtpAction::Show { .. } => open(&vault, now, true)?,
+                OtpAction::Show { .. } => open(&vault, now, Settle::Try)?,
                 _ => open_writable(&vault, now)?,
             };
             let store = &mut session.store;
@@ -494,24 +498,38 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
             let new = new_passphrase()?;
             session
                 .rotate(&vault, now, Some(new))
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| write_error(&vault, e))?;
             eprintln!("Passphrase changed, and the vault key replaced");
         }
         Command::Rekey => {
             let mut session = open_writable_unsettled(&vault, now)?;
             session
                 .rotate(&vault, now, None)
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| write_error(&vault, e))?;
             eprintln!("Replaced the vault key");
         }
     }
     Ok(())
 }
 
-/// Opens the store package, asking for the passphrase, and, with `settle`,
-/// rotates or compacts as `Session::settle` decides. Prints what the open
-/// left alone.
-fn open(vault: &Vault, now: u64, settle: bool) -> Result<Session> {
+/// Whether `open` rotates or compacts the package when `Session::settle`
+/// finds either due.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Settle {
+    /// Settle, but only warn when the package cannot be written, as on a
+    /// read-only backup, so a command that only reads still runs.
+    Try,
+    /// Settle, and fail when that fails, before a command that saves asks
+    /// for anything more.
+    Must,
+    /// Neither rotate nor compact, for `passwd` and `rekey`, which rotate
+    /// anyway.
+    Skip,
+}
+
+/// Opens the store package, asking for the passphrase, and settles it as
+/// `settle` says. Prints what the open left alone.
+fn open(vault: &Vault, now: u64, settle: Settle) -> Result<Session> {
     let mut ask = |ask: Ask| -> io::Result<Option<String>> {
         match ask {
             Ask::Passphrase => tty::read_hidden("Passphrase: ").map(Some),
@@ -527,22 +545,41 @@ fn open(vault: &Vault, now: u64, settle: bool) -> Result<Session> {
             }
         }
     };
-    let mut session = vault.open(&mut ask, now).map_err(|e| e.to_string())?;
+    open_with(vault, now, settle, &mut ask)
+}
+
+/// `open`, with `ask` answering the passphrase prompts.
+fn open_with(
+    vault: &Vault,
+    now: u64,
+    settle: Settle,
+    ask: &mut dyn FnMut(Ask) -> io::Result<Option<String>>,
+) -> Result<Session> {
+    let mut session = vault.open(ask, now).map_err(|e| e.to_string())?;
     for warning in &session.warnings {
         eprintln!("multipass: {warning}");
     }
     if session.writable().is_err() {
         eprintln!("multipass: opened read-only; another passphrase was set on another Mac");
-    } else if settle {
-        session.settle(vault, now).map_err(|e| e.to_string())?;
+        return Ok(session);
+    }
+    if settle == Settle::Skip {
+        return Ok(session);
+    }
+    if let Err(e) = session.settle(vault, now) {
+        let message = write_error(vault, e);
+        if settle == Settle::Must {
+            return Err(message);
+        }
+        eprintln!("multipass: {message}; the store is read as it is");
     }
     Ok(session)
 }
 
 /// Opens the store for a command that saves, failing before it asks for
-/// anything more when the store opened read-only.
+/// anything more when the store opened read-only or cannot be written.
 fn open_writable(vault: &Vault, now: u64) -> Result<Session> {
-    let session = open(vault, now, true)?;
+    let session = open(vault, now, Settle::Must)?;
     session.writable().map_err(|e| e.to_string())?;
     Ok(session)
 }
@@ -550,9 +587,18 @@ fn open_writable(vault: &Vault, now: u64) -> Result<Session> {
 /// Opens the store for `passwd` and `rekey`, which rotate anyway, so it
 /// neither rotates nor compacts first.
 fn open_writable_unsettled(vault: &Vault, now: u64) -> Result<Session> {
-    let session = open(vault, now, false)?;
+    let session = open(vault, now, Settle::Skip)?;
     session.writable().map_err(|e| e.to_string())?;
     Ok(session)
+}
+
+/// The message for a failed write to the package. It names the package
+/// when the file system refused, because the OS error alone does not.
+fn write_error(vault: &Vault, e: vault::Error) -> String {
+    match e {
+        vault::Error::Io(e) => format!("could not write to {}: {e}", vault.dir().display()),
+        e => e.to_string(),
+    }
 }
 
 /// Milliseconds since the Unix epoch, the unit of the store's stamps.
@@ -1090,5 +1136,77 @@ mod tests {
         assert_eq!(strip_newline("a\r\n".into()), "a");
         assert_eq!(strip_newline("a\n\n".into()), "a\n");
         assert_eq!(strip_newline("a".into()), "a");
+    }
+
+    /// A package due to rotate, or to compact, in a folder this process
+    /// cannot write, as on a read-only backup: a command that reads still
+    /// gets the store, and one that saves fails, naming the package.
+    #[test]
+    fn reads_a_package_it_cannot_write_and_refuses_to_save_to_it() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        const DAY_MS: u64 = 24 * 60 * 60 * 1000;
+        const T0: u64 = 1_764_000_000_000;
+        let mut ask = |_: Ask| -> io::Result<Option<String>> { Ok(Some("pass".into())) };
+        let cases = [
+            ("a 15-day-old key", T0 + 15 * DAY_MS, false),
+            ("two store files", T0 + 1000, true),
+        ];
+        for (i, (case, later, second_store_file)) in cases.into_iter().enumerate() {
+            let root = std::env::temp_dir()
+                .join(format!("multipass-main-test-{}-{i}", std::process::id()));
+            let _ = fs::remove_dir_all(&root);
+            fs::create_dir_all(&root).unwrap();
+            let vault = Vault::new(root.join("store.multipass"), 10);
+            vault.init("pass", T0).unwrap();
+            let mut session = open_with(&vault, T0, Settle::Skip, &mut ask).unwrap();
+            let entry = Entry {
+                secret: Some("s".into()),
+                username: None,
+                notes: None,
+                otp: None,
+            };
+            session.store.insert("x", entry, T0);
+            session.save(&vault, T0).unwrap();
+            if second_store_file {
+                let file = fs::read_dir(vault.dir())
+                    .unwrap()
+                    .map(|e| e.unwrap().path())
+                    .find(|p| {
+                        p.file_name()
+                            .unwrap()
+                            .to_string_lossy()
+                            .starts_with("store.")
+                    })
+                    .unwrap();
+                // The same store under another random part of the name, as a
+                // second Mac's save would be.
+                let name = file.file_name().unwrap().to_string_lossy().into_owned();
+                let generation = name.split('.').nth(1).unwrap();
+                let other = format!("store.{generation}.{}.age", "0".repeat(32));
+                fs::copy(&file, vault.dir().join(other)).unwrap();
+            }
+            let mode = |m| fs::set_permissions(vault.dir(), fs::Permissions::from_mode(m));
+            mode(0o500).unwrap();
+
+            let mut read = open_with(&vault, later, Settle::Try, &mut ask);
+            let saving = open_with(&vault, later, Settle::Must, &mut ask).err();
+            let save = read
+                .as_mut()
+                .ok()
+                .map(|s| s.save(&vault, later).map_err(|e| write_error(&vault, e)));
+
+            mode(0o700).unwrap();
+            fs::remove_dir_all(&root).unwrap();
+
+            let read = read.unwrap_or_else(|e| panic!("{case}: {e}"));
+            assert_eq!(read.store.get("x").unwrap().secret.as_deref(), Some("s"));
+            let refused = format!("could not write to {}: ", vault.dir().display());
+            let saving = saving.unwrap_or_else(|| panic!("{case}: a saving open succeeded"));
+            assert!(saving.starts_with(&refused), "{case}: {saving}");
+            let save = save.unwrap().unwrap_err();
+            assert!(save.starts_with(&refused), "{case}: {save}");
+        }
     }
 }
