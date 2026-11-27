@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: completed
 priority: now
 ---
 
@@ -215,7 +215,7 @@ Whoever controls the registrar account, the Vercel team, or the domain's DNS can
 | Registrar lock, so the domain cannot be transferred away without unlocking it first | The registrar | Being set by the owner |
 | Two-factor sign-in on the registrar account and for every member of the Vercel team | Both accounts | To confirm in rollout |
 | CAA records naming the certificate authorities that may issue for the domain | Vercel DNS | Verified: Vercel DNS adds CAA records for Let's Encrypt, Sectigo, and Google Trust Services by default (`0 issue "letsencrypt.org"`, `0 issue "sectigo.com"`, `0 issue "pki.goog"`). Keep all three, because Vercel does not document which of them it falls back to when one fails, and removing one could stop a certificate renewing. |
-| `0 issuewild ";"`, so no authority may issue a wildcard certificate | Vercel DNS | To add in rollout. `issuewild` governs only wildcard requests (RFC 8659 § 4.3), so the apex and `www` certificates, which name exact hosts, still issue under the `issue` records. Unverified that Vercel never puts a wildcard name into the certificate it requests for the apex, so rollout adds the record only after `vercel certs ls` shows certificates naming just the two hosts, and checks again after the first renewal. |
+| `0 issuewild ";"`, so no authority may issue a wildcard certificate | Vercel DNS | Not added. `issuewild` governs only wildcard requests (RFC 8659 § 4.3), so rollout was to add it once `vercel certs ls` showed certificates naming just the two hosts. It shows a third, naming both `*.getmultipass.dev` and `getmultipass.dev`, which Vercel issued for its default `*` `ALIAS`, a record Vercel lets you neither delete nor override. The record would stop that certificate renewing, so it stays off. A wildcard certificate adds nobody who can serve on the domain beyond the Vercel team, which can already change the real site. |
 | DNSSEC | Vercel DNS | Not available, unverified with Vercel. Vercel's community forum says its DNS does not support DNSSEC, `.dev` domains included, and Vercel's documentation says nothing either way. |
 | The README offers a pinned URL, GitHub's own URL, and the check-first install (§ 2.6) | `README.md` | In this project |
 
@@ -288,7 +288,7 @@ The Vercel CLI is the one piece of third-party code in this design, and it runs 
 | `curl -sI https://getmultipass.dev/install.sh` | `HTTP/2 307`, `location: https://github.com/ninjudd/multipass/releases/latest/download/install.sh`, and a `cache-control` the live check accepts, which from Vercel is `public, max-age=0, must-revalidate` (§ 2.9) |
 | `curl -sI https://getmultipass.dev/v0.1.0/install.sh` | A 307 to `https://github.com/ninjudd/multipass/releases/download/v0.1.0/install.sh` |
 | `curl -sI http://getmultipass.dev/install.sh` and `curl -sI https://www.getmultipass.dev/install.sh` | Each redirects to `https://getmultipass.dev/install.sh`, never serving a file over plain HTTP |
-| `dig +short getmultipass.dev CAA` | Only the authorities § 2.9 names, and `0 issuewild ";"` |
+| `dig +short getmultipass.dev CAA` | Only the three authorities § 2.9 names. No `issuewild`, which § 2.9 explains |
 | `curl -fsSL https://getmultipass.dev/install.sh \| bash` with `HOME` in a temporary directory | The same rows as the first row of this table |
 
 [^caches]: The tools the installer runs keep caches of their own under `HOME`, and those appear: `cargo` writes files such as `~/.cargo/.package-cache` when it builds, and `gh attestation verify` caches Sigstore's trusted root under `~/.cache/gh/.sigstore/`. The installer writes neither, and `uninstall` leaves them, as it leaves any tool's cache.
@@ -315,7 +315,7 @@ None of this changes the multipass binary, so commands cost what they cost today
 3. Publish the first release, `v0.1.0`, from the current version by running the release workflow by hand.
 4. The domain's nameservers already point at Vercel. Confirm auto-renew and the registrar lock at the registrar, and two-factor sign-in on the registrar account and for every member of the Vercel team. Leave the default `*` `ALIAS` record: Vercel lets you neither delete nor override it, so made-up names get Vercel's "not found" (§ 2.9).
 5. Create the Vercel project on that team, with the framework preset `Other`, no build command, and an empty root directory, since the workflow uploads `site/` itself, and add `getmultipass.dev` and `www.getmultipass.dev` to it. The merge in step 1 already ran the site workflow once, which created the `production` environment with no branch limit and failed for lack of a token, so limit that environment to `main` rather than creating it. Create a team token with an expiry, and, in that environment, the `VERCEL_TOKEN` secret and the variables `VERCEL_ORG_ID` (the team's ID) and `VERCEL_PROJECT_ID`. Run the site workflow by hand once. Until step 3's release exists, the redirect leads to a missing file.
-6. Once `vercel certs ls` shows certificates naming only the two hosts, add `0 issuewild ";"`.
+6. Once `vercel certs ls` shows certificates naming only the two hosts, add `0 issuewild ";"`. It did not: Vercel issued a certificate for its default `*` `ALIAS` as well, so `issuewild` stays off, as § 2.9 explains.
 7. Check the release and domain rows of § 4, then point the README's Install section at the one-liner.
 
 ### 6.1 Rollout results
@@ -333,6 +333,12 @@ Step 5's first run of the site workflow deployed `site/` and then failed to prom
 - `curl -fsSL https://getmultipass.dev/install.sh | bash` installed 0.1.0 from source into a temporary `HOME`.
 
 The one exception was the cache header. Vercel sends `public, max-age=0, must-revalidate` on the redirects, not `no-store`, so `check-site.sh live` failed until it accepted that header, as § 2.9 explains. It passes against the live site now.
+
+The first automatic run, Website run 46032712882 on `b123d60`, the merge that moved promotion to the API, deployed `site/`, promoted the deployment through the API, saw the alias reach it, and passed the live check unaided.
+
+Step 6 found three certificates: one for `getmultipass.dev`, one for `www.getmultipass.dev`, and one naming both `*.getmultipass.dev` and `getmultipass.dev`, which Vercel issued for its default `*` `ALIAS`. The condition for `0 issuewild ";"` is not met, and the record would stop that certificate renewing, so it stays off (§ 2.9). `dig +short getmultipass.dev CAA` lists only the three `issue` records.
+
+Step 7 switches the README's Install section to the one-liner, the check-first install, the pinned installs, and `install.sh verify`, beside the checkout install, and makes its trust paragraph name what each way to install trusts.
 
 ## 7. Open questions
 
@@ -374,3 +380,37 @@ The rejected alternative was no `upgrade` command, upgrading by running the inst
 - **Caching.** GitHub Pages answered the repository's site with `cache-control: max-age=600`. GitHub's `releases/latest/download/<file>` URL answered with a 302 to the newest release's file and `cache-control: no-cache`.
 - **The domain's DNS.** The `.dev` registry delegates the domain to `ns1.vercel-dns.com` and `ns2.vercel-dns.com`. Vercel DNS lists, by default, CAA records for `pki.goog`, `sectigo.com`, and `letsencrypt.org`, and `ALIAS` records to Vercel for the apex and for the `*` wildcard. Vercel's community forum reports that Vercel DNS does not support DNSSEC, `.dev` included. Vercel's documentation requires `0 issue "letsencrypt.org"` in any custom CAA record, and does not say whether it also issues through the other two. Vercel's older documentation lists its GitHub app's permissions as read and write on repository contents, and a later changelog adds read and write on workflows.
 - **The name.** Homebrew has no `multipass` formula. Its `multipass` cask is Canonical's Multipass, at version 1.17.2, which installs a package that puts a `multipass` command in `/usr/local/bin`.
+
+## 9. Outcome
+
+Shipped. The installer, the release workflow, `multipass upgrade`, and the website merged as a stack of four pull requests, and follow-ups moved the site's promotion and rollback to Vercel's API and hardened it. `v0.1.0` is published, `getmultipass.dev` serves the redirects, and the README's Install section leads with the one-liner. § 6.1 records the rollout as it ran. The build departed from the design in these places, each now described in the section it changes:
+
+- **The release build links with `-Wl,-oso_prefix,.`** inside the unpacked source, because two builds at paths of different lengths otherwise differ in `LC_UUID` (§ 8). `install.sh verify` accepts only that flag from the build info, since the build info comes from the build it distrusts (§ 2.6).
+- **The release job pins Xcode with `DEVELOPER_DIR`**, because GitHub moves the image's default Xcode without a change to the workflow (§ 2.5).
+- **The site's promotion and rollback call Vercel's REST API**, because the CLI's `promote` and `rollback` cannot work with a team-scoped token (§ 2.10).
+- **The live check accepts Vercel's `max-age=0, must-revalidate`** on the redirects, which Vercel sends whatever `vercel.json` says (§ 2.9).
+- **The default `*` `ALIAS` and its wildcard certificate stay**, and with them no `issuewild`, because Vercel lets you neither delete nor override the record (§ 2.9).
+
+Each row of § 4, and the evidence for it:
+
+- **Verified against `v0.1.0` and the live domain.**
+  - The one-liner with `cargo`: installed 0.1.0 from source into a temporary `HOME`. The rerun printed `current`.
+  - The attested binary: installs with `gh`, and prints `attested … at e957fd3`.
+  - The tampered mirror: a binary with one byte changed, under a rewritten `SHA256SUMS`, passed `checksum`, failed `gh attestation verify`, and exited 65 with nothing installed.
+  - The release: `v0.1.0` is published and immutable with five assets. `gh attestation verify` passes for `main` at `e957fd3`, and fails for `refs/tags/v0.1.0` and for another commit.
+  - `multipass upgrade --check` on 0.1.0: printed `multipass 0.1.0 is the newest release` and exited 0.
+  - The domain's redirects, `www`, plain HTTP, and the one-liner (§ 6.1).
+  - A made-up name: answers 404 with Vercel's `DEPLOYMENT_NOT_FOUND`.
+  - `dig +short getmultipass.dev CAA`: lists only the three `issue` records.
+  - A push to `main` that changes the site: Website run 46032712882 deployed, promoted, and passed the live check.
+  - A pull request's run cannot read `VERCEL_TOKEN`: the `production` environment's only deployment branch policy is `main`.
+- **Verified by the tests CI runs.**
+  - `tests/install.sh` covers the installer without `cargo` or `gh`, `MULTIPASS_UNVERIFIED=1`, `shadowed`, `user-owned`, `uninstall`, a checkout install that fetches nothing, and files under `HOME`, with the cache footnote.
+  - `tests/site.sh` covers a pull request that points a redirect elsewhere.
+  - `src/upgrade.rs`'s tests cover `upgrade` on a `cargo install` binary, against a changed installer, and `--check` behind.
+  - A version raised in `Cargo.toml` but not in `Cargo.lock` makes `cargo test --locked` stop with `cannot update the lock file … because --locked was passed`.
+- **Not run, by design or until the next release.**
+  - `multipass upgrade` from one release behind, and a release started by a merge that raises the version, need a second release. `v0.1.0` was published by a dispatch, as rollout step 3 says. The pull request that raises the version to 0.2.0 checks both.
+  - A dispatch from a branch other than `main` was not run, because no workflow may be run for this check. The `build` job's first step refuses any other ref.
+  - The site workflow's rollback, and the next run after one, were not exercised, because exercising them needs a bad deployment on the live domain. They call the same API and alias wait that the promotion passed.
+  - `install.sh verify` reproducing `v0.1.0` needs rustup and the release's macOS SDK 15.5 from Xcode 16.4. It reproduced a release built the same way on one Mac before the merge (§ 2.6), but no Mac with that SDK has run it against `v0.1.0`.
