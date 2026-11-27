@@ -71,7 +71,7 @@ A merge or a compaction deletes only files it read, and only after its own new f
 
 ### 2.4 How a save works
 
-1. The command, or session unlock's agent, merges every store file it can open, as § 2.3 steps 4 and 6 describe, using the keys it holds.
+1. The command, or session unlock's agent, merges every store file it can open, as § 2.3 steps 4 and 7 describe, using the keys it holds.
 2. It applies the change, stamped as the mergeable-store plan's § 2.2 describes.
 3. It writes the result as a new `store.<current gen>.<random>.age`, and then deletes the store files it read.
 
