@@ -8,7 +8,8 @@ multipass has no dependencies, not even dev-dependencies, and that is a feature 
 
 - **Do not add a crate**, for code or for tests, without the maintainer's explicit approval in the pull request. Write the code instead.
 - **Every primitive lives in `src/crypto`** and is checked against the official test vectors from its specification: FIPS 180-4 for SHA-1, SHA-256 and SHA-512 (with RFC 3174 for SHA-1), RFC 4231 for HMAC, RFC 5869 for HKDF, RFC 7914 for PBKDF2, scrypt and Salsa20/8, RFC 8439 for ChaCha20 and Poly1305, RFC 4226 for HOTP, RFC 6238 for TOTP, and RFC 4648 for base32 and base64. A change to a primitive keeps those tests and adds any vector that covers the changed path.
-- **Never branch on secret data or index memory with it**, apart from scrypt's data-dependent lookups, which the algorithm requires. Compare MACs and tags with `crypto::ct_eq`.
+- **In `src/crypto`, never branch on secret data or index memory with it**, apart from scrypt's data-dependent lookups, which the algorithm requires. Compare MACs and tags with `crypto::ct_eq`.
+- **Outside `src/crypto`, keep secrets as text and do no cryptography on them.** The store's escaping and parsing, its UTF-8 check, `strip_newline`, and `otpauth` URI parsing branch on each character of a secret: escaping changes the text's length, and Rust's string handling branches on every byte. So hand a key to `src/crypto` as soon as its text is found, as `src/otp.rs` hands the setup key to `crypto::base32`, and put any computation on key material there.
 - **Stay in age's passphrase (scrypt) mode.** Adding public-key recipients would bring back the quantum exposure the design avoids.
 
 ## Compatibility with age
