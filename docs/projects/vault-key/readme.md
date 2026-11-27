@@ -64,7 +64,7 @@ retired 7c1e9a3b5d2f4e6a8c0b1d3f5a7c9e2b 1761200000 1763000000 Qm9vYmFyYmF6cXV4Z
 4. It decrypts every store file whose generation it has a key for, and merges them with `Store::merge`. A store file with an unknown generation is left alone, with a warning. When it finds key files but no store file it can open, it fails with `the store is still syncing; try again shortly`. A file that disappears while it reads, because another Mac deleted it after merging it, makes it list the package again, up to three times.
 5. It rotates (§ 2.5) when the current key is 14 or more days old, when it opened more than one key file, or when the command is `passwd` or `rekey`.
 6. When the package holds a move record, it opens it with its generation's key and runs the old-file check in § 2.6. A move record under a generation it has no key for is left alone, with a warning, like a store file.
-7. Otherwise, when it merged more than one store file, it compacts: it writes one new store file under the current key, holding the merged store, and then deletes the store files it read.
+7. When it did not rotate, and it merged more than one store file, it compacts: it writes one new store file under the current key, holding the merged store, and then deletes the store files it read.
 8. The command runs on the merged store.
 
 A merge or a compaction deletes only files it read, and only after its own new file is durable. A file another Mac writes meanwhile was not read, so it survives. When a deletion reaches another Mac before the file that replaced it, that Mac briefly sees fewer entries, never wrong ones, and they come back when the newer file arrives, because a merge only adds what it finds.

@@ -23,9 +23,9 @@ This design depends on the answers to § 6. Until those are settled, this plan s
 
 1. A site calls `navigator.credentials.get()`. macOS or iOS shows its passkey sheet, which offers multipass among the providers.
 2. You choose multipass. The system starts the extension and calls `prepareInterface(forPasskeyRegistration:)` for a new passkey, or its assertion counterpart for a sign-in.
-3. The extension asks for Face ID or Touch ID and reads the passphrase from its Keychain item (§ 2.3). When there is no item, or the passphrase in it no longer opens the store, it shows its own passphrase field instead, and saves what you type to a new item. It then decrypts the store through the Rust library, which takes about 300 ms.
+3. The extension asks for Face ID or Touch ID and reads the passphrase from its Keychain item (§ 2.3). When there is no item, or the passphrase in it no longer opens the store, it shows its own passphrase field instead, and saves what you type to a new item. It then opens the store package through the Rust library, as the vault-key plan's § 2.3 describes: scrypt at work factor 18 on the key file, about 300 ms, then the store files under the vault key, merged.
 4. For a sign-in, the extension finds the entry whose `passkey` matches the site's relying party ID and the requested credential ID, signs the authenticator data and client data hash with CryptoKit's `P256.Signing`, and returns an `ASPasskeyAssertionCredential`.
-5. For a registration, the extension generates a key pair with CryptoKit, saves a new entry through the Rust library with the store's usual atomic save, and returns an `ASPasskeyRegistrationCredential` with "none" attestation.
+5. For a registration, the extension generates a key pair with CryptoKit, saves the new entry through the Rust library as a new store file in the package, as the vault-key plan's § 2.4 describes, and returns an `ASPasskeyRegistrationCredential` with "none" attestation.
 6. The extension drops the decrypted store from memory and exits.
 
 ### 2.2 The `passkey` field
@@ -52,7 +52,7 @@ The extension always reports a signature counter of 0, which the WebAuthn specif
 
 ### 2.3 The Keychain item
 
-The item holds the passphrase itself, not a key derived from it. Every save re-encrypts the store with a fresh scrypt salt, and a registration saves, so the extension needs the passphrase and not just the key for one version of the file.
+The item holds the passphrase itself, not the vault key. The vault key rotates at least every 21 days and on every `passwd`, so an item holding it would go stale within weeks. A prompt in the extension may also have to rotate it, and rotating writes a new key file, which only the passphrase can encrypt.
 
 | Attribute | Value | Why |
 | --- | --- | --- |
@@ -60,18 +60,18 @@ The item holds the passphrase itself, not a key derived from it. Every save re-e
 | Access control | `biometryCurrentSet` | Only a Face ID or Touch ID match reads it, and enrolling a new face or fingerprint makes it unreadable |
 | Accessibility | `whenPasscodeSetThisDeviceOnly` | It never syncs to iCloud Keychain or leaves the device, and it disappears if the device's passcode is removed. Each device keeps its own item. |
 
-After you change the passphrase with `multipass passwd`, the old item no longer opens the store. The next sign-in falls back to the passphrase field and replaces the item. The CLI never reads or writes the item; it still asks for the passphrase every time.
+After you change the passphrase with `multipass passwd`, the old item no longer opens the package's current key file. The next sign-in falls back to the passphrase field and replaces the item. The CLI never reads or writes the item; it still asks for the passphrase every time.
 
 ### 2.4 Syncing through iCloud Drive
 
-The store lives at `Documents/store.age` in the app's iCloud container, which iCloud Drive copies between your devices. The file is ciphertext, so iCloud holds nothing readable.
+The store package lives at `Documents/store.multipass` in the app's iCloud container, which iCloud Drive copies between your devices. Its files are ciphertext, so iCloud holds nothing readable.
 
 | Reader | How it reaches the store |
 | --- | --- |
-| The app and its extension, on both systems | Through the iCloud container, with `NSFileCoordinator` around each read and save |
+| The app and its extension, on both systems | Through the iCloud container, with `NSFileCoordinator` around listing the package, reading each file, and writing each new one |
 | The CLI on the Mac | Through `MULTIPASS_STORE`, set to the container's path under `~/Library/Mobile Documents/`. The app's settings show the exact path and the `export` line to copy. |
 
-multipass does not merge. When two devices save before iCloud syncs, iCloud keeps both versions as a conflict. The app and its extension both check for unresolved conflict versions before each save, and refuse to save while any exist. The extension saves on every registration, so it checks too: it cancels the registration and tells you to open the app, and the app shows which devices wrote the versions. So a passkey registration never silently replaces another device's change. You resolve the conflict in the app by choosing a version. The CLI does not see conflict versions, so the README tells you to edit from the CLI only while no other device is saving.
+Every save adds a new file to the package and never modifies one, as the vault-key plan's § 2.4 describes, so iCloud never holds two versions of one file to reconcile. Opening merges what each device saved, entry by entry, as the mergeable-store plan describes. So the app and its extension need no conflict screen: a passkey registered on each of two devices while one is offline both survive, and the CLI can save at the same time as either.
 
 ### 2.5 Changes by file
 
@@ -83,7 +83,7 @@ multipass does not merge. When two devices save before iCloud syncs, iCloud keep
 | `src/ffi.rs` | New. A C interface over `Store`: open with a passphrase, find a passkey, add an entry, save, and free. |
 | `src/store.rs` | Format 4: the `passkey` field, and reading formats 1 to 4. |
 | `src/main.rs` | `list` marks entries that hold a passkey; `get --field passkey` prints the site and creation date, never the key. |
-| `apple/` | New. One Xcode project, in Swift, that builds the app and its extension for iOS and macOS from shared sources, as a SwiftUI multiplatform app: shared SwiftUI views, with a thin per-platform `ASCredentialProviderViewController` subclass in each extension. It uses only Apple's frameworks: AuthenticationServices for the provider, CryptoKit for keys and signatures, LocalAuthentication and Security for Face ID, Touch ID, and the Keychain item, and Foundation's file coordination for iCloud Drive. The app's settings show the store's path, resolve sync conflicts, and remove the Keychain item. |
+| `apple/` | New. One Xcode project, in Swift, that builds the app and its extension for iOS and macOS from shared sources, as a SwiftUI multiplatform app: shared SwiftUI views, with a thin per-platform `ASCredentialProviderViewController` subclass in each extension. It uses only Apple's frameworks: AuthenticationServices for the provider, CryptoKit for keys and signatures, LocalAuthentication and Security for Face ID, Touch ID, and the Keychain item, and Foundation's file coordination for iCloud Drive. The app's settings show the store package's path and remove the Keychain item. |
 | `.github/workflows/ci.yml` | Builds the XCFramework and both apps on `macos-latest`, unsigned. |
 | `AGENTS.md` | Documents the app's build, and changes four rules the design would otherwise break. The dependency rule allows Apple's system frameworks like the Rust standard library, and third-party code stays banned on every platform, including Swift packages. "Every primitive lives in `src/crypto`" exempts the primitives Apple's frameworks provide to `apple/`, CryptoKit's P-256 key generation and `P256.Signing`, and, for the session-unlock plan's Secure Enclave mode (its § 8), `SecureEnclave.MLKEM768` key generation, `encapsulate()`, and `decapsulate(_:)`, and only those. "Outside `src/crypto` and `src/age.rs`, keep secrets as text and do no cryptography on them" exempts the same two calls in `apple/`, which generate the `passkey` field's private key and sign with it. "Passphrases come from `/dev/tty` through `tty::read_hidden`" adds the extension's two sources, its own passphrase field and the per-device Keychain item that only Face ID or Touch ID reads (§ 2.3), and the CLI keeps `/dev/tty` as its only source. The ban on passphrases in argv, environment variables, logs, and errors stays and covers the extension. |
 | `README.md` | Documents the app, its install through TestFlight, and Face ID or Touch ID unlock. Corrects three claims the design makes untrue. "Every line of multipass, cryptography included, is in this repository" becomes true of everything but the P-256 keys and signatures CryptoKit computes. "What is left to trust is the Rust toolchain and its standard library" adds, for the app and its extension, Xcode's Swift toolchain and Apple's system frameworks. "Passphrases come from a hidden terminal prompt" becomes true of the CLI, while the extension takes them from its own field or its Keychain item. |
@@ -110,13 +110,13 @@ multipass does not merge. When two devices save before iCloud syncs, iCloud keep
 | `age -d` on the store | Shows `multipass 4` and the entry's `passkey` line |
 | `multipass rm` the entry, then try the sign-in again | multipass offers no passkey for the site |
 | Register a passkey in Safari on the iPhone, wait for iCloud Drive to sync, then sign in on the Mac | The Mac's extension finds the passkey and signs in |
-| Register on both devices while one is offline, then bring it online | The app reports a conflict and saves nothing until you choose a version. Neither registration is lost. |
+| Register on both devices while one is offline, then bring it online | Both passkeys are in the store once both devices have synced, and neither device shows a conflict |
 
 Tests: format 4 round-trips through `to_text` and `from_text`, and literal format 2 and format 3 stores still open. The C interface rejects a null or unterminated string. The extension's signature verifies under the public key it registered, checked with CryptoKit in a Swift unit test that runs on both platforms. The library's random bytes come from the system on iOS as well as macOS, checked by the same test that checks them on the Mac. Installing a build on a phone for these checks waits for the user to ask.
 
 ## 5. Cost
 
-Each sign-in decrypts the store once after the Face ID or Touch ID prompt. That takes about 300 ms at work factor 18 on an Apple-silicon Mac; scrypt's 256 MiB of memory is the cost to measure on the iPhone, inside an extension's memory limit, in the prototype. One P-256 signature is too small to notice. iCloud Drive usually syncs within seconds to minutes, so a passkey registered on one device may not be on the other right away. The two app builds and the XCFramework add several minutes to CI on each push.
+Each sign-in opens the store package once after the Face ID or Touch ID prompt. That takes about 300 ms at work factor 18 on an Apple-silicon Mac; scrypt's 256 MiB of memory is the cost to measure on the iPhone, inside an extension's memory limit, in the prototype. One P-256 signature is too small to notice. iCloud Drive usually syncs within seconds to minutes, so a passkey registered on one device may not be on the other right away. The two app builds and the XCFramework add several minutes to CI on each push.
 
 ## 6. Open questions
 
