@@ -1,6 +1,8 @@
 mod age;
 mod clipboard;
 mod crypto;
+#[cfg(target_os = "macos")]
+mod objc;
 mod otp;
 mod store;
 mod tty;

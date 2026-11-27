@@ -11,8 +11,8 @@
 //! AppKit ships with macOS, so it counts like the standard library under the
 //! no-dependencies rule. The binary does not link it: this module loads it
 //! with `dlopen` the first time a command touches the clipboard, so every
-//! other command runs without AppKit in the process. This module holds the
-//! program's only `unsafe` code.
+//! other command runs without AppKit in the process. Its calls go through
+//! the Objective-C helpers in `src/objc.rs`.
 
 use std::time::Duration;
 
@@ -75,121 +75,24 @@ fn spawn_clearer(change_count: isize) -> std::io::Result<()> {
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use std::ffi::{CStr, c_char, c_int, c_void};
+    use crate::objc::{Id, class, new_string, release, send, send1, send2, with_pool};
+    use std::ffi::CStr;
     use std::sync::OnceLock;
-
-    type Id = *mut c_void;
-    type Sel = *mut c_void;
 
     /// `NSPasteboardContentsCurrentHostOnly`, which keeps Universal Clipboard
     /// from sending the contents to other devices.
     const CURRENT_HOST_ONLY: usize = 1;
-    const NS_UTF8_STRING_ENCODING: usize = 4;
     const PLAIN_TEXT: &str = "public.utf8-plain-text";
     const CONCEALED: &str = "org.nspasteboard.ConcealedType";
 
     const APPKIT: &CStr = c"/System/Library/Frameworks/AppKit.framework/AppKit";
-    const RTLD_LAZY: c_int = 1;
-
-    // From libSystem, which every macOS program links.
-    unsafe extern "C" {
-        fn dlopen(path: *const c_char, mode: c_int) -> *mut c_void;
-        fn dlerror() -> *mut c_char;
-    }
-
-    #[link(name = "objc")]
-    unsafe extern "C" {
-        fn objc_getClass(name: *const c_char) -> Id;
-        fn sel_registerName(name: *const c_char) -> Sel;
-        fn objc_msgSend();
-        fn objc_autoreleasePoolPush() -> *mut c_void;
-        fn objc_autoreleasePoolPop(pool: *mut c_void);
-    }
-
-    // `objc_msgSend` must be called through a pointer of the method's exact
-    // type, because on Apple silicon a variadic call passes arguments in
-    // different registers than the method expects.
-    unsafe fn send<R>(receiver: Id, selector: &CStr) -> R {
-        let f: unsafe extern "C" fn(Id, Sel) -> R =
-            unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
-        unsafe { f(receiver, sel_registerName(selector.as_ptr())) }
-    }
-
-    unsafe fn send1<A, R>(receiver: Id, selector: &CStr, a: A) -> R {
-        let f: unsafe extern "C" fn(Id, Sel, A) -> R =
-            unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
-        unsafe { f(receiver, sel_registerName(selector.as_ptr()), a) }
-    }
-
-    unsafe fn send2<A, B, R>(receiver: Id, selector: &CStr, a: A, b: B) -> R {
-        let f: unsafe extern "C" fn(Id, Sel, A, B) -> R =
-            unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
-        unsafe { f(receiver, sel_registerName(selector.as_ptr()), a, b) }
-    }
-
-    unsafe fn send3<A, B, C, R>(receiver: Id, selector: &CStr, a: A, b: B, c: C) -> R {
-        let f: unsafe extern "C" fn(Id, Sel, A, B, C) -> R =
-            unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
-        unsafe { f(receiver, sel_registerName(selector.as_ptr()), a, b, c) }
-    }
 
     /// Loads AppKit into the process once, so that `NSPasteboard` exists.
-    /// The handle is never closed: AppKit cannot be unloaded once loaded.
     fn load_appkit() -> Result<(), String> {
         static LOADED: OnceLock<Result<(), String>> = OnceLock::new();
         LOADED
-            .get_or_init(|| {
-                // `dlopen` takes a NUL-terminated path, and `dlerror` returns
-                // either null or a NUL-terminated message, valid until the
-                // next `dl` call on this thread, so it is copied at once.
-                let handle = unsafe { dlopen(APPKIT.as_ptr(), RTLD_LAZY) };
-                if !handle.is_null() {
-                    return Ok(());
-                }
-                let reason = unsafe {
-                    let message = dlerror();
-                    if message.is_null() {
-                        "unknown error".to_string()
-                    } else {
-                        CStr::from_ptr(message).to_string_lossy().into_owned()
-                    }
-                };
-                Err(format!("could not load AppKit for the clipboard: {reason}"))
-            })
+            .get_or_init(|| crate::objc::load(APPKIT, "AppKit for the clipboard"))
             .clone()
-    }
-
-    fn class(name: &CStr) -> Id {
-        unsafe { objc_getClass(name.as_ptr()) }
-    }
-
-    /// An `NSString` holding `s`, owned by the caller, who must release it.
-    /// It is built from bytes and a length, so a value holding a NUL
-    /// character is not cut short.
-    unsafe fn new_string(s: &str) -> Id {
-        unsafe {
-            let allocated: Id = send(class(c"NSString"), c"alloc");
-            send3(
-                allocated,
-                c"initWithBytes:length:encoding:",
-                s.as_ptr().cast::<c_void>(),
-                s.len(),
-                NS_UTF8_STRING_ENCODING,
-            )
-        }
-    }
-
-    unsafe fn release(object: Id) {
-        unsafe { send::<()>(object, c"release") }
-    }
-
-    /// Runs `f` inside an autorelease pool, so objects AppKit hands back for
-    /// the caller to drop are freed before this returns.
-    fn with_pool<T>(f: impl FnOnce() -> T) -> T {
-        let pool = unsafe { objc_autoreleasePoolPush() };
-        let result = f();
-        unsafe { objc_autoreleasePoolPop(pool) };
-        result
     }
 
     pub struct Pasteboard {
@@ -275,7 +178,7 @@ mod macos {
                 if found.is_null() {
                     return None;
                 }
-                let bytes: *const c_char = send(found, c"UTF8String");
+                let bytes: *const std::ffi::c_char = send(found, c"UTF8String");
                 Some(CStr::from_ptr(bytes).to_string_lossy().into_owned())
             })
         }
@@ -291,7 +194,7 @@ mod macos {
                 (0..count)
                     .map(|i| {
                         let kind: Id = send1(types, c"objectAtIndex:", i);
-                        let bytes: *const c_char = send(kind, c"UTF8String");
+                        let bytes: *const std::ffi::c_char = send(kind, c"UTF8String");
                         CStr::from_ptr(bytes).to_string_lossy().into_owned()
                     })
                     .collect()
