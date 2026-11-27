@@ -1,0 +1,74 @@
+{
+ "version": 1,
+ "name": "Websites for entries",
+ "project": "websites",
+ "pr": {
+  "repo": "ninjudd/multipass",
+  "number": 35,
+  "title": "Plan websites for entries",
+  "head": "4343f5c3a9a20d333c27a999016e599707cc54e3",
+  "headRef": "websites",
+  "base": "e957fd3020d41d32156e05c324a9a67afb1a3aa7",
+  "baseRef": "main"
+ },
+ "overview": {
+  "summary": [
+   "multipass is a password manager that keeps every entry in one encrypted text file, the <b>store</b>. An entry has a name, a secret, and a few optional fields such as <code>username</code> and <code>otp</code>. The name is only a label, so nothing in multipass knows which website an entry belongs to, and no program can ask it which entries fit the page it is showing.",
+   "This pull request adds one plan, <code>docs/projects/websites/readme.md</code>, at <code>status: ready</code>. It changes no code. The plan gives each entry a repeatable <code>website</code> field and adds <code>multipass find &lt;url&gt;</code>, which prints the names of the entries whose websites match a page. A later browser extension, and the Mac and iPhone app in the passkeys plan, would use that answer to offer the right login on the right site.",
+   "<ul class=\"tight\"><li><b>Strict parsing.</b> A website is split into scheme, host, port, and the rest by one fixed rule, and every form a browser would read differently, such as a user name before an <code>@</code>, a backslash, or percent-encoding in the host, is refused. So <code>find</code> and the browser always agree on which host a page is on.</li><li><b>Matching.</b> A stored website matches a page on the same host or a subdomain of it, with the same port, and never from a stored <code>https</code> address to an <code>http</code> page. A leading <code>www.</code> is ignored when the hosts are compared for equality, but never widens the subdomain test. This needs no Public Suffix List, the large, often-updated list of domain suffixes that whole-site matching would require.</li><li><b>Hints.</b> When nothing matches, <code>find</code> names entries that share only the page's root domain on stderr, with the command that would add the page's scheme, host, and port, and never treats them as matches.</li><li><b>Store format.</b> The field needs a new <code>multipass &lt;n&gt;</code> header. The plan builds on the mergeable store, takes format 4, and leaves renumbering the passkeys draft, which also claims 4, to the change that builds websites.</li><li><b>Deferred.</b> The browser extension and per-site password rules get plans of their own later.</li></ul>"
+  ],
+  "cards": [
+   {
+    "id": "terms",
+    "title": "Terms on this page",
+    "html": "<ul class=\"tight\"><li><b>Store format.</b> The number in the store's first line, <code>multipass &lt;n&gt;</code>. The repository changes the store text only by bumping it, so an older multipass refuses a store it cannot read.</li><li><b>Authority.</b> The part of a URL after <code>://</code> and before the path: the host and an optional port, and sometimes a user name and password before an <code>@</code>.</li><li><b>Root domain.</b> The plan's short rule for a site's registered name: the last two labels of a host, or three after a country code's <code>co</code>, <code>com</code>, and similar.</li><li><b>Mergeable store.</b> The store-merge plan: each entry records when it changed, and copies from two Macs merge entry by entry, the newer version winning.</li></ul>"
+   },
+   {
+    "id": "review",
+    "title": "Review so far",
+    "html": "<p>The first review, at <code>dcf0ba8</code>, opened three findings, all fixed at this head:</p><ul class=\"tight\"><li>The plan never said where a URL's host ends, so <code>https://bank.example@evil.example</code> could have matched the bank's entry. § 2.1 now defines the split and refuses the confusing forms.</li><li>Removing <code>www.</code> before the subdomain test let a stored <code>www.</code> host match every subdomain of the bare host. Step 4 now ignores <code>www.</code> for equality only.</li><li>The format list that <code>AGENTS.md</code> would point to named format 4 as the passkey field. The note will now record formats 4 and 5 itself.</li></ul><p>This head also merges <code>main</code> cleanly and takes all eight earlier suggestions. Its review is clean, with two new suggestions that do not block.</p>"
+   }
+  ]
+ },
+ "groups": [
+  {
+   "id": "plan",
+   "title": "The websites plan",
+   "kicker": "A repeatable website field, the parsing and matching rules, and the format it needs",
+   "intro": [
+    "The plan is the whole change. Read it in section order: § 2.1 defines the field, how a value is normalized, and how it is parsed, § 2.2 the matching rule and the root-domain hints, § 2.3 the commands and how a change merges, § 2.4 the store format number, and § 2.5 the files the change that builds it will touch.",
+    "Hold two things in mind while reading. First, the parsing and matching rules are the plan's security boundary: whatever <code>website::matches</code> accepts is a page where a later extension offers your password, so read each rule in § 2.1 and § 2.2 for a look-alike or attacker-controlled page that it lets through. Second, the plan builds on the mergeable store, which is not on <code>main</code> yet: the example in § 2.1 shows its <code>modified</code> line, and § 2.3 stamps each change through its <code>Store::stamp</code>."
+   ],
+   "checks": [
+    {
+     "kind": "context",
+     "text": "The plan's one open question, how strictly a website matches, is recorded as decided by the owner. The browser extension and per-site password rules are explicitly deferred, so no open question blocks <code>status: ready</code>."
+    }
+   ],
+   "files": [
+    {
+     "path": "docs/projects/websites/readme.md",
+     "collapsed": false,
+     "note": "The new plan: the <code>website</code> field, <code>find</code>, the parsing, matching, and hint rules, and the store format it takes.",
+     "checks": [
+      {
+       "kind": "context",
+       "line": 51,
+       "text": "This list is what keeps <code>find</code> and a browser agreeing on the host. Read it against the forms a browser repairs: a tab or newline inside the address is a control character, which the Allowed values row refuses, and a host outside ASCII is refused, so only the <code>xn--</code> form a browser reports can be stored or matched."
+      },
+      {
+       "kind": "context",
+       "line": 68,
+       "text": "Step 4 strips <code>www.</code> only for the equality test. The subdomain test uses the stored host as written, so a stored <code>www.host.example</code> matches <code>host.example</code> but not <code>anyone.host.example</code>."
+      },
+      {
+       "kind": "context",
+       "line": 115,
+       "text": "The mergeable-store plan's format table names format 4 as the passkey field and becomes a completed record once that plan ships, so this row has the <code>AGENTS.md</code> note record formats 4 and 5 itself."
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}
