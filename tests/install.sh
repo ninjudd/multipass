@@ -147,6 +147,20 @@ export MULTIPASS_VERSION="$VERSION"
 export MULTIPASS_ARCHIVE_URL="file://$MIRROR/archive"
 export MULTIPASS_DOWNLOAD_URL="file://$MIRROR/download"
 
+# A checkout build names no release, even at the release's version, so
+# status outside the checkout calls it stale, and the release installs over
+# it. A fake curl answers status's one request, for where releases/latest
+# redirects.
+run "$ROOT/install.sh"
+expect_row installed "~/.local/bin/multipass $VERSION (built from" "checkout install before a release"
+mkdir -p "$WORK/fake-curl"
+printf '#!/bin/sh\nprintf %%s https://github.com/ninjudd/multipass/releases/tag/v%s\n' "$VERSION" >"$WORK/fake-curl/curl"
+chmod +x "$WORK/fake-curl/curl"
+run env PATH="$WORK/fake-curl:$PATH" bash "$WORK/release/install.sh" status
+expect_status 0 "status of a checkout build outside the checkout"
+expect_row stale "a checkout build, not a release; v$VERSION is the newest" "status of a checkout build outside the checkout"
+expect_no_row current "status of a checkout build outside the checkout"
+
 run bash "$WORK/release/install.sh"
 expect_status 0 "release source install"
 expect_row release "ninjudd/multipass v$VERSION" "release source install"

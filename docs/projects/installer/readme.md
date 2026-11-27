@@ -27,7 +27,7 @@ curl -fsSL https://getmultipass.dev/install.sh | bash
 
 1. The installer finds its source. A script whose directory holds a `Cargo.toml` with `name = "multipass"` is in a checkout, and installs that checkout: it skips steps 2 to 5, builds the checkout as step 4.3 does, and stops with status 69 when `cargo` is missing. A checkout can change without a version bump, so instead of step 3 a rerun always builds, and prints `current` and leaves the file alone when the new binary's SHA-256 matches the receipt. The build is reproducible, so an unchanged checkout always matches. Anything else, such as a script piped from `curl`, installs a release.
 2. It picks the release: `MULTIPASS_VERSION` when set, or else the newest release, which it reads without the GitHub API from where `https://github.com/ninjudd/multipass/releases/latest` redirects. It prints `release        ninjudd/multipass v0.2.0`.
-3. When the receipt (§ 2.4) records that version, and the installed binary's SHA-256 still matches the receipt, it prints `current        ~/.local/bin/multipass 0.2.0` and exits 0 without downloading anything else.
+3. When the receipt (§ 2.4) records that release from that repository, not a checkout build of the same version, and the installed binary's SHA-256 still matches the receipt, it prints `current        ~/.local/bin/multipass 0.2.0` and exits 0 without downloading anything else.
 4. With `cargo` on PATH, or `MULTIPASS_BUILD=source`, it builds from source:
    1. It downloads `https://github.com/ninjudd/multipass/archive/refs/tags/v0.2.0.tar.gz` into a temporary directory and prints `fetched        v0.2.0 source, sha256 <digest>`.
    2. It checks that `Cargo.toml` says `version = "0.2.0"`, and that `Cargo.lock` lists one package, multipass itself.
@@ -50,7 +50,7 @@ Each row is a fixed-width name and a message, as in Projector's installer, and a
 | Command | What it does |
 | --- | --- |
 | `install.sh` or `install.sh install` | Installs or upgrades, as § 2.1 describes. |
-| `install.sh status` | Prints the newest release, what is installed and how, and whether it is `current`, `stale` (with the command to upgrade), or `modified` (the file no longer matches the receipt). Run from a checkout, it compares with the checkout's version instead of the newest release, and reads nothing from the network. Adds the PATH rows from step 8. Changes nothing. |
+| `install.sh status` | Prints the newest release, what is installed and how, and whether it is `current`, `stale` (with the command to upgrade), or `modified` (the file no longer matches the receipt). Run from a checkout, it compares with the checkout's version instead of the newest release, and reads nothing from the network. Run anywhere else, it calls a checkout build `stale` whatever its version, because a checkout build is not a release. Adds the PATH rows from step 8. Changes nothing. |
 | `install.sh verify [<version>]` | Rebuilds a release with the toolchain its build info names and compares the bytes, as § 2.6 describes. Installs nothing. |
 | `install.sh uninstall` | Removes `$BIN_DIR/multipass` when its SHA-256 matches the receipt, then the receipt. A file that does not match is left in place with a `user-owned` row. Ends with `kept           your stores, such as ~/.multipass/store.age`. |
 

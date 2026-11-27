@@ -302,12 +302,16 @@ cmd_install() {
     version="$(latest_version)"
   fi
   row "release" "$RELEASE_REPO v$version"
-  if [ "$(receipt_get version)" = "$version" ] && [ "$(receipt_get path)" = "$TARGET" ] && installed_intact; then
+  source="$RELEASE_REPO v$version"
+  # A checkout build names no release, whatever its version says, so only a
+  # receipt for this release from this repository counts as current.
+  if [ "$(receipt_get version)" = "$version" ] && [ "$(receipt_get path)" = "$TARGET" ] &&
+    [ "$(receipt_get method)" != checkout ] && [ "$(receipt_get source)" = "$source" ] &&
+    installed_intact; then
     row "current" "$(tilde "$TARGET") $version"
     path_rows
     return
   fi
-  source="$RELEASE_REPO v$version"
   local how="${MULTIPASS_BUILD:-}"
   if [ -z "$how" ]; then
     if command -v cargo >/dev/null 2>&1; then how=source; else how=binary; fi
@@ -348,6 +352,8 @@ cmd_status() {
     :
   elif [ "$newest" = "$version" ] && [ -n "$CHECKOUT" ]; then
     row "current" "$version matches the checkout"
+  elif [ "$method" = checkout ] && [ -z "$CHECKOUT" ]; then
+    warn_row "stale" "a checkout build, not a release; v$newest is the newest -- run the installer"
   elif [ "$newest" = "$version" ]; then
     row "current" "$version is the newest release"
   elif [ -n "$CHECKOUT" ]; then
