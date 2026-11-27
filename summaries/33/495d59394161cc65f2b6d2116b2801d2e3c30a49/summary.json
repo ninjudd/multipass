@@ -1,0 +1,203 @@
+{
+ "version": 1,
+ "name": "Vault key package",
+ "project": "vault-key",
+ "pr": {
+  "repo": "ninjudd/multipass",
+  "number": 33,
+  "title": "Keep the store in a package of files under a rotating vault key",
+  "head": "495d59394161cc65f2b6d2116b2801d2e3c30a49",
+  "headRef": "vault-key-format",
+  "base": "7505c25f86b6fee427f3f8b83883424dd92beb14",
+  "baseRef": "store-merge",
+  "basePr": 22
+ },
+ "overview": {
+  "summary": [
+   "multipass keeps your secrets in an encrypted store that only your passphrase opens. Before this change the store was one age file, encrypted directly under the passphrase, and every save replaced it. That caused three problems. Every save ran scrypt at work factor 18, about a third of a second. A future session unlock would have needed an agent holding the passphrase. And two Macs that saved before sync caught up lost one of the two saves.",
+   "This change makes the store a <b>package</b>: a folder, <code>~/.multipass/store.multipass</code>, of age files that multipass writes once and never changes. The passphrase opens a <b>key file</b>, which holds a random 256-bit <b>vault key</b>. The vault key's text is the passphrase of every <b>store file</b>, each of which holds a whole store. A save writes a new store file and deletes only the files it read. So a file another Mac wrote at the same moment survives, and the next open merges it with <code>Store::merge</code>, which the layer below this one added.",
+   "The vault key is replaced (<b>rotated</b>) when a prompt finds it 14 or more days old, when it finds more than one key file, on every <code>passwd</code>, and on the new <code>multipass rekey</code>. A new key file keeps the keys it replaced for 90 days as <code>retired</code> lines, so a store file another Mac wrote under an old key still opens.",
+   "This layer does not move an old single-file <code>store.age</code> into a package. It refuses one by name, and the next layer of the stack adds the move."
+  ],
+  "cards": [
+   {
+    "id": "terms",
+    "title": "Terms",
+    "html": "<ul class=\"tight\"><li><b>Package</b>: the <code>store.multipass</code> folder holding every file below.</li><li><b>Key file</b>: <code>key.&lt;gen&gt;.age</code>, under your passphrase at work factor 18, holding the vault key as text.</li><li><b>Generation</b>: a key's random 32-hex-digit id, the <code>&lt;gen&gt;</code> in file names.</li><li><b>Store file</b>: <code>store.&lt;gen&gt;.&lt;id&gt;.age</code>, a whole store under generation <code>&lt;gen&gt;</code>'s key at work factor 10.</li><li><b>Retired key</b>: a replaced key kept in the newer key file for 90 days.</li><li><b>Compaction</b>: merging several store files into one new one when no rotation is due.</li><li><b>Read-only open</b>: when some key file needs a passphrase you did not type, the command reads but writes nothing.</li></ul>"
+   },
+   {
+    "id": "review",
+    "title": "Review so far",
+    "html": "<ul class=\"tight\"><li>The first review's finding is fixed: a read command such as <code>get</code> no longer fails when the package cannot be written and opening wants to rotate or compact, as on a read-only backup. It warns and reads instead.</li><li>The second review's finding is fixed too: the README's sentence on read-only packages now says the warning and the early save failure come only when a key replacement or a merge of store files is due. </li><li>One open finding: after the merge of the installer stack into the base, the README's line count says about 2,200 lines outside the cryptography, and this head has about 3,500. It is flagged under <code>README.md</code>.</li><li>The merge's one conflict, in <code>src/main.rs</code>, keeps both sides: the <code>upgrade</code> and <code>vault</code> modules and the usage lines of both. <code>upgrade</code> still never opens a store.</li><li>Gate, CI, and a hand run of <code>init</code>, <code>add</code>, <code>rekey</code>, <code>passwd</code>, <code>list</code>, and <code>get</code> under <code>expect</code> all pass.</li><li>Stock <code>age -d</code> was not run. The two-step read is shown by a unit test with multipass's own age code, and by the reference <code>age</code> crate, as the pull request says.</li></ul>"
+   }
+  ]
+ },
+ "groups": [
+  {
+   "id": "crypto",
+   "title": "Keys, ids, and constant-time base64",
+   "kicker": "The primitives the package needs: a random key, random file names, and an encoder safe for the key.",
+   "intro": [
+    "The vault key is 32 random bytes written as 43 characters of base64, and that text is what age receives as a store file's passphrase. multipass never decodes it. Because the key passes through <code>base64::encode</code>, the encoder no longer looks up each character in a table indexed by the data. That lookup can leak bits of the key through cache timing. It computes each character with masked arithmetic instead.",
+    "File names use random 16-byte ids written as hex. They are public, so a table lookup is fine there."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": "src/crypto/base64.rs",
+     "note": "<code>encode</code> maps each 6-bit value to its character with branch-free masks.",
+     "checks": [
+      {
+       "kind": "verify",
+       "text": "Walked <code>character</code> for each range boundary (0, 26, 52, 62, 63) by hand. The new test compares it with the alphabet for all 64 values, and the RFC 4648 vectors still pass."
+      }
+     ]
+    },
+    {
+     "path": "src/crypto/random.rs",
+     "note": "Adds <code>id</code> for file names and <code>key_text</code> for a new vault key, both from <code>fill</code>.",
+     "checks": [
+      {
+       "kind": "verify",
+       "text": "Both read <code>/dev/urandom</code> through <code>fill</code> and return its error, so a failed read never yields a key. The key comes only from random bytes, never from the passphrase."
+      }
+     ]
+    },
+    {
+     "path": "src/age.rs",
+     "note": "Adds <code>VAULT_WORK_FACTOR</code>, 10, for store files. Their passphrase is a random 256-bit key, so stretching it buys nothing."
+    }
+   ]
+  },
+  {
+   "id": "vault",
+   "title": "The package: open, save, rotate",
+   "kicker": "src/vault.rs lists the package, opens it with one or two passphrases, and writes every change as new files.",
+   "intro": [
+    "<code>Vault::open</code> lists the package and adopts only names of the exact shapes <code>key.&lt;gen&gt;.age</code> and <code>store.&lt;gen&gt;.&lt;id&gt;.age</code>. It warns about any other name, such as a sync service's <code>… 2</code> copy, and leaves it alone. It decrypts every key file with your passphrase and gathers every current and retired key into one set of known keys. Then it decrypts every store file whose generation it has a key for and merges them.",
+    "When some key file does not open, another Mac's <code>passwd</code> may have written it, so <code>open</code> asks once for the other passphrase. With both passphrases, the session writes under the one whose key files carry the later <code>passphrase-set</code> time, so a <code>passwd</code> wins over a rotation that raced it. With only one, the session is read-only.",
+    "<code>Session::settle</code> runs after every prompt. It rotates when the key is 14 or more days old or more than one key file opened, and otherwise compacts when more than one store file was merged. A rotation writes the new key file, then the store file, then deletes the store files it read, then the key files it opened. A crash between any two steps leaves a package that opens."
+   ],
+   "checks": [
+    {
+     "kind": "context",
+     "text": "Every write and delete counts as a step, and tests stop the vault before each step in turn to play a crash. <code>at_every_crash_point</code> drives that loop."
+    }
+   ],
+   "files": [
+    {
+     "path": "src/vault.rs",
+     "note": "New module. Read <code>try_open</code>, <code>settle</code>, and <code>rotate</code> first, then the sync tests that drive two package copies through a copier in every order.",
+     "checks": [
+      {
+       "kind": "verify",
+       "text": "Only exact names are adopted. The test copies a store file to <code>… 2</code> and checks that it is warned about and kept after a save.",
+       "line": 403
+      },
+      {
+       "kind": "context",
+       "text": "The writer is the passphrase whose key files carry the later <code>passphrase-set</code>. When any key file stays closed, <code>passphrase</code> is <code>None</code> and nothing writes.",
+       "line": 506
+      },
+      {
+       "kind": "verify",
+       "text": "Each store file is expired before the merge, with a tombstone cutoff no later than the oldest known key's <code>created</code>. The test of a late file's expired tombstone checks that an old secret does not come back.",
+       "line": 556
+      },
+      {
+       "kind": "verify",
+       "text": "Rotation order: key file, store file, delete store files, delete key files. The crash test stops before each step, and every stop opens with all entries.",
+       "line": 699
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "store",
+   "title": "One durable write for every file",
+   "kicker": "The single-file load and save give way to a write-once helper and a durable delete.",
+   "intro": [
+    "<code>write_private_durable</code> writes a file under a hidden <code>.&lt;name&gt;.tmp</code> name with mode 0600, flushes it, renames it into place, and flushes the folder. So a reader sees a whole file or none, and the file exists only once it survives a crash. <code>remove_durable</code> deletes a file and flushes the folder, and treats a file already gone as removed, because another Mac may have deleted it first."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": "src/store.rs",
+     "note": "Removes <code>Store::load</code> and <code>Store::save</code>, adds the durable helpers, and drops the dead-code markers on <code>merge</code> now that it has a caller."
+    }
+   ]
+  },
+  {
+   "id": "cli",
+   "title": "The commands",
+   "kicker": "src/main.rs opens the package for each command, adds rekey, and refuses an old single-file store.",
+   "intro": [
+    "Every command now opens the package through one <code>open</code> function, which prints what the open left alone, and settles the package unless the open was read-only. It takes a <code>Settle</code> mode. Read commands use <code>Try</code>: when a due rotation or compaction cannot write, they warn and read the store as it is. Saving commands use <code>Must</code> and fail before they ask for anything, naming the package. Commands that save also fail before they ask for anything when the open was read-only. <code>passwd</code> and <code>rekey</code> skip the settle and rotate directly. <code>package_path</code> refuses a path that names a single file, and refuses <code>~/.multipass/store.age</code> when no package exists yet, until the next layer can move it."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": "src/main.rs",
+     "note": "New <code>open</code>, <code>open_writable</code>, and <code>package_path</code>; <code>passwd</code> rotates under the new passphrase.",
+     "checks": [
+      {
+       "kind": "verify",
+       "text": "Re-ran under <code>expect</code> with a second store file and <code>chmod 500</code> on the folder. <code>get</code> and <code>list</code> warn <code>could not write to …; the store is read as it is</code> and then print, <code>add</code> fails before its prompt, and no file in the package changes.",
+       "line": 620
+      },
+      {
+       "kind": "verify",
+       "text": "Ran under <code>expect</code>: a <code>--store</code> naming a single file fails with <code>… is a single-file store from an earlier multipass, which this build cannot open</code>.",
+       "line": 791
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "docs",
+   "title": "README, AGENTS.md, the installer, and the plan",
+   "kicker": "The user guide and the agent rules describe the package, two-step recovery, and write-once files.",
+   "intro": [
+    "The README explains the package, rotation, <code>rekey</code>, merging across Macs, and recovery with two <code>age -d</code> commands: first the key file with your passphrase, then the store file with the <code>key</code> line's text. AGENTS.md changes its stock-age rule to those two steps and its atomic-write rule to never changing a file in the package. The plan moves from <code>ready</code> to <code>in-progress</code>."
+   ],
+   "checks": [
+    {
+     "kind": "context",
+     "text": "Every file is still passphrase-mode age, using only scrypt and ChaCha20-Poly1305, so AGENTS.md's no-public-key rule and its quantum argument still hold."
+    }
+   ],
+   "files": [
+    {
+     "path": "README.md",
+     "note": "Package layout, rotation, sync behavior, what happens in a folder multipass cannot write, and two-step recovery.",
+     "checks": [
+      {
+       "kind": "verify",
+       "text": "Ran under <code>expect</code> with the folder at mode 0500. With a fresh key and one store file, <code>get</code> printed with no warning, and <code>add</code> asked for the secret and then failed with <code>could not write to …</code>. With a compaction due, <code>get</code> warned and printed, and <code>add</code> failed before its prompt. Both match this sentence.",
+       "line": 57
+      },
+      {
+       "kind": "flag",
+       "text": "Line 7 says multipass is about 2,200 lines outside the cryptography, small enough to read in a day. Counting each <code>src</code> file up to its test module gives 2,246 at the earlier base, which matches, and 3,504 at this head, 857 of them from this layer. The figure should be about 3,500.",
+       "line": 3
+      }
+     ]
+    },
+    {
+     "path": "AGENTS.md",
+     "note": "Stock-age rule as two steps, the never-modify rule for package files, and the hand-test hint pointing <code>--store</code> inside a temporary directory."
+    },
+    {
+     "path": "install.sh",
+     "note": "<code>uninstall</code>'s <code>kept</code> row names the package, <code>~/.multipass/store.multipass</code>, as the store it leaves alone. <code>tests/install.sh</code> matches only the row's start, <code>your stores</code>."
+    },
+    {
+     "path": "docs/projects/vault-key/readme.md",
+     "note": "Status moves to <code>in-progress</code>. § 2.3 records that <code>.DS_Store</code> is ignored and what a folder that cannot be written does, and § 2.6 records that this layer refuses a single-file store until the move lands."
+    }
+   ]
+  }
+ ]
+}
