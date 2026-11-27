@@ -66,6 +66,8 @@ After you change the passphrase with `multipass passwd`, the old item no longer 
 
 The store package lives at `Documents/store.multipass` in the app's iCloud container, which iCloud Drive copies between your devices. Its files are ciphertext, so iCloud holds nothing readable.
 
+A store reaches the container through the app. The first time you open the app on a Mac, its settings offer to move your existing package there. The app moves the whole `store.multipass` folder into the container with `NSFileCoordinator`, one rename on the same volume, and then shows the `export MULTIPASS_STORE=…` line for the CLI. The app refuses while the package still holds a move record from the vault-key plan's § 2.6, saying when the old single file will be retired. That old file is how an older multipass on another Mac still saves for up to 30 days, and the move record's check finds it beside the package, so moving the package before then would lose those saves. A Mac with no store yet creates one in the container directly.
+
 | Reader | How it reaches the store |
 | --- | --- |
 | The app and its extension, on both systems | Through the iCloud container, with `NSFileCoordinator` around listing the package, reading each file, writing each new one, and deleting each file a save, compaction, or rotation read |
@@ -111,6 +113,7 @@ Every save adds a new file to the package and never modifies one, as the vault-k
 | `multipass rm` the entry, then try the sign-in again | multipass offers no passkey for the site |
 | `multipass passkey github.com --clear` on an entry that also holds a password, then on an entry that holds only a passkey | The first removes the passkey and keeps the password. The second fails, and the entry keeps its passkey; `rm` removes it. |
 | Register a passkey in Safari on the iPhone, wait for iCloud Drive to sync, then sign in on the Mac | The Mac's extension finds the passkey and signs in |
+| In the app's settings on a Mac, move a package that still holds a move record, then one that does not | The first is refused, with the date the old file retires. The second ends up at `Documents/store.multipass`, and the CLI opens it after the `export` line the app shows. |
 | Register on both devices while one is offline, for two different sites, then bring it online | Both passkeys are in the store once both devices have synced, and neither device shows a conflict |
 | Register a passkey for one site on the iPhone while the Mac, offline, edits that site's entry, then sync | Only the later of the two changes remains in the entry, and nothing warns. This row records the limit § 2.4 states. |
 | Run `multipass passwd` on the Mac, then sign in on the iPhone before the old key file's deletion syncs | The extension asks for the other passphrase. With it, the sign-in succeeds and the item holds the new passphrase. Cancelled, the sign-in fails with `multipass needs your other passphrase`, and the next sign-in asks again. |
@@ -146,7 +149,7 @@ Question 5 blocks the plan until the prototype in § 8 answers it. Questions 1 t
 
 These steps run in order. Steps 2 and 4 need the user's Apple developer account and devices.
 
-1. **Prototype.** Build a bare extension that registers and signs with a fixed test key on both platforms, and answer question 5: can the extension open the app's iCloud container directly? Also measure scrypt at work factor 18 inside the iPhone extension's memory limit, and check whether Chrome on the Mac offers the extension. Record the results in § 7, and move this plan to `ready`.
+1. **Prototype.** Build a bare extension that registers and signs with a fixed test key on both platforms, and answer question 5: can the extension open the app's iCloud container directly? Also measure scrypt at work factor 18 inside the iPhone extension's memory limit, and check whether Chrome on the Mac offers the extension. Check, too, that once the app declares `.multipass` as a package type, iCloud Drive still syncs the files inside a package one by one, and does not treat the package as one document with conflict versions of the whole, which the vault-key design relies on avoiding. If it does, the app does not declare the type, and Finder keeps showing a folder. Record the results in § 7, and move this plan to `ready`.
 2. **Apple setup.** The user creates the App Store Connect record and the identifiers the app needs: the bundle IDs for the app and its extensions, the App Group, the iCloud container, and the Keychain access group. App Store Connect also asks whether the app uses encryption. It does, both its own and Apple's, so the user answers the export compliance questions for an app that encrypts only the user's own data.
 3. **Build.** Implement § 2 and pass the tests in § 4, on CI and locally. The session-unlock plan's Secure Enclave mode (`docs/projects/session-unlock/readme.md`, § 8) lands with this app, and its § 8.5 questions join the prototype in step 1.
 4. **TestFlight.** Upload builds for both platforms. The user installs them from TestFlight on the Mac and the iPhone, and runs the checks in § 4's table.
