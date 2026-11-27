@@ -5,7 +5,7 @@ priority: later
 
 # Shared vaults
 
-Several people share one store package. Each member unlocks it with their own passphrase, the data stays encrypted with a symmetric vault key, and only the delivery of each new vault key to the members uses public keys, through age's hybrid post-quantum recipient type.
+Several people share one store package. Each member unlocks it with their own passphrase, the data stays encrypted with a symmetric vault key, and public keys are used only to deliver each new vault key and to sign who may receive it.
 
 This is a future plan. It depends on the [mergeable store](../store-merge/readme.md), the [vault key](../vault-key/readme.md), and probably [session unlock](../session-unlock/readme.md), and nothing here is scheduled.
 
@@ -13,101 +13,129 @@ This is a future plan. It depends on the [mergeable store](../store-merge/readme
 
 multipass is single-user. A store package holds one key file under one passphrase, and anyone who can open it can open everything. Two people who want to share a few secrets, such as a household's recovery codes, must either share one passphrase, so neither can ever be removed and either can change it on the other, or keep two stores and copy secrets between them by hand.
 
-The vault-key plan almost allows sharing already: the store files are under a random vault key, and the key file only wraps that key under a passphrase. What it lacks is a way to give the vault key to a second person, and to give each new vault key to everyone still in the vault, without anyone else learning it, every time the key rotates.
+The vault-key plan almost allows sharing already: the store files are under a random vault key, and the key file only wraps that key under a passphrase. What it lacks is a way to give the vault key to a second person, and to give each new vault key to everyone still in the vault, without anyone else learning it, every time the key rotates. Because anyone who can write to a shared folder can add files to it, every such delivery must also prove that a current member sent it.
 
 ## 2. Solution
 
-Each member has an identity: an age hybrid post-quantum key pair, ML-KEM-768 combined with X25519, the `mlkem768x25519` recipient type that the age specification defines. A member's secret identity sits in the package in their own identity file, under their own passphrase, in scrypt mode as today. Their public recipient sits in the store's member list, inside the encrypted store, so only members can read or change it. When the vault key rotates, whoever rotates writes one grant file per member: the new vault key's key-file text, encrypted to that member's recipient. A member opens the vault with their passphrase, then their identity, then their grant, then the store files, which are exactly as the vault-key and mergeable-store plans describe. Removing a member is leaving them out of the next rotation. Public-key cryptography appears only in the grants; every entry stays under ChaCha20-Poly1305 and a 256-bit random key.
+Each member has an identity of two key pairs. One is an age hybrid post-quantum key pair, ML-KEM-768 combined with X25519, the `mlkem768x25519` recipient type that the age specification defines, used to receive vault keys. The other is an ML-DSA-65 signing key pair (FIPS 204), used to sign membership. A member's secret keys sit in the package in their own identity file, under their own passphrase, in scrypt mode as today.
+
+When the vault key rotates, whoever rotates writes two kinds of file for the new generation. A membership record, encrypted under the new vault key, lists every member's public keys and names the generation it follows, and the rotating member signs it. A grant per member holds the new vault key's key-file text, encrypted to that member's recipient. A member accepts a new generation only when its record is signed by someone who was a member in a generation they already trust, and commits to the vault key their grant delivered. So a grant from an outsider, or from a removed member, opens nothing. Store files are exactly as the vault-key and mergeable-store plans describe, and the store text stays format 3. Removing a member is a signed rotation that leaves them out. Every entry stays under ChaCha20-Poly1305 and a 256-bit random key.
 
 ### 2.1 The package for a shared vault
 
 | File | Encrypted under | Plaintext |
 | --- | --- | --- |
-| `identity.<member>.age` | That member's passphrase, scrypt at work factor 18 | The member's age identity, `AGE-SECRET-KEY-PQ-1…`, and their member id |
+| `identity.<member>.<random>.age` | That member's passphrase, scrypt at work factor 18 | An age identity file (§ 2.2): the member's `AGE-SECRET-KEY-PQ-1…` line, with their member id, signing key, and trusted generation as `#` comment lines |
+| `members.<gen>.age` | Generation `<gen>`'s vault key, at work factor 10, like a store file | The signed membership record (§ 2.3) |
 | `grant.<gen>.<member>.age` | That member's recipient, `age1pq1…`, one `mlkem768x25519` stanza | The key file text for generation `<gen>`, as the vault-key plan's § 2.2 defines it |
-| `store.<gen>.<random>.age` | The vault key, as the vault-key plan describes | A whole store, now in format 4 (§ 2.3) |
-| `join.<member>.pub` | Nothing | A request to join: the person's name and recipient, before a member admits them |
+| `store.<gen>.<random>.age` | The vault key, as the vault-key plan describes | A whole store, in format 3, unchanged |
+| `join.<member>.pub` | Nothing | A request to join: the person's name, recipient, and signing public key |
 
-`<member>` is 16 random bytes in hex, like the vault-key plan's ids. A solo store keeps its `key.<gen>.age` and never needs any of this; a store becomes shared when its first second member is admitted, and `key.<gen>.age` is then replaced by the owner's identity file and grant.
+`<member>` and `<random>` are 16 random bytes in hex, like the vault-key plan's ids. A solo store keeps its `key.<gen>.age` and never needs any of this; a store becomes shared when its first second member is admitted, and `key.<gen>.age` is then replaced by the owner's identity file, a membership record, and grants.
 
-Every file is still written once and never modified, so the vault-key plan's sync rules hold unchanged: two members who save at the same moment each add a file, and the next open merges both.
+Every file is still written once and never modified, so the vault-key plan's sync rules hold unchanged.
 
-### 2.2 How a member opens the vault
-
-1. `open` asks for the passphrase and decrypts that member's `identity.<member>.age`. Which identity is theirs is recorded outside the package, in `~/.multipass/vaults`, which maps each package to a member id, because the package's files do not say whose they are.
-2. It decrypts every `grant.*.<member>.age` with the identity, and so learns each generation's key file text: the current vault key, its creation time, and the retired keys.
-3. From here the vault-key plan's § 2.3 runs as before: merge every store file it has a key for, and rotate when the current key is 14 or more days old or when there are several generations.
-4. A rotation writes one grant per current member, read from the member list in the merged store, instead of one key file under a passphrase.
-
-### 2.3 The member list, in store format 4
-
-Format 4 adds a second kind of record beside entries:
+### 2.2 The identity file
 
 ```text
-multipass 4
-member 3f9a1c2e8b7d4f6a0c5e9b1d2f3a4c5e
-	modified 1764160000123
-	name Alex
-	recipient age1pq1…
-github.com
-	modified 1764160000456
-	secret hunter2
+# multipass-identity 1
+# member 3f9a1c2e8b7d4f6a0c5e9b1d2f3a4c5e
+# signer <base64 ML-DSA-65 seed>
+# trusted 7c1e9a3b5d2f4e6a8c0b1d3f5a7c9e2b 1764160000
+AGE-SECRET-KEY-PQ-1XX76JRALNLXDMEW0CRK45QMCCH4X06SE84UN3VPM33W6HWDX0H3SK3ZQFR
 ```
 
-A `member` record merges like an entry, per the mergeable-store plan: the newest version wins, and removing a member leaves a tombstone. Keeping the list inside the encrypted store means a sync service, or anyone else who can write to the shared folder, cannot add a recipient of their own and receive the next vault key. Only someone who already holds the vault key can change who gets it.
+Keeping multipass's own lines as `#` comments means the text `age -d` prints is a valid identity file for `age -d -i`, which accepts only identity lines and comments. `trusted` names the newest generation this member has verified, and its creation time. When a member verifies a newer generation at a prompt, multipass writes a new identity file with the new `trusted` line, then deletes the older ones, so every device of that member starts from the newest point any of them reached.
 
-### 2.4 Membership
+### 2.3 The membership record
+
+```text
+multipass-members 1
+generation 9d4e…
+follows 7c1e…
+created 1764200000
+commitment <base64 of 32 bytes>
+member 3f9a… Alex age1pq1… <base64 ML-DSA-65 public key>
+member 5b2c… Sam age1pq1… <base64 ML-DSA-65 public key>
+removed 8a7f… ends 7c1e…
+signer 3f9a…
+signature <base64 ML-DSA-65 signature over every line above>
+```
+
+| Line | Meaning |
+| --- | --- |
+| `follows` | The generation or generations this one replaces. A rotation that reconciles two concurrent generations lists both. |
+| `commitment` | HMAC-SHA-256 under the vault key's text of the label `multipass vault key commitment`, computed in `src/crypto`. It binds the record to the one vault key the grants deliver, without revealing it. |
+| `member` | Each current member's id, display name, recipient, and signing public key |
+| `removed` | A member removed by this rotation, and the generations the removal ends: every generation the record follows. |
+| `signer`, `signature` | The member who rotated, and their ML-DSA-65 signature |
+
+A member accepts generation `G` at a prompt only when all of these hold:
+
+1. Their grant for `G` decrypts with their identity, giving a vault key `K`.
+2. `members.G.age` opens with `K`, and its `commitment` matches `K`.
+3. Some generation in `follows` is one they already trust, or is itself accepted by these rules first, back to their `trusted` generation.
+4. `signer` is listed as a member in a generation `G` follows, and the signature verifies under the signing key listed there.
+5. `signer` has not been removed in any generation they trust.
+
+A grant that fails any rule is left in place and ignored, with a warning naming it: `grant.9d4e….age is not signed by a member you trust`. So a key planted by someone who knows a member's recipient, a grant a removed member replays, and a fork a removed member signs from before their removal all open nothing for members who saw the removal.
+
+### 2.4 How a member opens the vault
+
+1. `open` asks for the passphrase and finds the member's identity file. `~/.multipass/vaults` records, per package, which member this device is and the newest generation it has trusted. A device with no record tries each `identity.*.age` in the package with the passphrase, which takes about 300 ms each, and records the one that opens.
+2. It takes the newer of the identity file's `trusted` generation and the device's record as its starting point. A package whose newest acceptable generation is older than the device's record means files were removed from the package; it warns, `this package is older than this Mac last saw`, and refuses to save.
+3. It accepts every newer generation by the rules in § 2.3, and learns each one's vault key, creation time, and retired keys from the grants.
+4. From here the vault-key plan's § 2.3 runs as before: merge every store file it has a key for, and rotate when the current key is 14 or more days old or when there are several generations. Retired keys come only from accepted generations, and never from a generation a removal ended.
+5. A rotation writes a new membership record, signed with the member's key, and one grant per member it lists, instead of one key file under a passphrase. When the accepted generations moved past the identity file's `trusted` line, it writes a new identity file.
+
+### 2.5 Membership
 
 | Action | What happens |
 | --- | --- |
-| Join | The new person runs `multipass join <package>`. It makes their identity, writes `identity.<member>.age` under their passphrase and `join.<member>.pub` with their recipient, and prints the recipient's fingerprint. |
-| Admit | A member runs `multipass admit <member>`. It shows the join request's name and fingerprint, and asks the member to confirm that the newcomer read the same fingerprint to them out of band, in person or on a call. It adds a `member` record to the store, writes the newcomer's grant for the current generation, and deletes the join request. |
-| Remove | A member runs `multipass remove <member>`. It writes the member's tombstone and rotates at once, writing grants for everyone else, and does not carry the old key forward as a `retired` line (§ 2.5). |
-| Routine rotation | Unchanged from the vault-key plan: any member's prompt rotates a key 14 or more days old, and writes grants for every current member. |
-| Concurrent rotations | Two members who rotate before hearing of each other produce two generations, each with its own grants. The next prompt on any member's machine merges both, as the vault-key plan's § 2.5.1 describes, and rotates once more, using the merged member list. |
-| More devices | A member's identity file is in the package, so every device that syncs it unlocks with the same passphrase. A device does not need its own identity. |
+| Join | The new person runs `multipass join <package>`. It makes their identity, writes their identity file under their passphrase and `join.<member>.pub` with their public keys, and prints their fingerprint. |
+| Admit | A member runs `multipass admit <member>`. It shows the join request's name and fingerprint, and the member's own. The two people read both fingerprints to each other out of band, in person or on a call, and the member confirms. It rotates, with the newcomer added to the record, and deletes the join request. |
+| First open by the newcomer | The newcomer has no trusted generation yet. multipass shows who signed the generation that lists them, with that person's fingerprint, and asks the newcomer to confirm it matches what they heard. On yes, it writes their identity file with that generation as `trusted`. |
+| Remove | A member runs `multipass remove <member>`. It rotates, with a `removed` line, and carries no key from the ended generations forward as `retired`. |
+| `passwd` | Makes a new identity, both key pairs, writes it as a new identity file under the new passphrase, and rotates with a record signed by the member's old signing key that lists their new public keys. Other members accept it without re-verifying, because their old key signed it. The old identity file opens no grant written afterwards, and the old signing key is no longer listed, so it signs nothing anyone accepts. |
+| Routine rotation | Unchanged from the vault-key plan: any member's prompt rotates a key 14 or more days old, signs the record, and writes grants for every member it lists. |
+| Concurrent rotations | Two members who rotate before hearing of each other produce two generations. The next prompt accepts both, and rotates once more with a record that follows both. Its members are the union of both lists, less everyone either removed. |
+| More devices | A member's identity file is in the package, so every device that syncs it unlocks with the same passphrase, and starts from the newest `trusted` generation any of the member's devices wrote. |
 
-A fingerprint is the first 20 bytes of SHA-256 over the recipient string, shown as five groups of eight base32 characters, computed in `src/crypto`. Verifying it out of band is what stops a person in the middle from admitting their own key in place of the newcomer's.
+A fingerprint is the first 20 bytes of SHA-256 over the member's recipient and signing public key, shown as five groups of eight base32 characters, computed in `src/crypto`. Reading both fingerprints aloud is what stops a person in the middle from swapping their own keys in for either side's.
 
-### 2.5 Removing a member, and what it does not undo
+### 2.6 What sharing does not protect
 
-A routine rotation carries the old key forward for 90 days as a `retired` line, so a store file another member wrote under it still merges. A removal does not, because the removed member still has that key: any file under it after the removal could be theirs. A file under the old generation that arrives after a removal is left in place with a warning rather than merged, and a member can merge it by hand after checking it.
-
-| What the removed member keeps | Why |
+| Risk | Why, and what limits it |
 | --- | --- |
-| Every secret they ever read | Nothing can take back what they saw. Change those secrets at their source. |
-| Every vault key they held, and so every store file written under those keys, in sync history and backups | Rotation protects only what is written afterwards |
-| Write access to the shared folder | Until whoever shares the folder stops sharing it with them. Without a current key, files they write are ignored or warned about. |
-
-A member who is compromised or malicious, before anyone removes them, can do everything a member can: read every entry, change or remove entries, admit someone, or remove others. The vault key is symmetric, so nothing shows which member wrote a store file. § 6 defers both roles and signatures.
-
-### 2.6 Neighbors
-
-- **Session unlock.** The agent holds the vault key as before, and asks for a touch per request. A rotation by any member ends every member's sessions when they see the new generation, so a session in a shared vault ends more often than in a solo one, at most once per rotation per member.
-- **Passkeys.** A shared passkey is an entry like any other, so every member's extension can sign with it. Two members registering passkeys for the same site at once merge like any two entries.
-- **The Secure Enclave mode.** It wraps the vault key in the enclave for the session, as before, and is unaffected. The member's long-term identity could move into the enclave too: CryptoKit offers `SecureEnclave.MLKEM768` on macOS 26 and iOS 26, but no enclave form of the hybrid, so that would give up the X25519 half and tie the identity to one device. § 6 defers it.
+| The weakest passphrase | Anyone with a copy of the package, a removed member or a sync service included, can guess each member's passphrase offline at scrypt's cost. One member's weak passphrase gives up their identity, every grant to them, and so the vault. |
+| A removed member keeps what they had | Every secret they read, every vault key they held, and every store file written under those keys in sync history and backups. Rotation protects only what is written afterwards, so change the secrets themselves at their source. |
+| A removed member keeps folder access | Until whoever shares the folder stops sharing it. What they write is ignored: a grant they sign fails rule 5, and a store file under an ended generation is warned about and not merged. |
+| A member who saw no removal | A member whose newest trusted generation is from before a removal, and who never receives the removing record, can accept a fork the removed member signs from that older generation. Once the removing record arrives, the removal is sticky and the fork's signer fails rule 5. |
+| Rolling back a new device | Someone who can delete files from the folder can delete the newest generations and identity files. A device with a record refuses the older package, but a new device has only what the package holds. |
+| A malicious member | Can read and change every entry, admit others, and remove members. Membership changes are signed, so the record shows who made them, but store files are not, so nothing shows which member changed an entry. |
 
 ### 2.7 Implementation
 
-This is the plan's largest risk. age's `mlkem768x25519` stanza is HPKE (RFC 9180) base mode with the MLKEM768-X25519 KEM, HKDF-SHA256, and ChaCha20-Poly1305. multipass has HKDF-SHA256 and ChaCha20-Poly1305 already. It does not have:
+This is the plan's largest risk. age's `mlkem768x25519` stanza is HPKE (RFC 9180) base mode with the MLKEM768-X25519 KEM, HKDF-SHA256, and ChaCha20-Poly1305, and membership adds ML-DSA-65. multipass has HKDF-SHA256, HMAC-SHA-256, and ChaCha20-Poly1305 already. It does not have:
 
 | Piece | Specification | Rough size |
 | --- | --- | --- |
 | SHA3-256, SHA3-512, SHAKE128, SHAKE256 | FIPS 202 | 200 lines |
 | ML-KEM-768 | FIPS 203 | 600 lines, including the number-theoretic transform |
+| ML-DSA-65 | FIPS 204 | 800 lines, with its own transform and modulus |
 | X25519 | RFC 7748 | 300 lines, including field arithmetic |
 | The MLKEM768-X25519 combiner | draft-ietf-hpke-pq, as the age specification cites it | 100 lines |
 | HPKE base mode | RFC 9180 | 150 lines |
 | Bech32 for `age1pq` and `AGE-SECRET-KEY-PQ-` | BIP 173, without its length limit, as age uses it | 100 lines |
 
-That is about 1,500 lines in `src/crypto`, more than all the cryptography there today, each checked against its official vectors. The constant-time rule matters more here than anywhere so far. ML-KEM's arithmetic, its decapsulation's implicit rejection, and X25519's ladder must not branch on or index by secret data. A subtle mistake would leak a member's identity, which then opens every grant ever written to them.
+That is about 2,300 lines in `src/crypto`, far more than all the cryptography there today, each checked against its official vectors. The constant-time rule matters more here than anywhere so far. ML-KEM's arithmetic, its decapsulation's implicit rejection, ML-DSA's signing, and X25519's ladder must not branch on or index by secret data. Bech32 decoding of an `AGE-SECRET-KEY-PQ-` identity falls under the same rule, as the vault-key plan's `base64::encode` does, so it maps characters to values with masked arithmetic rather than a table. A subtle mistake would leak a member's identity, which then opens every grant ever written to them.
 
 The alternative is Apple's CryptoKit, which the passkeys plan's rule allows on Apple devices. CryptoKit's Swift interface in the macOS 27.2 SDK declares, each from macOS 26 and iOS 26: `MLKEM768` and `MLKEM1024`; `XWingMLKEM768X25519`, the X-Wing hybrid, which Apple's documentation describes as defined in draft-connolly-cfrg-xwing-kem-06; the HPKE ciphersuite `XWingMLKEM768X25519_SHA256_AES_GCM_256`; enclave forms `SecureEnclave.MLKEM768` and `SecureEnclave.MLKEM1024`; and the signatures `MLDSA65` and `MLDSA87`. Apple's documentation also lists `HPKE.KEM.XWingMLKEM768X25519` as a KEM, `HPKE.AEAD.chaChaPoly` as an AEAD, and a `Ciphersuite.init(kem:kdf:aead:)` that combines them.
 
 | | Hand-written in `src/crypto` | CryptoKit |
 | --- | --- | --- |
 | Platforms | Every platform the CLI builds on | macOS 26, iOS 26, and later only |
-| Code to write and check | About 1,500 lines of the hardest constant-time code in the repository | A few dozen lines of Swift calling vetted, constant-time implementations |
+| Code to write and check | About 2,300 lines of the hardest constant-time code in the repository | A few dozen lines of Swift calling vetted, constant-time implementations |
 | How the CLI reaches it | Directly, in Rust | Through a small Swift shim linked into the CLI, which adds Swift and Xcode to the CLI's build, or through the Mac app's helper, as session unlock's § 8 does |
 | No-dependency rule | Kept | Allowed by the rule that counts Apple's frameworks like the standard library, on Apple devices only |
 
@@ -121,16 +149,33 @@ Whether stock age can read what CryptoKit writes comes down to three things. Eac
 | AEAD | ChaCha20Poly1305 | The predefined suite uses AES-GCM-256; `chaChaPoly` is available through `init(kem:kdf:aead:)` | The predefined suite does not match, verified. A custom suite should match, unverified. |
 | KEM | "MLKEM768-X25519 from draft-ietf-hpke-pq-03", which the specification calls "i.e. X-Wing", with a 1120-byte encapsulated key | X-Wing from draft-connolly-cfrg-xwing-kem-06 | Unverified. An X-Wing ciphertext is 1,088 bytes of ML-KEM-768 plus 32 bytes of X25519, 1,120 in all, which agrees with age's length, but the two drafts may differ in the combiner or the HPKE KEM identifier. |
 
-So a grant that CryptoKit writes with a custom suite of X-Wing, HKDF-SHA256, ChaCha20-Poly1305, and age's `info` string may be readable by stock age, but nobody has checked. § 6 question 6 is that check.
+So a grant that CryptoKit writes with a custom suite of X-Wing, HKDF-SHA256, ChaCha20-Poly1305, and age's `info` string may be readable by stock age, but nobody has checked. § 6 question 7 is that check.
+
+### 2.8 Changes by file
+
+| File | Change |
+| --- | --- |
+| `src/crypto/sha3.rs`, `mlkem.rs`, `mldsa.rs`, `x25519.rs`, `hpke.rs`, `bech32.rs` | New, each against its official vectors, and constant-time as § 2.7 says. Not needed if the user chooses CryptoKit. |
+| `src/crypto/mod.rs` | The vault key commitment and the member fingerprint, so neither computes on a secret or a key outside `src/crypto`. |
+| `src/share.rs` | New. Identity files, membership records, grants, join requests, the acceptance rules in § 2.3, and `join`, `admit`, and `remove`. |
+| `src/vault.rs` | `open` starts from an identity file and accepted generations when the package is shared, and `rotate` writes a record and grants instead of a key file. Solo stores are unchanged. |
+| `src/main.rs` | Adds `join`, `admit`, and `remove`, and makes `passwd` in a shared vault replace the member's identity. |
+| `testdata/` | The age specification's `mlkem768x25519` test files, which are encrypted files with published keys, the same exception the reference fixtures already are. |
+| `AGENTS.md` | "multipass is a single-user password manager" becomes "a password manager for one person, or a few who share a vault". "Stay in age's passphrase (scrypt) mode" becomes: store, key, and identity files stay in passphrase mode; grants alone use the `mlkem768x25519` recipient type, and never a recipient type that is not quantum-resistant. "Every primitive lives in `src/crypto`" adds FIPS 202, 203, and 204, RFC 7748, RFC 9180, and BIP 173 to the required vectors. "Compatibility with age" says recovering a shared vault needs an age that reads `mlkem768x25519`. "Never commit … any other encrypted file" names the new test files as an exception. If the user chooses CryptoKit, the Apple-frameworks rule names `src/` modules that call it, beyond the passkeys plan's P-256 exemption. |
+| `README.md` | "no sharing" becomes sharing with a few people you trust. "One passphrase, no public keys" says the data and every file you unlock with a passphrase stay symmetric, and that post-quantum public keys only deliver and sign vault keys in a shared vault. The advice to keep shared logins in 1Password stays for everyday sharing, with shared vaults for the few secrets a household or a small team must hold together. Adds joining, admitting with fingerprints, removing, and § 2.6. |
 
 ## 3. Why this design
 
 - **Public keys only to deliver vault keys.** Rotation must hand a new key to every remaining member without a meeting, and removal must leave someone out. Encrypting the new key to each member's public key does both, and nobody has to be online at the same time. This is how 1Password shares vaults, with RSA.
 - **A hybrid post-quantum KEM, not RSA or X25519 alone.** The grant is exactly what an attacker would record now and break later with a quantum computer, the weakness 1Password's RSA shares. ML-KEM-768 with X25519 is safe while either holds. The age specification already defines it as the `mlkem768x25519` recipient type, and says such a file "SHOULD NOT be encrypted to both this recipent type and to other non-quantum-resistant recipient types", which a grant file with one stanza satisfies.
-- **The data stays symmetric.** Entries are encrypted only under the vault key, so the public-key step guards key delivery and nothing else, and a solo store never uses it.
-- **Stock age still recovers everything.** Each file is an ordinary age file: `age -d identity.<member>.age` with the passphrase gives the identity, `age -d -i <identity> grant.<gen>.<member>.age` gives the key file text, and the vault-key plan's steps do the rest. This assumes an age build with the `mlkem768x25519` type, which § 6 asks the implementer to confirm.
-- **The member list inside the store.** A list in plain files would let anyone with write access to the shared folder add themselves. Inside the store, the vault key authenticates it.
-- **Fingerprints read aloud.** Nothing else can tell a member that the recipient in a join request belongs to the person they mean to admit.
+- **Signed membership, because a grant proves nothing about its sender.** Anyone who knows a member's recipient can encrypt a key of their own to them. Signing each generation's record, and accepting it only from someone who was a member in a generation already trusted, means only members can rotate, and the commitment ties the record to the one key the grants deliver.
+- **ML-DSA-65 alone, not a hybrid signature.** A signature only has to resist forgery when it is checked, so there is nothing to record now and break later, which is what the hybrid KEM guards against. ML-DSA-65 is FIPS 204's middle level and the one CryptoKit offers as `MLDSA65`. § 6 asks whether to add Ed25519 as a hedge against a flaw in ML-DSA.
+- **Rejected: an HMAC under the previous vault key instead of signatures.** It would prove that whoever rotated held the old key, with no new primitive. But a removed member holds the old key, so they could forge the next rotation, and removal would mean nothing.
+- **The membership record outside the store text.** It needs a signature that store entries do not have, and it keeps the store at format 3, so no entry name can be mistaken for a member.
+- **Trust carried in the identity file.** Each device needs a starting point it did not get from the folder, since anyone who can write to the folder could forge one. The identity file is under the member's passphrase, so only the member can write it, and it travels to every device they own.
+- **The data stays symmetric.** Entries are encrypted only under the vault key, so the public-key steps guard key delivery and membership and nothing else, and a solo store never uses them.
+- **Stock age still recovers everything.** Each file is an ordinary age file: `age -d identity.<member>.<random>.age` with the passphrase gives an identity file, `age -d -i <it> grant.<gen>.<member>.age` gives the key file text, and the vault-key plan's steps do the rest. This assumes an age build with the `mlkem768x25519` type, which § 6 asks the implementer to confirm.
+- **Fingerprints read aloud, both ways.** Nothing else can tell a member that the keys in a join request belong to the person they mean to admit, or tell a newcomer that the generation admitting them was signed by the person they spoke to.
 - **Rejected: invite codes over an outside channel.** A member could send the vault key, wrapped under a one-time code, through a message or a call. It works for joining, but every removal and every routine rotation would mean sending every remaining member a new code, so rotation would stop happening.
 - **Rejected: each new vault key encrypted under the previous one.** It needs no public keys, but it defeats rotation. Anyone who ever held one key could follow the chain to every later key, so a key leaked once leaks forever, and no member could ever be removed.
 - **Rejected: an identity per device.** It would let a lost laptop be removed without the person, but it multiplies grants and admissions. An identity per member, unlocked by their passphrase on any device, keeps admission to once per person. § 6 defers per-device identities.
@@ -139,30 +184,34 @@ So a grant that CryptoKit writes with a custom suite of X-Wing, HKDF-SHA256, Cha
 
 | Do | Expect |
 | --- | --- |
-| A runs `multipass join <package>` on a copy of B's package, B runs `multipass admit`, and the two read the fingerprint to each other | B's confirmation adds A, and A's next `multipass list` shows B's entries |
+| A runs `multipass join <package>` on a copy of B's package, B runs `multipass admit`, and the two read both fingerprints to each other | A's next `multipass list` asks A to confirm B's fingerprint, then shows B's entries |
 | A adds `x` and B adds `y` at the same time, then both sync | Both see `x` and `y` |
+| An outsider who knows B's recipient writes a grant to B of a key of their own, with a store file and a membership record under it | B's next open warns `… is not signed by a member you trust`, and saves under the real key |
+| After B removes A, A copies an old grant back into the package, and signs a new generation that follows the generation before the removal | B's next open warns about both, and A's files are not merged |
 | B runs `multipass remove A`, then adds `z` | A's next open finds no grant for the new generation and cannot see `z` |
-| After the removal, A writes a store file under the old generation | B's next open warns about it and does not merge it |
-| A and B each rotate before syncing | The next open merges both generations, rotates once, and writes grants for both |
-| `age -d` on B's identity, grant, and store file, in turn, with a stock age that has `mlkem768x25519` | Prints the store text |
+| B runs `multipass passwd`, then someone uses B's old identity file with the old passphrase | It opens no grant written after the `passwd`, and A accepts B's next rotation without re-verifying |
+| A and B each rotate before syncing | The next open accepts both generations, rotates once, and writes grants for both |
+| Delete the newest generation's files from a package that a device has already opened | That device warns `this package is older than this Mac last saw` and refuses to save |
+| `age -d` on B's identity file, `age -d -i` on B's grant with that output, then the store file, with a stock age that has `mlkem768x25519` | Prints the store text |
 
-Tests: each new primitive against its official vectors, FIPS 202, FIPS 203, RFC 7748, RFC 9180, and BIP 173, plus the age specification's `mlkem768x25519` test files. A grant written by multipass decrypts with stock age, and one written by stock age decrypts with multipass. The member list merges per the mergeable-store laws. A recipient added by a file outside the store is never granted a key. A removal rotation carries no `retired` line.
+Tests: each new primitive against its official vectors, FIPS 202, FIPS 203, FIPS 204, RFC 7748, RFC 9180, and BIP 173, plus the age specification's `mlkem768x25519` test files. A grant written by multipass decrypts with stock age, and one written by stock age decrypts with multipass. Each acceptance rule in § 2.3 fails on its own, with the other four holding: a grant whose key does not match the record's commitment, a record that follows no trusted generation, a record signed by a non-member, one with a bad signature, and one signed by a removed member. The identity file's output works as an `age -i` file. A removal rotation carries no `retired` line from the generations it ends. Concurrent rotations, one removing A and one not, reconcile without A.
 
 ## 5. Cost
 
-Opening adds one HPKE decapsulation per grant, well under a millisecond each with ML-KEM. A rotation writes one grant per member, each about 1.2 KB, so a vault of ten members adds 12 KB per generation. Compaction deletes old generations' grants with their key, as the vault-key plan deletes old key files.
+Opening adds one HPKE decapsulation per grant and one ML-DSA verification per new generation, each well under a millisecond, plus 300 ms per identity file tried on a device with no record. A rotation writes one grant per member, each about 1.2 KB, and one membership record of about 3 KB per member, so a vault of ten members adds about 40 KB per generation. Compaction deletes old generations' grants and records with their key, as the vault-key plan deletes old key files.
 
 ## 6. Open questions
 
-Every question here is deliberately deferred until the plan is scheduled. The user owns questions 1 to 5. Questions 6 and 7 are checks for whoever implements the plan.
+Every question here is deliberately deferred until the plan is scheduled. The user owns questions 1 to 6. Questions 7 and 8 are checks for whoever implements the plan.
 
-1. **Hand-written cryptography or CryptoKit.** Writing ML-KEM, X25519, SHA-3, HPKE, and Bech32 keeps shared vaults working on every platform, at the cost and risk in § 2.7. CryptoKit makes them cheap and well vetted on Apple devices, requires macOS 26 or iOS 26, and reaches the CLI through a Swift shim or the Mac app's helper.
-2. **Roles.** Whether every member may admit and remove others, or only some.
-3. **Signatures.** Whether each member signs their store files, for example with ML-DSA, which CryptoKit offers as `MLDSA65` and `MLDSA87`, so a reader can tell who wrote what, and a compromised member cannot pose as another.
-4. **Per-device identities**, including one in the Secure Enclave with `SecureEnclave.MLKEM768`.
-5. **Routine rotation in a large vault.** Whether 21 days still fits, since every rotation ends every member's sessions.
-6. **Compatibility of CryptoKit's X-Wing with age's `mlkem768x25519`.** The KDF matches, and the AEAD can be made to match with a custom suite. Whether the KEMs are byte-identical is unverified (§ 2.7). Owner: the implementer, by decrypting the age specification's `mlkem768x25519` test files with a CryptoKit suite of X-Wing, HKDF-SHA256, and ChaChaPoly, and by having stock age decrypt a grant CryptoKit wrote.
-7. **Which age releases read `mlkem768x25519`.** The C2SP age specification defines it, and the Rust `age` crate at 0.12.1 does not implement it (§ 7). Which Go release does, and so what "stock age" means for recovering a shared vault, is unverified. Owner: the implementer.
+1. **Lifting the passphrase-only rule.** Shared vaults are the first feature to use public-key cryptography, for grants and membership signatures, and AGENTS.md and the README say multipass uses none. § 2.8 says how those rules would change, if the user wants shared vaults at all.
+2. **Hand-written cryptography or CryptoKit.** Writing ML-KEM, ML-DSA, X25519, SHA-3, HPKE, and Bech32 keeps shared vaults working on every platform, at the cost and risk in § 2.7. CryptoKit makes them cheap and well vetted on Apple devices, requires macOS 26 or iOS 26, and reaches the CLI through a Swift shim or the Mac app's helper.
+3. **Roles.** Whether every member may admit and remove others, or only some.
+4. **Signing store files**, so a reader can tell which member changed an entry, and a compromised member cannot pose as another.
+5. **Per-device identities**, including one in the Secure Enclave with `SecureEnclave.MLKEM768`, and whether to add Ed25519 to ML-DSA-65 as a hybrid signature.
+6. **Routine rotation in a large vault.** Whether 21 days still fits, since every rotation ends every member's sessions.
+7. **Compatibility of CryptoKit's X-Wing with age's `mlkem768x25519`.** The KDF matches, and the AEAD can be made to match with a custom suite. Whether the KEMs are byte-identical is unverified (§ 2.7). Owner: the implementer, by decrypting the age specification's `mlkem768x25519` test files with a CryptoKit suite of X-Wing, HKDF-SHA256, and ChaChaPoly, and by having stock age decrypt a grant CryptoKit wrote.
+8. **Which age releases read `mlkem768x25519`.** The C2SP age specification defines it, and the Rust `age` crate at 0.12.1 does not implement it (§ 7). Which Go release does, and so what "stock age" means for recovering a shared vault, is unverified. Owner: the implementer.
 
 ## 7. Background
 
@@ -170,3 +219,4 @@ Every question here is deliberately deferred until the plan is scheduled. The us
 - The same specification requires an scrypt stanza to be the only stanza in its file, which is why an identity file under a passphrase and a grant to a recipient must be separate files.
 - CryptoKit's Swift interface in the macOS 27.2 SDK declares `MLKEM768`, `MLKEM1024`, `XWingMLKEM768X25519`, the HPKE ciphersuite `XWingMLKEM768X25519_SHA256_AES_GCM_256`, `SecureEnclave.MLKEM768`, `SecureEnclave.MLKEM1024`, `MLDSA65`, and `MLDSA87`, each available from macOS 26 and iOS 26. It shows no enclave form of X-Wing. Apple's documentation lists `HPKE.KEM.XWingMLKEM768X25519` among HPKE's KEMs and `chaChaPoly` among its AEADs.
 - The `age` crate at version 0.12.1 depends on `ml-kem`, `x25519-dalek`, `hpke`, and `sha3`, but its source implements only the `tagpq` type, ML-KEM-768 with P-256 for hardware keys, and has no `mlkem768x25519`. So at that version Rust age cannot read a grant. Whether the Go implementation, `age` and `age-keygen`, reads it, and from which release, is unverified.
+- The passkeys plan's § 2.2 adds a `passkey` field and calls its store "format 3", a number the mergeable-store plan now takes. Shared vaults leave the store text at format 3, so whichever ships later takes the next number.
