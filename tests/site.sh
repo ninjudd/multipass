@@ -30,6 +30,23 @@ for dir in "$ROOT"/tests/site/*/; do
   fi
 done
 
+# The live check's Cache-Control rule. Vercel sends its default on
+# redirects, so that default must pass, and anything that lets a cache serve
+# a stored redirect without asking again must fail.
+for value in "no-store" "No-Cache" "public, max-age=0, must-revalidate" "max-age=0,must-revalidate,s-maxage=0"; do
+  "$CHECK" cache "$value" || {
+    echo "FAIL: check-site.sh cache rejected \"$value\"" >&2
+    FAILURES=$((FAILURES + 1))
+  }
+done
+for value in "" "public" "public, max-age=0" "public, max-age=60, must-revalidate" \
+  "public, max-age=0, must-revalidate, s-maxage=86400" 'no-cache="set-cookie", max-age=600' "max-age=0, proxy-revalidate"; do
+  ! "$CHECK" cache "$value" || {
+    echo "FAIL: check-site.sh cache accepted \"$value\"" >&2
+    FAILURES=$((FAILURES + 1))
+  }
+done
+
 # vercel-api.sh, against a fake curl that logs its arguments and stdin and
 # answers with $FAKE_STATUS, so no request leaves this machine.
 fail() {
