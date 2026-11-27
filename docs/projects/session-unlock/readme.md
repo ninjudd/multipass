@@ -144,8 +144,8 @@ Ending means the agent writes its end note, wipes the vault key, removes its soc
 
 ### 2.10 Neighbors: passkeys and the clipboard
 
-- **The passkeys app.** The passkeys plan's extension keeps the passphrase in a Keychain item that only its own access group can read. The CLI is not signed into that group, so this project's agent cannot use the item. Once the vault key ships, the extension could keep the vault key there instead of the passphrase; the passkeys plan decides that. The app is also where § 8's enclave mode lands. The passkeys plan's § 2.3 says the CLI "still asks for the passphrase every time"; this project changes that sentence to point here.
-- **`--clip`.** `get --clip` and `otp --clip` are a separate feature, in pull request #9. They copy the value through AppKit's `NSPasteboard`, marked current-host-only and concealed. A detached `multipass __clear-clipboard <count>` process clears the clipboard 30 seconds later, and only if the pasteboard's change count still equals `<count>`. `--clip` reads the value through `open`, so it asks for the same touch as `get`. The clearing process never touches the store, so it does not depend on the agent.
+- **The passkeys app.** The passkeys plan's extension keeps the passphrase in a Keychain item that only its own access group can read. The CLI is not signed into that group, so this project's agent cannot use the item. The passkeys plan's § 2.3 keeps the passphrase there rather than the vault key, because the vault key rotates at least every 21 days and on every `passwd`, and a rotation writes a key file that only the passphrase can encrypt. The app is also where § 8's enclave mode lands. The passkeys plan's § 2.3 says the CLI "still asks for the passphrase every time"; this project changes that sentence to point here.
+- **`--clip`.** `get --clip` and `otp --clip` are a separate feature, which pull request #9 added. They copy the value through AppKit's `NSPasteboard`, marked current-host-only and concealed. A detached `multipass __clear-clipboard <count>` process clears the clipboard 30 seconds later, and only if the pasteboard's change count still equals `<count>`. `--clip` reads the value through `open`, so it asks for the same touch as `get`. The clearing process never touches the store, so it does not depend on the agent.
 
 ### 2.11 Changes by file
 
@@ -153,7 +153,7 @@ This table assumes the mergeable-store and vault-key plans have shipped, and tha
 
 | File | Change |
 | --- | --- |
-| `src/store.rs` | No new code. The agent builds its one-entry replies with `Store::new`, `insert`, and `to_text`. |
+| `src/store.rs` | No new code. The agent builds its one-entry replies with `Store::new`, `insert`, and `to_text(cutoff)`, as the mergeable-store plan's § 2.5 defines them. |
 | `src/vault.rs` | No new code. The agent lists, merges, compacts, and saves the package through the functions the vault-key plan adds, given the keys it holds. |
 | `src/agent.rs` | New. The agent half: reads the start message from stdin, binds the socket, answers `read`, `list`, `edit` and `save`, `status`, and `lock` on a thread per connection, enforces the one-entry rule on `save`, checks its executable's identity on each request, ends the session as § 2.9 says, and writes the end note. It asks for approval through an `Approver` trait, which `touch_id::TouchId` implements and tests replace with a fake. The client half: `read`, `list`, `edit`, `status`, `lock`, `end_note`, and `start`, which spawns an agent and writes the start message. The socket path, the end note's path, and the directory check live here, shared by both halves. |
 | `src/touch_id.rs` | New `unsafe` module. Links `LocalAuthentication.framework`, and wraps `canEvaluatePolicy:error:`, `evaluatePolicy:localizedReason:reply:`, and `invalidate` in a safe `TouchId::available()` and `TouchId::approve(reason, timeout) -> Approval`, where `Approval` is `Approved`, `Denied`, or `Unavailable`. |
