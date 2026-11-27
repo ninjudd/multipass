@@ -5,14 +5,24 @@ on:
     branches: [main]
   pull_request:
 
+# CI only reads the repository, and uses only GitHub's own actions, pinned by
+# commit SHA, so a moved tag cannot change what runs here.
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          components: rustfmt, clippy
+          persist-credentials: false
+      # The runner image ships rustup, so installing the toolchain needs no
+      # third-party action.
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
       - name: No dependencies
         run: |
           deps="$(cargo tree -e all --prefix none)"
