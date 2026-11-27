@@ -1,5 +1,5 @@
 ---
-status: draft
+status: completed
 priority: now
 ---
 
@@ -25,7 +25,7 @@ The agent keeps the vault key in protected memory: it denies debugger attachment
 
 Starting a session without being asked, and keeping it for two weeks, is safe only because every request needs your touch (§ 2.8). Without that touch, such a session would let any program running as you read and rewrite the store silently.
 
-This plan stays a draft until the prototype in § 6.5 confirms that the agent can show the Touch ID sheet.
+The prototype in § 6.5 confirmed that an agent detached with `setsid` can show the Touch ID sheet.
 
 ### 2.1 How a session starts
 
@@ -153,14 +153,14 @@ This table assumes the mergeable-store and vault-key plans have shipped, and tha
 
 | File | Change |
 | --- | --- |
-| `src/store.rs` | No new code. The agent builds its one-entry replies with `Store::new`, `insert`, and `to_text(cutoff)`, as the mergeable-store plan's § 2.5 defines them. |
-| `src/vault.rs` | No new code. The agent lists, merges, compacts, and saves the package through the functions the vault-key plan adds, given the keys it holds. |
+| `src/store.rs` | `Store::only`, which copies one entry's whole version, history and tombstone included, for a one-entry reply, and `Store::all_names`, which lists live and removed names, for the check that a `save` touches only the entry it edited. `escape` and `unescape` become public, for the names in a `list` reply. |
+| `src/vault.rs` | `Vault::open_with_keys`, which opens the package from the key file's text an agent holds, without the passphrase, and fails with the new `Error::Stale` when a key file or a store file belongs to a generation those keys do not cover. `Session::agent_keys` and `Session::session_deadline` give a command what it hands a new agent, and `SESSION_DAYS` is 21. `Session::old_file_changed` tells an agent that an older Mac saved to the old single-file store since its move record. A `read_stores` and a `read_moves` helper are shared with the passphrase open. |
 | `src/agent.rs` | New. The agent half: reads the start message from stdin, binds the socket, answers `read`, `list`, `edit` and `save`, `status`, and `lock` on a thread per connection, enforces the one-entry rule on `save`, checks its executable's identity on each request, ends the session as § 2.9 says, and writes the end note. It asks for approval through an `Approver` trait, which `touch_id::TouchId` implements and tests replace with a fake. The client half: `read`, `list`, `edit`, `status`, `lock`, `end_note`, and `start`, which spawns an agent and writes the start message. The socket path, the end note's path, and the directory check live here, shared by both halves. |
-| `src/touch_id.rs` | New `unsafe` module. Links `LocalAuthentication.framework`, and wraps `canEvaluatePolicy:error:`, `evaluatePolicy:localizedReason:reply:`, and `invalidate` in a safe `TouchId::available()` and `TouchId::approve(reason, timeout) -> Approval`, where `Approval` is `Approved`, `Denied`, or `Unavailable`. |
+| `src/touch_id.rs` | New `unsafe` module, built from the prototype in `touch-id-prototype/probe.rs` (§ 6.5). Loads `LocalAuthentication.framework` with `dlopen` only when an agent starts, as `src/clipboard.rs` loads AppKit, so no other command has it in its process, and wraps `canEvaluatePolicy:error:`, `evaluatePolicy:localizedReason:reply:`, and `invalidate` in a safe `TouchId::available()` and `TouchId::approve(reason, timeout) -> Approval`, where `Approval` is `Approved`, `Denied`, or `Unavailable`. `Unavailable` comes only from `canEvaluatePolicy` before any sheet shows. Once a sheet has shown, anything but a touch is `Denied` (§ 9). `src/touch_id_other.rs` stands in for it off macOS, where nothing can approve. |
 | `src/objc.rs` | New `unsafe` module. The typed `objc_msgSend`, class, selector, and `NSString` helpers move here from `src/clipboard.rs`, so the clipboard and Touch ID share one copy, and it adds the global block that carries `evaluatePolicy`'s reply. |
 | `src/clipboard.rs` | Calls the helpers in `src/objc.rs` instead of defining its own. Its module comment stops calling it the program's only `unsafe` code. |
-| `src/sys.rs` | New `unsafe` module, built like `src/clipboard.rs`: `unsafe extern "C"` declarations for `getuid`, `getpeereid`, `getsockopt(LOCAL_PEERPID)`, `proc_pidpath`, `setsid`, `ptrace(PT_DENY_ATTACH)`, `setrlimit(RLIMIT_CORE)`, and `mlock`, behind safe wrappers, plus `wipe(&mut [u8])`, which zeroes with volatile writes. All under `#[cfg(target_os = "macos")]`. The standard library offers no stable call for any of them at `rust-version = "1.85"`. |
-| `src/main.rs` | Adds `status`, `lock`, and the hidden `__agent` command, named like `__clear-clipboard`. `get` and `otp` ask the agent with `read`, and `list` with `list`, unless § 2.4's variables say not to. `add`, `rm`, `otp --set`, and `otp --clear` call a new `open_to_save`, which asks with `edit` and saves with `save`. Both fail on `denied`, and otherwise prompt with the reason from the end note and start an agent once the command succeeds. `init`, `passwd`, and `rekey` always prompt, and `passwd` and `rekey` replace the agent. Updates `USAGE`. |
+| `src/sys.rs` | New `unsafe` module, built like `src/clipboard.rs`: `unsafe extern "C"` declarations for `getuid`, `getpeereid`, `getsockopt(LOCAL_PEERPID)`, `proc_pidpath`, `setsid`, `ptrace(PT_DENY_ATTACH)`, `setrlimit(RLIMIT_CORE)`, and `mlock`, behind safe wrappers, plus `wipe(&mut [u8])`, which zeroes with volatile writes. The calls are macOS-only, with fallbacks elsewhere that report them unsupported, so the crate still builds where no agent starts. The standard library offers no stable call for any of them at `rust-version = "1.85"`. |
+| `src/main.rs` | Adds `status`, `lock`, and the hidden `__agent` command, named like `__clear-clipboard`. `get` and `otp` ask the agent with `read`, and `list` with `list`, unless § 2.4's variables say not to. `add`, `rm`, `restore`, `otp --set`, and `otp --clear` call a new `open_change`, which asks with `edit` and saves with `save`. `history` reads through the agent like `get`. Both fail on `denied`, and otherwise prompt with the reason from the end note and start an agent once the command succeeds. `init`, `passwd`, and `rekey` always prompt, and `passwd` and `rekey` replace the agent. Updates `USAGE`. |
 | `README.md` | Documents sessions: the touch for each request, when a session ends, `status`, `lock`, `MULTIPASS_NO_AGENT`, and § 2.7's trade in a few sentences, with `rekey` as the remedy for a suspected compromise. Changes "Every command asks for the passphrase" and removes "Session unlock" from "Not built yet". |
 | `AGENTS.md` | Changes the rule "Apple's system frameworks count like the standard library", which says `src/clipboard.rs` "holds the program's only `unsafe` code", so it names `src/objc.rs`, `src/clipboard.rs`, `src/touch_id.rs`, and `src/sys.rs` as the modules that hold `unsafe` code, each behind a safe interface, with a comment on each call saying what it requires of its arguments. Adds the agent's rules: the vault key reaches an agent only through the stdin of a child the CLI started; the agent answers a request only after an approval for that one request, and only for the entry it names; it never sends the vault key. |
 | `docs/projects/passkeys/readme.md` | § 2.3's sentence about the CLI changes as § 2.10 says. |
@@ -237,7 +237,7 @@ An approved request costs one touch, about a second of your time, plus one socke
 
 ## 6. Open questions
 
-Only § 6.5 is open, and it waits on a prototype. Questions 6.1 to 6.4 are decided, and § 2 is written for those decisions.
+Questions 6.1 to 6.5 are decided, and § 2 is written for those decisions. § 6.5 also names two cases that the implementation checks by hand.
 
 ### 6.1 What the agent holds
 
@@ -257,7 +257,28 @@ Decided: on demand, with automatic restart. Any command that has to ask for the 
 
 ### 6.5 Touch ID from the detached agent
 
-The agent calls `setsid` and runs without a terminal. Whether LocalAuthentication shows its sheet for such a process, started from a command in your login session, and whether `canEvaluatePolicy` fails cleanly for one started where no one can touch the sensor, is unverified. Owner: the implementer, with a prototype of `src/touch_id.rs` before this plan goes `ready`. If the sheet does not appear for a detached process, the agent skips `setsid` and the implementer records what closing the terminal then does. The vault-key plan does not wait on this.
+Decided by a prototype the owner ran: LocalAuthentication shows its Touch ID sheet for an agent that called `setsid`, runs with no controlling terminal, and was orphaned to launchd, when a command in your login session started it. So the agent keeps `setsid`, as § 2.1 describes, and the fallback of keeping only a process group of its own is not needed.
+
+The prototype is `touch-id-prototype/probe.rs`, beside this plan, one file built with `rustc` outside the crate. It is the shape `src/touch_id.rs` takes: LocalAuthentication loaded with `dlopen`, `LAContext` called through typed `objc_msgSend` pointers, and the reply carried by a global block built by hand, with no captured variables, that hands the result to the waiting thread through a `std::sync::mpsc` channel. `touch-id-prototype/run.sh` builds it and runs the sheet test.
+
+What it showed on an Apple silicon Mac with Touch ID, on macOS 27.0.1, in November 2026:
+
+| Check | Result |
+| --- | --- |
+| `evaluatePolicy` for `LAPolicyDeviceOwnerAuthenticationWithBiometricsOrWatch` (value 4), run from Terminal | The sheet appeared, and a touch approved it after 2.4 seconds |
+| The same from a child that called `setsid` and was orphaned to launchd, with stdin, stdout, and stderr on `/dev/null` | The sheet appeared, and a touch approved it after 1.4 seconds. The child led its own session, `/dev/tty` did not open, and `launchctl managername` still printed `Aqua`, because `setsid` leaves the launchd session alone. |
+| The same from a child with only its own process group, orphaned to launchd | The sheet appeared, and a touch approved it after 1.1 seconds |
+| `canEvaluatePolicy` for policy 4, attached and from both kinds of child | Succeeds, and `biometryType` is Touch ID |
+| The watch policy alone (value 3), with no watch paired | Fails cleanly with `LAErrorWatchNotAvailable` (-11), "No companion device was discovered" |
+| `evaluatePolicy` with `interactionNotAllowed` set, attached and from the `setsid` child | The hand-built block receives the reply in 16 ms with `LAErrorNotInteractive` (-1004), and no sheet appears |
+
+macOS 15 renamed policy 4 `LAPolicyDeviceOwnerAuthenticationWithBiometricsOrCompanion` and error -11 `LAErrorCompanionNotAvailable`, with the same values, so the plan's names still name the right policy and error.
+
+Three cases stay unverified. None of them can expose the store, because each one fails toward a denied request or a passphrase prompt, so none holds the plan in draft. The implementation checks the first two by hand before its pull request is handed over:
+
+- **The terminal closed.** The owner has not run this test yet: a request after you close the Terminal window that started the agent. `setsid` keeps the window's hangup signal from reaching the agent, so the agent keeps running. If LocalAuthentication then refuses to show the sheet, or shows none, the request ends as § 2.8 says for a cancelled or unanswered touch: the agent replies `denied` and exits, the command fails, and the next command asks for the passphrase. `run.sh close` runs this test from a child that called `setsid`, as the agent does.
+- **SSH.** Nobody has yet tested `canEvaluatePolicy` from an SSH login, which runs outside the `Aqua` session. § 2.1 step 3 already starts no agent when `SSH_CONNECTION` is set, so an ordinary SSH login never reaches the check. The hand check covers a login that does not set it, such as a shell whose environment was cleared. § 6.4 assumes `canEvaluatePolicy` fails there, so no agent starts and every command prompts. If it succeeds instead, an agent started that way would show its sheet on the Mac's own screen, and each request would wait 60 seconds and then end the session as denied. In that case § 2.1 step 3 also starts no agent when `launchctl managername` does not print `Aqua`, which keeps § 6.4's behavior.
+- **An Apple Watch approval.** No watch was paired, so only Touch ID was tested. A watch out of reach leaves the request `unavailable`, and the command asks for the passphrase. A watch in reach that nobody answers for 60 seconds is `denied` and ends the session, as § 2.8 says.
 
 ## 7. Background
 
@@ -318,3 +339,20 @@ The passkeys plan's prototype answers these before this mode is built:
 4. Can the CLI start the helper from inside the app bundle and pass it the key file's text on stdin, and does the sandbox allow that?
 5. Where can the helper bind its socket so that the unsandboxed CLI can reach it, and can it read the store at `MULTIPASS_STORE`?
 6. Does an Apple Watch approval work for the enclave key's access control, or only Touch ID? If only Touch ID, this mode loses the watch, and the plan records whether that is acceptable.
+
+## 9. Outcome
+
+Built in the pull request that completed this project, on top of the vault-key plan's package. The design in § 2 holds, with these departures, each recorded in § 2.11:
+
+- **Replies carry the entry's whole version.** A `read` or `edit` reply holds the entry's history and, for a removed entry, its tombstone, so `history`, `get --previous`, and `restore` work through the agent as they do after a prompt.
+- **A `failed <n>` reply.** It carries a vault error's message, which names files and never a secret, when the agent cannot open or save the package.
+- **The agent's reads never compact.** They never write, as reads after a prompt settle only when the package can be written. A save writes one merged file anyway.
+- **`status` prints the deadline in UTC**, such as `unlocked until 2026-12-18 06:36:34 UTC`, with the formatter `history` already used, rather than as `Dec 10 14:32`.
+- **Pinning memory is best effort.** An agent that cannot `mlock` its copy of the keys still serves. Only that copy is pinned and wiped. The copies it makes to open the store for each request are not, as the README says.
+- **`unavailable` only before a sheet shows.** An early build treated some LocalAuthentication error codes as unavailable, among them -11 (no companion device), which falls back to the passphrase and keeps the session. A cancelled or unanswered sheet must never do that, so once a sheet has shown, only a touch approves.
+- **A changed old store file sends the command to the prompt.** While an older Mac's save to the old single-file store waits to be merged, the agent answers `unavailable`, because only a prompt merges that file.
+- **`status` and `lock` check only the user.** They send nothing, so they reach an agent that another multipass binary started, and a command from another binary ends that agent before it starts its own.
+
+Verified: the tests § 4 names, with a fake `Approver`, and a test that serves an agent from a copy of the test binary to check the executable check. By hand without a sheet, through `expect` against a release build: `MULTIPASS_NO_AGENT`, `SSH_CONNECTION`, `status`, `lock`, the end note's prompt, and a refused 0755 directory. By hand on Touch ID by the owner: one sheet per `get`, `list`, and `add`, two `add`s at once, `lldb -p` failing to attach, `rekey` while unlocked followed by a touch only, and a Cancel that ends the session with `the request was not approved`, which the bare probe showed as `-2 LAErrorUserCancel`.
+
+Deferred until after the merge, by hand: a sheet left for 60 seconds, sleep and wake, a restart, `cargo install` while unlocked, closing the terminal that started the agent, and a real SSH login. Record each result here once it runs.

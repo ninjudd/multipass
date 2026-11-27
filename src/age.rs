@@ -24,6 +24,11 @@ const CHUNK: usize = 64 * 1024;
 /// release build. It matches the reference age implementation's default.
 pub const DEFAULT_WORK_FACTOR: u8 = 18;
 
+/// scrypt cost `2^10`, about a millisecond, for files encrypted under a
+/// vault key. The key is 256 random bits, so stretching it buys nothing, and
+/// scrypt stays only because passphrase mode is what stock `age -d` opens.
+pub const VAULT_WORK_FACTOR: u8 = 10;
+
 /// The highest scrypt cost `decrypt` will attempt, so a hostile file cannot
 /// demand hours of work and gigabytes of memory. It matches reference age.
 pub const MAX_WORK_FACTOR: u8 = 22;
