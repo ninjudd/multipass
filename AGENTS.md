@@ -1,6 +1,6 @@
 # Project guidelines
 
-multipass is a single-user password manager: a Rust CLI over one age file encrypted with a passphrase, with no dependencies. [README.md](README.md) describes how it works for someone using it; keep it true when behaviour changes.
+multipass is a single-user password manager: a Rust CLI over a package of age files, unlocked by one passphrase, with no dependencies. [README.md](README.md) describes how it works for someone using it; keep it true when behaviour changes.
 
 ## No dependencies
 
@@ -10,26 +10,39 @@ multipass has no dependencies, not even dev-dependencies, and that is a feature 
 - **Apple's system frameworks count like the standard library.** `src/clipboard.rs` loads AppKit with `dlopen` only when `--clip` needs the clipboard, rather than linking it, so no other command has AppKit in its process. It holds the program's only `unsafe` code, behind a safe interface. Keep any new `unsafe` code in a module like it, and say in a comment what each call requires of its arguments.
 - **Every primitive lives in `src/crypto`** and is checked against the official test vectors from its specification: FIPS 180-4 for SHA-1, SHA-256 and SHA-512 (with RFC 3174 for SHA-1), RFC 4231 for HMAC, RFC 5869 for HKDF, RFC 7914 for PBKDF2, scrypt and Salsa20/8, RFC 8439 for ChaCha20 and Poly1305, RFC 4226 for HOTP, RFC 6238 for TOTP, and RFC 4648 for base32 and base64. A change to a primitive keeps those tests and adds any vector that covers the changed path.
 - **In `src/crypto` and `src/age.rs`, never branch on secret data or index memory with it**, apart from scrypt's data-dependent lookups, which the algorithm requires. Compare MACs and tags with `crypto::ct_eq`. `src/age.rs` builds age's format from the primitives: it derives the scrypt key, unwraps the file key, derives the header and payload keys, and checks the header MAC. It may branch on the header's text and on lengths, which are public.
-- **Outside `src/crypto` and `src/age.rs`, keep secrets as text and do no cryptography on them.** The store's escaping and parsing, its UTF-8 check, `strip_newline`, and `otpauth` URI parsing branch on each character of a secret: escaping changes the text's length, and Rust's string handling branches on every byte. So hand a key to `src/crypto` as soon as its text is found, as `src/otp.rs` hands the setup key to `crypto::base32`, and put any computation on key material in `src/crypto`.
+- **Outside `src/crypto` and `src/age.rs`, keep secrets as text and do no cryptography on them.** The store's escaping and parsing, its UTF-8 check, `strip_newline`, `otpauth` URI parsing, and `src/vault.rs`'s reading and writing of the key file, which holds vault keys as text, branch on each character of a secret: escaping changes the text's length, and Rust's string handling branches on every byte. So hand a key to `src/crypto` as soon as its text is found, as `src/otp.rs` hands the setup key to `crypto::base32`, and put any computation on key material in `src/crypto`.
 - **Stay in age's passphrase (scrypt) mode.** Adding public-key recipients would bring back the quantum exposure the design avoids.
 
 ## Compatibility with age
 
-- **Keep the store readable by stock age.** `age -d` on the store must always print the store text. `testdata/reference-*.age` were written by the reference implementation (the `age` crate, version 0.12.1) and `age::tests` must keep decrypting them. Those files hold only a fixed byte pattern under the published test passphrase in `age.rs`; they are the one exception to never committing an encrypted file.
-- **Check the other direction by hand when the format code changes.** The tests cannot run reference age without a dependency, so encrypt a file with multipass and decrypt it with `age -d` (or the `age` crate in a scratch project outside this repository) before handing the change over.
-- **Change the store text only by bumping the version in its `multipass <n>` header** and teaching `Store::from_text` to read the old version.
+- **Keep the store readable by stock age.** In a store package, `age -d key.*.age` with the passphrase must always print the key file's text, and `age -d store.*.age` with the text of its `key` line must print the store text, as the README's recovery section shows. `testdata/reference-*.age` were written by the reference implementation (the `age` crate, version 0.12.1) and `age::tests` must keep decrypting them. Those files hold only a fixed byte pattern under the published test passphrase in `age.rs`; they are the one exception to never committing an encrypted file.
+- **Check the other direction by hand when the format code changes.** The tests cannot run reference age without a dependency, so make a package with multipass and run those two steps with `age -d` (or the `age` crate in a scratch project outside this repository) before handing the change over.
+- **Change the store text only by bumping the version in its `multipass <n>` header** and teaching `Store::from_text` to read the old version. multipass writes format 3, which adds `modified`, tombstones, and history, and reads formats 1 to 3; the mergeable-store plan's § 2.1 lists what each format adds. Keep `Store::merge` commutative, associative, and idempotent, history included, because two Macs that merge the same files must write the same store.
 
 ## Rules that protect secrets
 
 - **Never put a secret or passphrase in argv, an environment variable, a log line or an error message.** Passphrases come from `/dev/tty` through `tty::read_hidden`; secrets come from a hidden prompt or stdin. Store errors name a line number, never the line.
-- **Write the store atomically.** `Store::save` writes a temporary file with mode 0600 and renames it into place; keep any new write path on that route.
+- **Never modify a file in the store package.** Write each file once, under a new name, through `store::write_private_durable`, which writes a temporary file with mode 0600, flushes it, renames it into place, and flushes the directory. Delete only files you read, and only after the file that replaces them is durable, so a file another Mac wrote meanwhile survives.
 - **Never commit a store or any other encrypted file**, even a test one with fake secrets. Tests build their stores in memory or in a temporary directory. The reference fixtures under `testdata/` are the one exception, as the age section says.
 
 ## Tests
 
-Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` before handing work over; CI runs the same three plus the dependency check. Tests use scrypt work factor 10 so they stay fast. The CLI always uses `age::DEFAULT_WORK_FACTOR` (18), about a third of a second in a release build.
+Run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test --locked`, and, when you change `install.sh` or `site/`, `tests/install.sh` or `tests/site.sh` before handing work over; CI runs all five plus the dependency check. `--locked` fails when `Cargo.lock` is out of date, as it is after a version bump that forgets it. `tests/install.sh` installs this checkout, and a release made from it through a `file://` mirror, with `HOME` in a temporary directory, so it needs no network. Tests use scrypt work factor 10 so they stay fast. The CLI always uses `age::DEFAULT_WORK_FACTOR` (18), about a third of a second in a release build.
 
-The CLI reads passphrases from `/dev/tty`, so it cannot be driven from a plain pipe. To exercise it without a terminal, use `expect` against a release build, and point `--store` at a temporary file.
+The CLI reads passphrases from `/dev/tty`, so it cannot be driven from a plain pipe. To exercise it without a terminal, use `expect` against a release build, and point `--store` at a path inside a temporary directory, which `init` creates as a package.
+
+## Releases
+
+- **Release by merging a pull request that raises `version` in `Cargo.toml` and `Cargo.lock`.** `.github/workflows/release.yml` then tags `v<version>` at the merge commit, builds and attests the universal binary, and publishes an immutable release. Never push a tag or create a release by hand. Run the workflow by hand from `main` only for the first release or to finish a run that failed; it skips a version that is already published.
+- **Change `RUST_VERSION` or `DEVELOPER_DIR` in `release.yml` only in a pull request of its own.** The Rust toolchain and the Xcode, whose SDK version the binary records, are part of what `install.sh verify` must match, so a toolchain change and a code change in one release would leave no way to tell which one changed the bytes. `DEVELOPER_DIR` names an Xcode on the runner image because the image's default Xcode moves without a change to the workflow; when the image drops that Xcode, the release fails until a pull request picks another one the image lists.
+- **The release workflow uses only GitHub's own actions, pinned by full commit SHA**, with a comment naming the version. Its `publish` job holds the write and signing permissions, so it never checks out the repository or runs its code; keep any new step that runs repository code in `build`.
+- **Keep the build reproducible.** `.github/scripts/build-release.sh` builds each target twice, at two paths, and fails when any byte differs. Build only inside the unpacked source with `CARGO_TARGET_DIR` beneath it, because `-oso_prefix .` makes the linker's recorded object paths, which feed the binary's UUID, relative to that directory.
+
+## Website
+
+- **`site/` holds the website for `getmultipass.dev`: one static page and the redirects in `site/vercel.json`.** `.github/workflows/site.yml` deploys it to Vercel on every merge that changes it. Vercel has no access to the repository; the workflow pushes with `VERCEL_TOKEN`, which only the `production` environment holds, and that environment admits only `main`.
+- **`site/` holds only `index.html` and `vercel.json`, and `vercel.json` never sets a build command, a framework, rewrites, or functions.** So no copy of `install.sh`, and no other file a redirect could hand to `curl | bash`, is ever served. Every redirect from a path ending in `install.sh` goes into `https://github.com/ninjudd/multipass/releases/`, and every other redirect stays on the site. `.github/scripts/check-site.sh static` enforces this, and `tests/site.sh` runs it against the bad sites in `tests/site/`. Add a case there when you find a new way around it.
+- **The Vercel CLI in `.github/vercel/` is a deployment tool for the website, never a dependency of multipass.** The no-dependencies rule is about crates and the binary, so it does not cover the CLI, but the CLI runs with the token: change its version only in `package.json`, regenerate `package-lock.json` with `npm install --ignore-scripts`, and pick a release at least two weeks old.
 
 <!-- projector:begin 33 -->
 ## Projector conventions
