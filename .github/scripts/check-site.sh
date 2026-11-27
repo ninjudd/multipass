@@ -5,13 +5,14 @@
 #
 #   check-site.sh static [<site-dir>]   check <site-dir>/vercel.json, default site
 #   check-site.sh live <url>            check the deployed redirects with curl
+#   check-site.sh cache <value>         check one Cache-Control value, as live does
 #
 # A URL passes when it starts with the repository's releases URL and holds no
 # dot segment and no percent sign, because curl collapses /releases/../../
 # before it sends the request, so such a URL passes a prefix check and still
 # leaves the repository. The real URLs hold no percent-encoding at all, so
-# refusing every % also refuses %2e, %252e, and %2f without naming each. The design is
-# docs/projects/installer/readme.md § 2.10.
+# refusing every % also refuses %2e, %252e, and %2f without naming each. The
+# design is docs/projects/installer/readme.md § 2.10.
 
 set -euo pipefail
 
@@ -114,10 +115,28 @@ check_redirect() {
   esac
   under_releases "$location" || problem "$url redirects to ${location:-nothing}, outside $RELEASES"
   [ "$location" = "$expected" ] || problem "$url redirects to ${location:-nothing}, not $expected"
-  case "$cache" in
-    *no-store*) ;;
-    *) problem "$url sends cache-control:${cache:- nothing}, not no-store" ;;
-  esac
+  cache_revalidates "$cache" ||
+    problem "$url sends cache-control:${cache:- nothing}, which lets a cache serve the redirect without asking again"
+}
+
+# True when a Cache-Control value keeps every cache from serving a stored
+# redirect without asking the site again, so none can hand out an old target:
+# no-store, no-cache, or max-age=0 with must-revalidate. Vercel sends its
+# default, public, max-age=0, must-revalidate, on redirects whatever
+# vercel.json's headers say. A positive s-maxage fails, because a shared
+# cache uses it in place of max-age.
+cache_revalidates() {
+  local directive directives max_age="" s_maxage="" must=""
+  IFS=, read -ra directives <<<"$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -d ' \t')"
+  for directive in "${directives[@]}"; do
+    case "$directive" in
+      no-store | no-cache) return 0 ;;
+      max-age=*) max_age="${directive#max-age=}" ;;
+      s-maxage=*) s_maxage="${directive#s-maxage=}" ;;
+      must-revalidate) must=1 ;;
+    esac
+  done
+  [ "$max_age" = 0 ] && [ -n "$must" ] && { [ -z "$s_maxage" ] || [ "$s_maxage" = 0 ]; }
 }
 
 check_live() {
@@ -133,8 +152,12 @@ check_live() {
 case "${1:-}" in
   static) check_static "${2:-site}" ;;
   live) check_live "${2:-}" ;;
+  cache)
+    cache_revalidates "${2:-}" || exit 1
+    exit 0
+    ;;
   *)
-    echo "usage: check-site.sh static [<site-dir>] | live <url>" >&2
+    echo "usage: check-site.sh static [<site-dir>] | live <url> | cache <value>" >&2
     exit 64
     ;;
 esac
