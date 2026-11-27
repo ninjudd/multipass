@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+#
+# Guards the website's install.sh redirects, the one change to site/ that
+# could hurt someone: a redirect that hands `curl | bash` another script.
+#
+#   check-site.sh static [<site-dir>]   check <site-dir>/vercel.json, default site
+#   check-site.sh live <url>            check the deployed redirects with curl
+#
+# A URL passes when it starts with the repository's releases URL and holds no
+# dot segment, plain or percent-encoded, because curl collapses
+# /releases/../../ before it sends the request, so such a URL passes a prefix
+# check and still leaves the repository. The design is
+# docs/projects/installer/readme.md § 2.10.
+
+set -euo pipefail
+
+RELEASES="https://github.com/ninjudd/multipass/releases/"
+SITE="https://getmultipass.dev/"
+# vercel.json keys a static site of redirects needs. Anything else, such as
+# rewrites, routes, a build command, a framework, or functions, could serve
+# or run something other than these redirects.
+ALLOWED_KEYS='["$schema", "redirects", "headers", "cleanUrls", "trailingSlash"]'
+PROBLEMS=0
+
+problem() {
+  printf 'check-site.sh: %s\n' "$*" >&2
+  PROBLEMS=$((PROBLEMS + 1))
+}
+
+under_releases() {
+  local lower
+  lower="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  case "$1" in "$RELEASES"*) ;; *) return 1 ;; esac
+  case "$lower/" in */../* | */./* | *%2e* | *\\*) return 1 ;; esac
+}
+
+# A destination on this site itself, absolute or relative. A
+# protocol-relative URL such as //host/ names another host.
+on_site() {
+  case "$1" in
+    "$SITE"*) ;;
+    //* | /\\*) return 1 ;;
+    /*) ;;
+    *) return 1 ;;
+  esac
+}
+
+check_static() {
+  local dir="${1:-site}" config source destination
+  config="$dir/vercel.json"
+  [ -f "$config" ] || {
+    problem "$config does not exist"
+    return
+  }
+  jq empty "$config" 2>/dev/null || {
+    problem "$config is not valid JSON"
+    return
+  }
+  while IFS= read -r key; do
+    problem "$config sets $key, which a site of redirects does not need"
+  done < <(jq -r --argjson allowed "$ALLOWED_KEYS" 'keys[] | select(. as $k | $allowed | index($k) | not)' "$config")
+  while IFS=$'\t' read -r source destination; do
+    case "$source" in
+      *install.sh)
+        under_releases "$destination" ||
+          problem "the redirect from $source goes to $destination, outside $RELEASES"
+        ;;
+      *)
+        on_site "$destination" ||
+          problem "the redirect from $source goes to $destination, off this site"
+        ;;
+    esac
+  done < <(jq -r '.redirects // [] | .[] | [(.source // ""), (.destination // "")] | @tsv' "$config")
+  while IFS= read -r file; do
+    problem "$file is a copy of the installer; the site must only redirect to the release's install.sh"
+  done < <(find "$dir" -iname install.sh)
+}
+
+# Checks that GET <url><path> answers with a temporary redirect to exactly
+# <expected>, under the releases URL, and that no cache may keep it.
+check_redirect() {
+  local url="$1" expected="$2" headers status location cache
+  headers="$(curl -sS --proto '=https' -o /dev/null -D - "$url" | tr -d '\r')" || {
+    problem "could not reach $url"
+    return
+  }
+  status="$(printf '%s\n' "$headers" | awk 'NR == 1 { print $2 }')"
+  location="$(printf '%s\n' "$headers" | awk 'tolower($1) == "location:" { print $2; exit }')"
+  cache="$(printf '%s\n' "$headers" | awk 'tolower($1) == "cache-control:" { $1 = ""; print; exit }')"
+  case "$status" in
+    302 | 307) ;;
+    *) problem "$url answered $status, not a temporary redirect" ;;
+  esac
+  under_releases "$location" || problem "$url redirects to ${location:-nothing}, outside $RELEASES"
+  [ "$location" = "$expected" ] || problem "$url redirects to ${location:-nothing}, not $expected"
+  case "$cache" in
+    *no-store*) ;;
+    *) problem "$url sends cache-control:${cache:- nothing}, not no-store" ;;
+  esac
+}
+
+check_live() {
+  local base="${1%/}"
+  [ -n "$base" ] || {
+    echo "usage: check-site.sh live <url>" >&2
+    exit 64
+  }
+  check_redirect "$base/install.sh" "${RELEASES}latest/download/install.sh"
+  check_redirect "$base/v0.0.0/install.sh" "${RELEASES}download/v0.0.0/install.sh"
+}
+
+case "${1:-}" in
+  static) check_static "${2:-site}" ;;
+  live) check_live "${2:-}" ;;
+  *)
+    echo "usage: check-site.sh static [<site-dir>] | live <url>" >&2
+    exit 64
+    ;;
+esac
+
+if [ "$PROBLEMS" -gt 0 ]; then
+  exit 1
+fi
+echo "check-site.sh: the install.sh redirects stay in $RELEASES"

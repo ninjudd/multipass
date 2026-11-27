@@ -1,0 +1,7 @@
+{
+  "private": true,
+  "description": "The Vercel CLI that the site workflow deploys site/ with. It is a deployment tool for the website, never a dependency of multipass; see AGENTS.md.",
+  "dependencies": {
+    "vercel": "65.14.0"
+  }
+}

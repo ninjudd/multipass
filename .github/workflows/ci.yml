@@ -37,3 +37,6 @@ jobs:
       # pull request, rather than in the release workflow.
       - run: cargo test --locked
       - run: tests/install.sh
+      # A pull request that points an install.sh redirect anywhere but this
+      # repository's releases fails here, before it can merge.
+      - run: tests/site.sh
