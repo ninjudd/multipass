@@ -1,0 +1,74 @@
+{
+ "version": 1,
+ "name": "Websites for entries",
+ "project": "websites",
+ "pr": {
+  "repo": "ninjudd/multipass",
+  "number": 35,
+  "title": "Plan websites for entries",
+  "head": "dcf0ba8b4e74163b2f426f6f758ed84285352b63",
+  "headRef": "websites",
+  "base": "d491604a5668ff717ba6e51ec51533c272028445",
+  "baseRef": "main"
+ },
+ "overview": {
+  "summary": [
+   "multipass is a password manager that keeps every entry in one encrypted text file, the <b>store</b>. An entry has a name, a secret, and a few optional fields such as <code>username</code> and <code>otp</code>. The name is only a label, so nothing in multipass knows which website an entry belongs to, and no program can ask it which entries fit the page it is showing.",
+   "This pull request adds one plan, <code>docs/projects/websites/readme.md</code>, at <code>status: ready</code>. It changes no code. The plan gives each entry a repeatable <code>website</code> field and adds <code>multipass find &lt;url&gt;</code>, which prints the names of the entries whose websites match a page. A later browser extension, and the Mac and iPhone app in the passkeys plan, would use that answer to offer the right login on the right site.",
+   "<ul class=\"tight\"><li><b>Matching.</b> A stored website matches a page on the same host or a subdomain of it, with the same port, with a leading <code>www.</code> ignored, and never from a stored <code>https</code> address to an <code>http</code> page. This needs no Public Suffix List, the large, often-updated list of domain suffixes that whole-site matching would require.</li><li><b>Hints.</b> When nothing matches, <code>find</code> names entries that share only the page's root domain on stderr, with the command that would add the page, and never treats them as matches.</li><li><b>Store format.</b> The field needs a new <code>multipass &lt;n&gt;</code> header. The plan takes format 4 and leaves renumbering the passkeys draft, which also claims 4, to the change that builds websites.</li><li><b>Deferred.</b> The browser extension and per-site password rules get plans of their own later.</li></ul>"
+  ],
+  "cards": [
+   {
+    "id": "terms",
+    "title": "Terms on this page",
+    "html": "<ul class=\"tight\"><li><b>Store format.</b> The number in the store's first line, <code>multipass &lt;n&gt;</code>. The repository changes the store text only by bumping it, so an older multipass refuses a store it cannot read.</li><li><b>Root domain.</b> The plan's short rule for a site's registered name: the last two labels of a host, or three after a country code's <code>co</code>, <code>com</code>, and similar.</li><li><b>Mergeable store.</b> The store-merge plan: each entry records when it changed, and copies from two Macs merge entry by entry, the newer version winning.</li><li><b>Userinfo.</b> The <code>name:password@</code> part a URL may carry before its host.</li></ul>"
+   },
+   {
+    "id": "review",
+    "title": "Review so far",
+    "html": "<p>One review at this head asked for changes, with three open findings, shown below at their lines:</p><ul class=\"tight\"><li>The plan never says where a URL's host ends, so <code>https://bank.example@evil.example</code> could match the bank's entry.</li><li>Removing <code>www.</code> before the subdomain test lets a stored <code>www.</code> host match every subdomain of the bare host.</li><li>The format list that <code>AGENTS.md</code> will point to keeps naming format 4 as the passkey field.</li></ul><p class=\"note\">The review also lists eight suggestions that do not block.</p>"
+   }
+  ]
+ },
+ "groups": [
+  {
+   "id": "plan",
+   "title": "The websites plan",
+   "kicker": "A repeatable website field, the matching rule, and the format it needs",
+   "intro": [
+    "The plan is the whole change. Read it in section order: § 2.1 defines the field and how a value is normalized, § 2.2 the matching rule and the root-domain hints, § 2.3 the commands, § 2.4 the store format number, and § 2.5 the files the change that builds it will touch.",
+    "Hold two things in mind while reading. First, the matching rule is the plan's security boundary: whatever <code>website::matches</code> accepts is a page where a later extension offers your password, so read each rule in § 2.1 and § 2.2 for a look-alike or attacker-controlled page that it lets through. Second, the plan builds on the mergeable store, which is not on <code>main</code> yet: the example in § 2.1 shows its <code>modified</code> line, and § 2.3 stamps each change through its <code>Store::stamp</code>."
+   ],
+   "checks": [
+    {
+     "kind": "context",
+     "text": "The plan's one open question, how strictly a website matches, is recorded as decided by the owner. The browser extension and per-site password rules are explicitly deferred, so no open question blocks <code>status: ready</code>."
+    }
+   ],
+   "files": [
+    {
+     "path": "docs/projects/websites/readme.md",
+     "collapsed": false,
+     "note": "The new plan: the <code>website</code> field, <code>find</code>, the matching and hint rules, and the store format it takes.",
+     "checks": [
+      {
+       "kind": "flag",
+       "line": 48,
+       "text": "§ 2.1 never says how the host is found in a URL. A parser that reads up to the first <code>:</code> or <code>/</code> takes <code>https://bank.example@evil.example/</code> as host <code>bank.example</code>, so the bank's entry matches a page on <code>evil.example</code>. The same gap lets a password in userinfo be stored and printed in errors. The review asks for refusing userinfo and backslashes and saying where the host and port end."
+      },
+      {
+       "kind": "flag",
+       "line": 55,
+       "text": "Step 1 removes <code>www.</code> before step 4's subdomain test, so a stored <code>https://www.host.example/login</code> matches <code>https://anyone.host.example/</code>, a page another user can control on a platform that gives each user a subdomain. The review asks for ignoring <code>www.</code> only in the equality test."
+      },
+      {
+       "kind": "flag",
+       "line": 103,
+       "text": "The store-merge plan's § 2.1 table lists format 4 as the passkey field, and the open mergeable-store pull request marks that plan completed and has <code>AGENTS.md</code> point to the table. This row only names the new number, so the pointer would lead to a record that says format 4 is the passkey field. The review asks for the note itself to say what format 4 adds."
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}
