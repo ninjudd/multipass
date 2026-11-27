@@ -1,0 +1,143 @@
+{
+ "version": 1,
+ "name": "Session unlock Touch ID prototype",
+ "project": "session-unlock",
+ "pr": {
+  "repo": "ninjudd/multipass",
+  "number": 21,
+  "title": "Prototype Touch ID from a detached process for session unlock",
+  "head": "17083d431692fdf26718361f930b71dbf3704180",
+  "headRef": "session-unlock-touch-id-prototype",
+  "base": "5728b7c8ce71a5e79e6233388eeb95a0cab98319",
+  "baseRef": "main"
+ },
+ "overview": {
+  "summary": [
+   "The session-unlock plan designs a background <b>agent</b>: after you type the passphrase once, a process started by the <code>multipass</code> command holds the store's vault key in memory, and every later read or change asks for a Touch ID touch instead of the passphrase. The agent calls <code>setsid</code>, so it leads a session of its own with no controlling terminal and keeps running after the command and its terminal exit.",
+   "The plan could not be marked ready until one question in its § 6.5 was answered: does macOS's LocalAuthentication framework show its Touch ID sheet for such a detached process? If it did not, the agent would have had to stay in the terminal's session, and the plan would have changed.",
+   "This pull request answers it with a prototype. <code>probe.rs</code> is one Rust file, built with <code>rustc</code> outside the crate, that calls LocalAuthentication the way the future <code>src/touch_id.rs</code> will. <code>run.sh</code> builds it and asks for three touches: one from the terminal, one from a child that called <code>setsid</code>, and one from a child with only its own process group. The owner ran it on Apple silicon with macOS 27.0.1, and the sheet appeared and was approved all three times. So the plan keeps <code>setsid</code>, records the results in § 6.5, and moves from <code>draft</code> to <code>ready</code>.",
+   "Nothing here changes multipass itself: Cargo finds no target under <code>docs/</code>, <code>cargo tree</code> still lists only <code>multipass</code>, and no CI job runs the script."
+  ],
+  "cards": [
+   {
+    "id": "terms",
+    "title": "Terms on this page",
+    "html": "<ul class=\"tight\"><li><b>LocalAuthentication</b>: Apple's framework that shows the Touch ID sheet and reports whether a person approved it.</li><li><b><code>LAContext</code></b>: the framework's object for one authentication; <code>canEvaluatePolicy</code> asks whether approval is possible, and <code>evaluatePolicy</code> shows the sheet.</li><li><b>Policy 4</b>: <code>LAPolicyDeviceOwnerAuthenticationWithBiometricsOrWatch</code>, a finger or a paired Apple Watch, with no fallback to the login password.</li><li><b><code>setsid</code></b>: the system call that puts a process in a new session with no controlling terminal.</li><li><b>Global block</b>: an Objective-C block (a closure) that captures nothing and lives forever, so the runtime never copies or frees it.</li></ul>"
+   },
+   {
+    "id": "review",
+    "title": "Review so far",
+    "html": "<ul class=\"tight\"><li>The first review found that <code>run.sh close</code>, the hand check for a request after the terminal closes, spawned its child with <code>spawn group</code>. That tested the fallback the plan dropped. The second head spawns it with <code>setsid</code>, and the finding is fixed.</li><li>The second head also took both wording suggestions on § 6.5's SSH and Apple Watch cases.</li><li>The head is clean. The probe was built with <code>rustc -D warnings</code> but not run, because it shows a real Touch ID sheet. CI passed.</li></ul>"
+   }
+  ]
+ },
+ "groups": [
+  {
+   "id": "probe",
+   "title": "The Touch ID probe",
+   "kicker": "A one-file Rust program that calls LocalAuthentication as the agent will",
+   "intro": [
+    "The probe is the shape <code>src/touch_id.rs</code> will take. It loads LocalAuthentication with <code>dlopen</code>, as <code>src/clipboard.rs</code> loads AppKit, so the framework is in the process only when needed. It calls <code>LAContext</code> through <code>objc_msgSend</code> cast to each method's exact type, because on Apple silicon a variadic call passes arguments in the wrong registers.",
+    "<code>evaluatePolicy</code> answers through an Objective-C block on a queue the framework owns. The probe builds that block by hand from the block ABI's layout, as a global block that captures nothing, and the block sends the result to the waiting thread through a channel kept in a <code>static</code>.",
+    "Its modes are <code>can</code> (ask whether each policy can be evaluated), <code>evaluate</code> (show the sheet), <code>noui</code> (evaluate with interaction not allowed, which fails at once with no sheet and so tests the block safely), and <code>spawn setsid|group</code>, which starts a detached copy of itself running one of those modes, writes the result to a file, and exits, as the CLI will."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": "docs/projects/session-unlock/touch-id-prototype/probe.rs",
+     "note": "The whole prototype: framework loading, typed message sends, the hand-built reply block, and the detached spawn.",
+     "collapsed": false,
+     "checks": [
+      {
+       "kind": "verify",
+       "text": "Built cleanly with <code>rustc --edition 2024 -O -D warnings</code> into a temporary directory, and <code>rustfmt --check</code> passes. It was not run, because it shows a real Touch ID sheet."
+      },
+      {
+       "kind": "verify",
+       "text": "The policy values 1 to 4 match Apple's <code>LAPolicy</code> declarations, and policy 4 never falls back to the login password, as plan § 2.8 requires.",
+       "line": 40
+      },
+      {
+       "kind": "verify",
+       "text": "The block literal's fields (<code>isa</code>, <code>flags</code>, <code>reserved</code>, <code>invoke</code>, <code>descriptor</code>) follow the block ABI's order, and <code>BLOCK_IS_GLOBAL</code> is <code>1 &lt;&lt; 28</code>.",
+       "line": 273
+      },
+      {
+       "kind": "context",
+       "text": "On timeout the probe calls <code>invalidate</code>, which makes the framework deliver the pending reply with <code>LAErrorAppCancel</code>; the probe waits five more seconds for it.",
+       "line": 344
+      },
+      {
+       "kind": "context",
+       "text": "<code>spawn setsid</code> runs <code>setsid</code> between fork and exec. The real agent calls it itself after it starts, which has the same effect because a forked child is never a group leader.",
+       "line": 399
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "script",
+   "title": "The sheet test script",
+   "kicker": "Builds the probe and asks for three touches, attached and detached",
+   "intro": [
+    "<code>run.sh</code> builds the probe into <code>target/touch-id-prototype/</code>, which Git ignores, and runs three requests: one attached to the terminal, one from a <code>setsid</code> child, and one from a child with only its own process group. For each detached child it waits up to 75 seconds for the result file to end with <code>done</code>. A person must be at the Mac to touch the sensor, so nothing runs it automatically.",
+    "<code>run.sh close</code> is a separate test for a request that arrives after you close the terminal window. It starts a <code>setsid</code> child, as the agent runs, that waits 15 seconds before asking, so you can close the window first."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": "docs/projects/session-unlock/touch-id-prototype/run.sh",
+     "note": "The hand-run sheet test, and the closed-terminal test the implementation must still run.",
+     "collapsed": false,
+     "checks": [
+      {
+       "kind": "verify",
+       "text": "<code>bash -n</code> and <code>sh -n</code> pass, the script sets <code>set -euo pipefail</code>, and every path is quoted. <code>shellcheck</code> was not available."
+      },
+      {
+       "kind": "verify",
+       "text": "<code>run.sh close</code> now spawns its child with <code>setsid</code>, the configuration § 6.5 keeps for the agent, so the closed-terminal hand check tests what the agent does. Read at this head.",
+       "line": 46
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "plan",
+   "title": "The plan's decision",
+   "kicker": "§ 6.5 records the results, keeps setsid, and the plan goes ready",
+   "intro": [
+    "The plan's status moves from <code>draft</code> to <code>ready</code>, which claims the plan can be built as written. With § 6.5 decided, questions 6.1 to 6.5 all are.",
+    "§ 6.5 now holds a table of what the prototype showed, and three cases it did not test: a request after the terminal window closes, <code>canEvaluatePolicy</code> over SSH, and an Apple Watch approval. Each fails toward a denied request or a passphrase prompt, never toward exposing the store, so the implementation checks the first two by hand instead of the plan waiting on them.",
+    "§ 2.11's row for <code>src/touch_id.rs</code> now says it loads the framework with <code>dlopen</code> rather than linking it, matching the clipboard module."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": "docs/projects/session-unlock/readme.md",
+     "note": "Status to ready, § 6.5's results and remaining cases, and the § 2.11 row for src/touch_id.rs.",
+     "collapsed": false,
+     "checks": [
+      {
+       "kind": "context",
+       "text": "The readiness flip owns every question open at the flip. All of § 6 is decided, and § 6.5's three untested cases each name their fail-safe outcome, so none blocks readiness.",
+       "line": 2
+      },
+      {
+       "kind": "verify",
+       "text": "§ 6.5, the SSH case, now says that § 2.1 step 3 already starts no agent when <code>SSH_CONNECTION</code> is set, so the hand check covers a login without it. Checked against § 2.1 step 3.",
+       "line": 280
+      },
+      {
+       "kind": "verify",
+       "text": "§ 6.5, the Apple Watch case, now matches § 2.8: a watch out of reach gives <code>unavailable</code>, and one nobody answers for 60 seconds gives <code>denied</code>. Checked against § 2.8's table.",
+       "line": 281
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}
