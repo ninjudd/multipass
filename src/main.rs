@@ -527,12 +527,12 @@ enum Settle {
     Skip,
 }
 
-/// Opens the store package, asking for the passphrase, and settles it as
-/// `settle` says. Prints what the open left alone.
+/// Opens the store package, asking for the passphrase on the terminal, and
+/// settles it as `settle` says. Prints what the open left alone.
 fn open(vault: &Vault, now: u64, settle: Settle) -> Result<Session> {
     let mut ask = |ask: Ask| -> io::Result<Option<String>> {
         match ask {
-            Ask::Passphrase => tty::read_hidden("Passphrase: ").map(Some),
+            Ask::Passphrase => terminal_prompt("Passphrase: ").map(Some),
             Ask::Other(files) => {
                 eprintln!(
                     "multipass: that passphrase does not open {}, which another Mac's \
@@ -540,12 +540,19 @@ fn open(vault: &Vault, now: u64, settle: Settle) -> Result<Session> {
                      open the store read-only",
                     files.join(", ")
                 );
-                let other = tty::read_hidden("Other passphrase: ")?;
+                let other = terminal_prompt("Other passphrase: ")?;
                 Ok((!other.is_empty()).then_some(other))
             }
         }
     };
     open_with(vault, now, settle, &mut ask)
+}
+
+/// Reads a passphrase from the terminal for `Vault::open`, saying, as
+/// `prompt` does, that the terminal is what could not be read.
+fn terminal_prompt(text: &str) -> io::Result<String> {
+    tty::read_hidden(text)
+        .map_err(|e| io::Error::new(e.kind(), format!("could not read from the terminal: {e}")))
 }
 
 /// `open`, with `ask` answering the passphrase prompts.
