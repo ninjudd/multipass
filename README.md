@@ -4,7 +4,7 @@ multipass is a minimal password manager with no dependencies and no sharing. It 
 
 Use it beside a full password manager, not instead of one. Keep shared and everyday logins in something like 1Password. Keep the few secrets you never want on someone else's server in multipass, such as recovery codes, seed phrases, and the master password itself.
 
-Every line of multipass is in this repository, cryptography included: about 1,000 lines of cryptography and 5,800 of everything else, small enough to read in a day. It uses no third-party crates, so the only code a build from source trusts beyond this repository is the Rust toolchain, its standard library, and two of macOS's own frameworks, each loaded only when it is needed: AppKit when you pass `--clip`, and LocalAuthentication when a session agent starts, for Touch ID. How you [install](#install) it adds to that:
+Every line of multipass is in this repository, cryptography included: about 1,500 lines of cryptography and 6,600 of everything else, small enough to read in a day. It uses no third-party crates, so the only code a build from source trusts beyond this repository is the Rust toolchain, its standard library, and two of macOS's own frameworks, each loaded only when it is needed: AppKit when you pass `--clip`, and LocalAuthentication when a session agent starts, for Touch ID. How you [install](#install) it adds to that:
 
 - **A build from source**, by the installer or from a checkout, also trusts GitHub to serve the tagged source.
 - **The prebuilt binary** also trusts GitHub's hosted macOS runner that built it, with its Xcode linker and `lipo`, the pinned Rust toolchain, and GitHub's and Sigstore's signing of its attestation, which `gh attestation verify` checks. `install.sh verify` lets you replace that trust with your own build.
@@ -76,13 +76,14 @@ curl -fsSL https://github.com/ninjudd/multipass/releases/latest/download/install
 To upgrade a checkout install, pull the checkout and run `./install.sh` again. A rerun that would install the same bytes leaves the file alone. For a copy the installer installed from a release, `multipass upgrade` downloads the newest release's installer with `/usr/bin/curl`, checks its attestation with `gh` when `gh` is installed, and runs it; `multipass upgrade 0.2.0` installs a given release, and `multipass upgrade --check` only says whether a newer release is out. `upgrade` is the only command that reaches the network, and only when you type it. `uninstall` removes only a file that still matches the receipt, so it never deletes a `multipass` you replaced by hand. Set `MULTIPASS_BIN_DIR` to install somewhere other than `~/.local/bin`; a later rerun installs to the same place without it.
 
 > [!WARNING]
-> Once this multipass has moved your store into a package, do not go back to a multipass from before the package, with `multipass upgrade <version>` or an older checkout. For up to 30 days an older multipass still reads and saves the old `store.age` beside the package, and the package merges its changes. After the old file is retired, an older multipass finds no store at `~/.multipass/store.age`, so every command fails, and its `init` would create a new, empty store beside the package.
+> Once this multipass has moved your store into a package, do not go back to a multipass from before the package, with `multipass upgrade <version>` or an older checkout. That includes the published 0.1.0, which reads only a single-file store in formats 1 and 2. For up to 30 days an older multipass still reads and saves the old `store.age` beside the package, and the package merges its changes. After the old file is retired, an older multipass finds no store at `~/.multipass/store.age`, so every command fails, and its `init` would create a new, empty store beside the package.
 
 ## Use
 
 ```sh
 multipass init                                   # create ~/.multipass/store.multipass
 multipass add github.com --username octocat      # prompts for the secret
+multipass add example.com --generate --clip      # makes a new password and copies it
 multipass get github.com --clip                  # copies the secret for 30 seconds
 multipass get github.com --field username
 multipass list
@@ -91,7 +92,7 @@ multipass passwd                                 # change the passphrase
 multipass rekey                                  # replace the vault key now
 ```
 
-The first command asks for the passphrase, and on a Mac with Touch ID or an Apple Watch, later commands ask for a touch instead, as [Stay unlocked between commands](#stay-unlocked-between-commands) describes. To use a different store, set `MULTIPASS_STORE` or pass `--store` with the path of its folder.
+The first command asks for the passphrase, and on a Mac with Touch ID or an Apple Watch, later commands ask for a touch instead, as [Stay unlocked between commands](#stay-unlocked-between-commands) describes. `generate` and `upgrade` open no store, so they ask for neither. To use a different store, set `MULTIPASS_STORE` or pass `--store` with the path of its folder.
 
 The store is a folder, `~/.multipass/store.multipass`, that holds a key file, `key.<generation>.age`, encrypted under your passphrase, and a store file, `store.<generation>.<id>.age`, encrypted under the vault key in the key file. Finder shows it as an ordinary folder. Move or copy the whole folder, never one file out of it, because a store file opens only with the key file of its generation.
 
@@ -99,7 +100,50 @@ A store from an earlier multipass is a single file, `~/.multipass/store.age`. Th
 
 When a passphrase prompt finds the vault key 14 or more days old, multipass replaces it: it writes a new key file and a new store file, and deletes the old ones. So the key in use is always under 21 days old. When a key replacement, a merge of several store files, or a merge of a change to an old single-file store cannot write to the folder, as in a read-only backup, `get`, `list`, `history` and `otp` still read the store, after a `could not write to <folder>` warning, and commands that save fail with that error before they ask for anything. When neither is due, a read prints no warning, and a command that saves fails with the same error once it saves. `passwd` always replaces the key, so your old passphrase opens nothing written afterwards, and `rekey` replaces it at once, for example when you think someone copied it. Neither reveals or changes your passphrase.
 
-`--clip` on `get` and `otp` copies the value instead of printing it, and clears the clipboard 30 seconds later, unless you have copied something else since. It marks the value as concealed and as this Mac only, so Universal Clipboard does not send it to your other Apple devices, and clipboard-history apps that honor the marking skip it. Until it clears, any app running on this Mac can still read it: the markings only keep it off your other devices and out of the history apps that honor them. `--clip` works only on macOS. Piping to `pbcopy` also works, but `pbcopy` cannot mark the value, so it syncs and lands in clipboard history.
+`--clip` on `get`, `otp`, and `generate` copies the value instead of printing it, and `--clip` on `add --generate` copies the password it stores, which it never prints. Either way, multipass clears the clipboard 30 seconds later, unless you have copied something else since. It marks the value as concealed and as this Mac only, so Universal Clipboard does not send it to your other Apple devices, and clipboard-history apps that honor the marking skip it. Until it clears, any app running on this Mac can still read it: the markings only keep it off your other devices and out of the history apps that honor them. `--clip` works only on macOS. Piping to `pbcopy` also works, but `pbcopy` cannot mark the value, so it syncs and lands in clipboard history.
+
+## Make new passwords
+
+`multipass generate` prints a new password and stores nothing. `multipass add <name> --generate` makes one and stores it as the entry's secret without printing it; add `--clip` to copy it, so you can paste it into the site's form. Both print the password's strength on stderr, in bits: the base-2 logarithm of how many passwords the options could have produced, each equally likely.
+
+```console
+$ multipass generate
+k7#Rv2!mQe9_Tz4@pLw8
+multipass: random characters, 20 from 94, each set present: 130.9 bits
+
+$ multipass generate --words 5
+oxidize-tattered-flier-rebound-anyone
+multipass: memorable, 5 words from 7,776 with hyphens: 64.6 bits
+
+$ multipass generate --pin 6
+480213
+multipass: PIN, 6 digits: 19.9 bits -- weak for a password you cannot rate-limit
+```
+
+| Option | Default | Effect |
+| --- | --- | --- |
+| `--length <n>` | `20` | Random characters, from 4 to 128. Uppercase letters, lowercase letters, digits, and symbols each appear at least once. |
+| `--no-uppercase`, `--no-lowercase`, `--no-digits`, `--no-symbols` | | Leaves a set out. |
+| `--symbols <chars>` | all 32 ASCII punctuation characters | The symbols to use, for a site that accepts only some. |
+| `--exclude <chars>` | | Characters never to use. |
+| `--no-lookalikes` | | Leaves out `0`, `O`, `o`, `1`, `l`, `I`, and `\|`. |
+| `--rules <rules>` | | A site's password rules, as below. |
+| `--words [<n>]` | `5`, or `6` with `--syllables` | Memorable words instead, from 3 to 15, drawn from the EFF's large word list of 7,776 words. |
+| `--separator <sep>` | `hyphen` | With `--words`: `hyphen`, `space`, `period`, `comma`, `underscore`, `digit`, or `digit-or-symbol`. The last two draw a new character for each gap. |
+| `--capitalize <how>` | `none` | With `--words`: `first` capitalizes every word, and `one` capitalizes one word chosen at random. |
+| `--syllables` | | With `--words`: made-up syllables of a consonant, a vowel, and a consonant, such as `fip-wol-ruk-tes-bam`, instead of real words. Each is shorter than a word and weaker, 11.0 bits against 12.9, so use about 1.2 syllables for each word you would have used: 6 match 5 words, and 12 match 10. |
+| `--pin [<n>]` | `6` | A PIN instead, from 4 to 64 digits. |
+
+Every character, word, and separator is drawn from `/dev/urandom` without bias, and the strength line counts exactly the passwords that meet the options. A password under 64 bits gets a warning: that is too weak to survive an attacker who can guess offline, though a PIN that a bank's servers rate-limit is still fine.
+
+When a site limits what a password may hold, give its rules with `--rules`, in the format Apple defined for the `passwordrules` HTML attribute. Apple's [password-manager-resources](https://github.com/apple/password-manager-resources) repository records such rules for many sites in `quirks/password-rules.json`, so you can often copy a site's line from there:
+
+```console
+$ multipass add bank.example --generate --rules 'minlength: 8; maxlength: 16; required: lower; required: upper; required: digit; allowed: [-!#$]; max-consecutive: 2;'
+multipass: random characters, 16 from 66, with rules: 96.6 bits
+```
+
+Each `required` rule needs a character from one of the classes it names, so `required: lower, upper` is met by a letter of either case, and `required: lower; required: upper` needs one of each. `allowed` adds characters the password may hold; `minlength`, `maxlength`, and `max-consecutive` bound the length and how often one character repeats in a row. The classes are `upper`, `lower`, `digit`, `special`, `ascii-printable`, and a custom set in brackets such as `[-!#$]`, where a `-` must come first and a `]` is written `]]` at the end. With no class named, any printable character may appear. multipass never draws a space, even where `special` or `ascii-printable` allows one, and refuses `unicode`, `max-repeating`, and `max-sequential`. `--rules` replaces `--no-uppercase`, `--no-lowercase`, `--no-digits`, `--no-symbols`, and `--symbols`, while `--exclude`, `--no-lookalikes`, and `--length` still apply, with the length moved inside the rules' bounds.
 
 ## Stay unlocked between commands
 
@@ -224,4 +268,4 @@ If you lose the passphrase, no one can recover the store. That is the point.
 
 ## License
 
-MIT
+MIT. The word list in `src/crypto/wordlist/eff_large.txt` is the [EFF's large word list](https://www.eff.org/dice) by the Electronic Frontier Foundation, with its dice numbers removed, under the [Creative Commons Attribution 4.0 International license](https://creativecommons.org/licenses/by/4.0/) that [EFF's copyright policy](https://www.eff.org/copyright) gives its original material.
