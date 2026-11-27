@@ -13,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use otp::Otp;
 use store::{Entry, Store, Version};
-use vault::{Ask, Session, Vault};
+use vault::{Ask, Opened, Session, Vault};
 
 const USAGE: &str = "\
 multipass: a small single-user password manager
@@ -579,9 +579,21 @@ fn open_with(
     settle: Settle,
     ask: &mut dyn FnMut(Ask) -> io::Result<Option<String>>,
 ) -> Result<Session> {
-    let (mut session, moved) = vault.open_or_move(ask, now).map_err(|e| e.to_string())?;
-    if let (Some(old), true) = (vault.old(), moved) {
-        eprintln!("Moved {} into {}", old.display(), vault.path().display());
+    let (mut session, opened) = vault.open_or_move(ask, now).map_err(|e| e.to_string())?;
+    let old = vault.old().unwrap_or(vault.path()).display();
+    match opened {
+        Opened::Package => {}
+        Opened::Moved => eprintln!("Moved {old} into {}", vault.path().display()),
+        // The old file holds the whole store, so a command that only reads
+        // can use it where the package cannot be built.
+        Opened::Unmoved(e) => {
+            let message = format!("could not move {old}: {}", write_error(vault, e));
+            if settle != Settle::Try {
+                return Err(message);
+            }
+            eprintln!("multipass: {message}; reading {old} as it is");
+            return Ok(session);
+        }
     }
     if session.writable().is_err() {
         eprintln!("multipass: opened read-only; another passphrase was set on another Mac");
@@ -1243,6 +1255,50 @@ mod tests {
             assert!(saving.starts_with(&refused), "{case}: {saving}");
             let save = save.unwrap().unwrap_err();
             assert!(save.starts_with(&refused), "{case}: {save}");
+        }
+    }
+
+    /// An old single-file store in a folder this process cannot write, as
+    /// in a read-only backup: a command that reads gets the old store as it
+    /// is, and one that saves, rotates or changes the passphrase fails,
+    /// naming the folder, before it asks for anything more.
+    #[test]
+    fn reads_an_old_store_it_cannot_move_and_refuses_to_save_to_it() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!("multipass-main-old-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let old = root.join("store.age");
+        let text = "multipass 2\nexample.com\n\tsecret hunter2\n";
+        fs::write(&old, age::encrypt(b"pass", text.as_bytes(), 10).unwrap()).unwrap();
+        let vault = Vault::new(root.join("store.multipass"), 10).with_old(Some(old.clone()));
+        let mut ask = |_: Ask| -> io::Result<Option<String>> { Ok(Some("pass".into())) };
+        let mode = |m| fs::set_permissions(&root, fs::Permissions::from_mode(m));
+        mode(0o500).unwrap();
+
+        let now = 1_764_000_000_000;
+        let read = open_with(&vault, now, Settle::Try, &mut ask);
+        let saving = open_with(&vault, now, Settle::Must, &mut ask).err();
+        let rekeying = open_with(&vault, now, Settle::Skip, &mut ask).err();
+        let package_made = vault.path().exists();
+
+        mode(0o700).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        let read = read.unwrap_or_else(|e| panic!("{e}"));
+        let secret = read.store.get("example.com").unwrap().secret.as_deref();
+        assert_eq!(secret, Some("hunter2"));
+        assert!(!package_made);
+        let refused = format!(
+            "could not move {}: could not write to {}: ",
+            old.display(),
+            vault.path().display()
+        );
+        for error in [saving, rekeying] {
+            let error = error.expect("an open that writes succeeded");
+            assert!(error.starts_with(&refused), "{error}");
         }
     }
 }

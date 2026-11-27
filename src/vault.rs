@@ -243,6 +243,18 @@ pub enum Ask<'a> {
     Other(&'a [String]),
 }
 
+/// How `open_or_move` found the store.
+#[derive(Debug)]
+pub enum Opened {
+    /// The package was already there.
+    Package,
+    /// The old single-file store moved into a new package.
+    Moved,
+    /// The old single-file store was read as it is, read-only, because the
+    /// package could not be written beside it, for this reason.
+    Unmoved(Error),
+}
+
 /// What `settle` did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Settled {
@@ -379,17 +391,17 @@ impl Vault {
 
     /// Opens the package, or, when there is none yet and the old
     /// single-file store exists, moves that store into one. Returns the
-    /// session and whether it moved.
+    /// session and how it found the store.
     pub fn open_or_move(
         &self,
         ask: &mut dyn FnMut(Ask) -> io::Result<Option<String>>,
         now_ms: u64,
-    ) -> Result<(Session, bool)> {
+    ) -> Result<(Session, Opened)> {
         match self.old.as_ref() {
             Some(old) if !self.dir.exists() && old.is_file() => {
-                Ok((self.move_in(&old.clone(), ask, now_ms)?, true))
+                self.move_in(&old.clone(), ask, now_ms)
             }
-            _ => Ok((self.open(ask, now_ms)?, false)),
+            _ => Ok((self.open(ask, now_ms)?, Opened::Package)),
         }
     }
 
@@ -472,13 +484,15 @@ impl Vault {
     /// Moves the single-file store at `old` into a new package: asks for its
     /// passphrase, builds the package holding its entries and a move record,
     /// and leaves `old` in place, because another Mac on an older multipass
-    /// may still save to it. Returns the package, opened.
-    pub fn move_in(
+    /// may still save to it. Returns the package, opened. When the file
+    /// system refuses the package, as in a read-only backup, it returns the
+    /// old store, read-only, instead.
+    fn move_in(
         &self,
         old: &Path,
         ask: &mut dyn FnMut(Ask) -> io::Result<Option<String>>,
         now_ms: u64,
-    ) -> Result<Session> {
+    ) -> Result<(Session, Opened)> {
         let passphrase = ask(Ask::Passphrase)
             .map_err(Error::Io)?
             .ok_or(Error::WrongPassphrase)?;
@@ -493,9 +507,13 @@ impl Vault {
             since: seconds(now_ms),
             snapshot: text,
         };
-        self.build(&passphrase, &store, Some(&record), now_ms)?;
+        match self.build(&passphrase, &store, Some(&record), now_ms) {
+            Ok(()) => {}
+            Err(e @ Error::Io(_)) => return Ok((Session::unmoved(store)?, Opened::Unmoved(e))),
+            Err(e) => return Err(e),
+        }
         let mut again = |_: Ask| Ok(Some(passphrase.clone()));
-        self.open(&mut again, now_ms)
+        Ok((self.open(&mut again, now_ms)?, Opened::Moved))
     }
 
     fn write_move_record(&self, dir: &Path, key: &Key, record: &MoveRecord) -> Result<PathBuf> {
@@ -832,6 +850,22 @@ fn new_key(created: u64) -> Result<Key> {
 }
 
 impl Session {
+    /// A read-only session over an old single-file store that could not be
+    /// moved. Its key is never written, because nothing saves.
+    fn unmoved(store: Store) -> Result<Session> {
+        Ok(Session {
+            store,
+            current: new_key(0)?,
+            known: BTreeMap::new(),
+            key_files: Vec::new(),
+            store_files: Vec::new(),
+            moves: Vec::new(),
+            passphrase: None,
+            typed: Vec::new(),
+            warnings: Vec::new(),
+        })
+    }
+
     /// Fails when another passphrase's key files stayed closed, so nothing
     /// may be written. Saving commands call it before they ask for anything.
     pub fn writable(&self) -> Result<()> {
@@ -1866,9 +1900,9 @@ mod tests {
     }
 
     fn open_or_move(vault: &Vault, pass: &str, now: u64) -> (Session, bool) {
-        let (mut session, moved) = vault.open_or_move(&mut answers(pass, None), now).unwrap();
+        let (mut session, opened) = vault.open_or_move(&mut answers(pass, None), now).unwrap();
         session.settle(vault, now).unwrap();
-        (session, moved)
+        (session, matches!(opened, Opened::Moved))
     }
 
     #[test]
