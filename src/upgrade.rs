@@ -142,7 +142,7 @@ pub fn upgrade(tools: &Tools, version: Option<&str>) -> Result<u8, Failure> {
                 return Err(Failure {
                     status: EX_DATAERR,
                     message: format!(
-                        "gh attestation verify rejected the installer from {installer}, so the release workflow did not build it; nothing was run"
+                        "gh attestation verify rejected the installer from {installer}; nothing was run. A release published during the upgrade causes this, and running multipass upgrade again fixes it. Otherwise this gh may be too old for these flags, or the release workflow did not build this installer"
                     ),
                 });
             }
