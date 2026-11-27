@@ -15,9 +15,18 @@ The vault-key plan, which comes next, writes every save as a new file and never 
 
 ## 2. Solution
 
-Store format 3 adds one line to every entry, `modified <milliseconds>`, the time it last changed. Removing an entry no longer drops it: it becomes a tombstone, the entry's name with its `modified` line and a `deleted` line, so a merge can tell "removed" from "never seen". `Store::merge` combines any number of stores by keeping, for each name, the version with the newest `modified`, and breaks a tie by comparing the two versions' text. The merge gives the same result in any order and is unchanged by merging a store with itself, so two Macs that merge the same files always agree. Each change is stamped one millisecond past the newest stamp in the store it was made from, so a change made after seeing another always wins over it, even when the clocks disagree. Tombstones older than 90 days are dropped when a store is written. multipass reads formats 1, 2, and 3, and writes format 3.
+Store format 3 adds one line to every entry, `modified <milliseconds>`, the time it last changed. Removing an entry no longer drops it: it becomes a tombstone, the entry's name with its `modified` line and a `deleted` line, so a merge can tell "removed" from "never seen". `Store::merge` combines any number of stores by keeping, for each name, the version with the newest `modified`, and breaks a tie by comparing the two versions' text. The merge gives the same result in any order and is unchanged by merging a store with itself, so two Macs that merge the same files always agree. Each change is stamped one millisecond past the newest stamp in the store it was made from, so a change made after seeing another always wins over it, even when the clocks disagree. Tombstones older than 120 days are dropped when a store is written. multipass reads formats 1, 2, and 3, and writes format 3.
 
 ### 2.1 Store format 3
+
+Each store format number names one text, defined in one plan:
+
+| Header | Adds | Defined in |
+| --- | --- | --- |
+| `multipass 1` | Entries with `secret`, `username`, and `notes` | Before Projector; `Store::from_text` still reads it |
+| `multipass 2` | The `otp` field | The one-time-passwords plan, § 2.4 |
+| `multipass 3` | `modified` and tombstones | This plan |
+| `multipass 4` | The `passkey` field, on top of format 3 | The passkeys plan, § 2.2 |
 
 ```text
 multipass 3
@@ -58,7 +67,7 @@ That rule picks one version from a set, so the merge is commutative, associative
 
 ### 2.4 Dropping old tombstones
 
-When a store is written, `Store::to_text` leaves out tombstones whose `modified` is more than 90 days before `now`. A copy of the store that comes back after more than 90 days away, holding an entry removed in the meantime, brings that entry back. The vault-key plan keeps old keys for the same 90 days, so a file that old cannot be opened through the normal path anyway, and the README states the limit.
+When a store is written, `Store::to_text` leaves out tombstones whose `modified` is more than 120 days before `now`. The vault-key plan keeps a retired key for 90 days after it is retired, and retires a key up to 21 days after it is made, so a store file it can still open is at most 111 days old. 120 days outlasts that, so a removal is never forgotten while a file that predates it can still be merged. A copy of the store that comes back after more than 120 days away, through some path other than that merge, can bring back an entry removed in the meantime, and the README states the limit.
 
 ### 2.5 Changes by file
 
@@ -76,7 +85,7 @@ When a store is written, `Store::to_text` leaves out tombstones whose `modified`
 - **One counter past the newest stamp.** Plain wall-clock time would let a Mac whose clock runs slow lose to an older change it had already seen. Taking `max(now, newest + 1)` orders every change after the changes it saw, and a full hybrid logical clock, with a separate counter field, buys nothing more for one user's handful of machines.
 - **Ties broken by content.** The tie-break needs no device identity to store or sync, and it is deterministic, which is what makes every Mac write the same merged store.
 - **The risk this leaves.** Two changes to the same entry made on two Macs, each before seeing the other, are decided by their clocks: the later stamp wins, and the other change is lost. A Mac with a clock far ahead wins such contests until real time catches up. That is the README's rule, "edits to different entries merge; the newer edit to the same entry wins", and the warning in § 2.2 flags a clock that is badly off.
-- **90 days for tombstones.** Long enough for any sync service to deliver a file, short enough that a store that removes entries does not grow without end.
+- **120 days for tombstones.** Longer than the 111 days in which the vault-key plan can still merge an old store file, and short enough that a store that removes entries does not grow without end.
 - **Its own plan.** The format and the merge are pure functions on store text, testable without files, keys, or sync. Keeping them apart from the vault-key plan's file handling keeps each plan small enough for one reviewer.
 
 ## 4. Acceptance criteria
@@ -93,7 +102,7 @@ Tests that must fail before the change and pass after it:
 - **Concurrent changes.** A store copied twice, with `x` added in one and `y` in the other, merges to hold both. Catches a merge that keeps one copy whole.
 - **Edit against removal.** `x` edited in one copy and removed in the other keeps whichever has the later stamp, in both orders. Catches a tombstone that always wins or always loses.
 - **Stamps after skew.** In a store whose newest stamp is an hour ahead of `now`, the next change is stamped one millisecond past it, and the warning does not fire; a day and a minute ahead, it fires. Catches a slow clock that loses to a change it already saw.
-- **Old tombstones** are dropped by `to_text` at 90 days and a millisecond, and kept at 90 days. Catches a store that grows forever, and one that forgets removals too soon.
+- **Old tombstones** are dropped by `to_text` at 120 days and a millisecond, and kept at 120 days. Catches a store that grows forever, and one that forgets a removal while a file that predates it can still be merged.
 - **Formats 1 and 2** read with `modified 0` on every entry, and format 3 round-trips through `to_text` and `from_text`, including a tombstone. A format 3 entry without `modified`, or a tombstone with a `secret`, fails with its line number. Catches an old store that stops opening, and a damaged store that parses.
 
 ## 5. Cost

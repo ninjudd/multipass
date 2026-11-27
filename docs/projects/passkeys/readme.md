@@ -15,7 +15,7 @@ multipass cannot be that provider. It is a command-line tool, and macOS and iOS 
 
 ## 2. Solution
 
-A new app, `Multipass.app`, built for both iOS and macOS from one Xcode project, exists only to host a credential provider extension on each system. The extension links the existing Rust store code as a static library, so the store keeps one implementation. The store moves into the app's iCloud Drive folder, so the iPhone, the Mac app, and the CLI share one file. It signs with Apple's CryptoKit, so multipass never implements elliptic-curve arithmetic itself. You unlock it with Face ID or Touch ID: the first sign-in on each device asks for the passphrase once, and the extension keeps it in that device's Keychain where only your face or fingerprint can read it. A passkey becomes a `passkey` field on an entry, beside the secret, username, notes, and one-time password, in store format 3. The CLI lists and removes passkeys. Only the extension creates them and signs with them, because only the extension receives the site's request.
+A new app, `Multipass.app`, built for both iOS and macOS from one Xcode project, exists only to host a credential provider extension on each system. The extension links the existing Rust store code as a static library, so the store keeps one implementation. The store moves into the app's iCloud Drive folder, so the iPhone, the Mac app, and the CLI share one file. It signs with Apple's CryptoKit, so multipass never implements elliptic-curve arithmetic itself. You unlock it with Face ID or Touch ID: the first sign-in on each device asks for the passphrase once, and the extension keeps it in that device's Keychain where only your face or fingerprint can read it. A passkey becomes a `passkey` field on an entry, beside the secret, username, notes, and one-time password, in store format 4. The CLI lists and removes passkeys. Only the extension creates them and signs with them, because only the extension receives the site's request.
 
 This design depends on the answers to § 6. Until those are settled, this plan stays a draft.
 
@@ -30,11 +30,12 @@ This design depends on the answers to § 6. Until those are settled, this plan s
 
 ### 2.2 The `passkey` field
 
-Format 3 adds one field, written on a single line as space-separated `key=value` pairs, each value base64 or escaped text:
+Format 4 adds one field to the mergeable-store plan's format 3, written on a single line as space-separated `key=value` pairs, each value base64 or escaped text:
 
 ```text
-multipass 3
+multipass 4
 github.com
+	modified 1764160000123
 	username octocat
 	passkey rp=github.com id=<base64 credential id> user=<base64 user handle> key=<base64 private key> created=2026-11-26
 ```
@@ -80,7 +81,7 @@ multipass does not merge. When two devices save before iCloud syncs, iCloud keep
 | `scripts/build-xcframework.sh` | New. Builds the static library for macOS, iOS, and the iOS simulator, and bundles the three into one XCFramework for Xcode. |
 | `src/crypto/base64.rs` | `encode` and `decode` stop branching on the data and indexing memory with it, because the `passkey` field's `key` is a private key. Each 6-bit value maps to its character, and each character to its value and an invalid flag, with masked arithmetic in place of `ALPHABET` and the `match` in `value`. Every rejection, the stray-bits check included, folds into that flag, and `decode` branches on it once, after the last character. The RFC 4648 tests stay and must still pass. |
 | `src/ffi.rs` | New. A C interface over `Store`: open with a passphrase, find a passkey, add an entry, save, and free. |
-| `src/store.rs` | Format 3: the `passkey` field, and reading formats 1 to 3. |
+| `src/store.rs` | Format 4: the `passkey` field, and reading formats 1 to 4. |
 | `src/main.rs` | `list` marks entries that hold a passkey; `get --field passkey` prints the site and creation date, never the key. |
 | `apple/` | New. One Xcode project, in Swift, that builds the app and its extension for iOS and macOS from shared sources, as a SwiftUI multiplatform app: shared SwiftUI views, with a thin per-platform `ASCredentialProviderViewController` subclass in each extension. It uses only Apple's frameworks: AuthenticationServices for the provider, CryptoKit for keys and signatures, LocalAuthentication and Security for Face ID, Touch ID, and the Keychain item, and Foundation's file coordination for iCloud Drive. The app's settings show the store's path, resolve sync conflicts, and remove the Keychain item. |
 | `.github/workflows/ci.yml` | Builds the XCFramework and both apps on `macos-latest`, unsigned. |
@@ -106,12 +107,12 @@ multipass does not merge. When two devices save before iCloud syncs, iCloud keep
 | Run `multipass passwd`, then sign in again | The extension falls back to the passphrase field, and the following sign-in asks only for Touch ID again |
 | Enter a wrong passphrase in the fallback field | The sign-in is cancelled, the store is unchanged, and no Keychain item is saved |
 | Remove the item from the app's settings, then sign in | The extension asks for the passphrase again |
-| `age -d` on the store | Shows `multipass 3` and the entry's `passkey` line |
+| `age -d` on the store | Shows `multipass 4` and the entry's `passkey` line |
 | `multipass rm` the entry, then try the sign-in again | multipass offers no passkey for the site |
 | Register a passkey in Safari on the iPhone, wait for iCloud Drive to sync, then sign in on the Mac | The Mac's extension finds the passkey and signs in |
 | Register on both devices while one is offline, then bring it online | The app reports a conflict and saves nothing until you choose a version. Neither registration is lost. |
 
-Tests: format 3 round-trips through `to_text` and `from_text`, and a literal format 2 store still opens. The C interface rejects a null or unterminated string. The extension's signature verifies under the public key it registered, checked with CryptoKit in a Swift unit test that runs on both platforms. The library's random bytes come from the system on iOS as well as macOS, checked by the same test that checks them on the Mac. Installing a build on a phone for these checks waits for the user to ask.
+Tests: format 4 round-trips through `to_text` and `from_text`, and literal format 2 and format 3 stores still open. The C interface rejects a null or unterminated string. The extension's signature verifies under the public key it registered, checked with CryptoKit in a Swift unit test that runs on both platforms. The library's random bytes come from the system on iOS as well as macOS, checked by the same test that checks them on the Mac. Installing a build on a phone for these checks waits for the user to ask.
 
 ## 5. Cost
 
