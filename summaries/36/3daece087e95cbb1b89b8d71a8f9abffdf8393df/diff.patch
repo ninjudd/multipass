@@ -1,0 +1,326 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index 9068411..4c6ac27 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -7,7 +7,7 @@ multipass is a single-user password manager: a Rust CLI over a package of age fi
+ multipass has no dependencies, not even dev-dependencies, and that is a feature people choose it for. CI fails if `cargo tree` shows anything but multipass itself.
+ 
+ - **Do not add a crate**, for code or for tests, without the maintainer's explicit approval in the pull request. Write the code instead.
+-- **Apple's system frameworks count like the standard library.** `src/clipboard.rs` loads AppKit with `dlopen` only when `--clip` needs the clipboard, rather than linking it, so no other command has AppKit in its process. It holds the program's only `unsafe` code, behind a safe interface. Keep any new `unsafe` code in a module like it, and say in a comment what each call requires of its arguments.
++- **Apple's system frameworks count like the standard library.** `src/clipboard.rs` loads AppKit with `dlopen` only when `--clip` needs the clipboard, rather than linking it, so no other command has AppKit in its process. Its calls into AppKit go through `src/objc.rs`, which holds the unsafe Objective-C runtime helpers, and `src/clipboard.rs` wraps them in a safe interface. Those two modules hold the program's only `unsafe` code. Keep any new `unsafe` code in a module like them, behind a safe interface, and say in a comment what each call requires of its arguments.
+ - **Every primitive lives in `src/crypto`** and is checked against the official test vectors from its specification: FIPS 180-4 for SHA-1, SHA-256 and SHA-512 (with RFC 3174 for SHA-1), RFC 4231 for HMAC, RFC 5869 for HKDF, RFC 7914 for PBKDF2, scrypt and Salsa20/8, RFC 8439 for ChaCha20 and Poly1305, RFC 4226 for HOTP, RFC 6238 for TOTP, and RFC 4648 for base32 and base64. A change to a primitive keeps those tests and adds any vector that covers the changed path.
+ - **In `src/crypto` and `src/age.rs`, never branch on secret data or index memory with it**, apart from scrypt's data-dependent lookups, which the algorithm requires. Compare MACs and tags with `crypto::ct_eq`. `src/age.rs` builds age's format from the primitives: it derives the scrypt key, unwraps the file key, derives the header and payload keys, and checks the header MAC. It may branch on the header's text and on lengths, which are public.
+ - **Outside `src/crypto` and `src/age.rs`, keep secrets as text and do no cryptography on them.** The store's escaping and parsing, its UTF-8 check, `strip_newline`, `otpauth` URI parsing, and `src/vault.rs`'s reading and writing of the key file, which holds vault keys as text, branch on each character of a secret: escaping changes the text's length, and Rust's string handling branches on every byte. So hand a key to `src/crypto` as soon as its text is found, as `src/otp.rs` hands the setup key to `crypto::base32`, and put any computation on key material in `src/crypto`.
+diff --git a/src/clipboard.rs b/src/clipboard.rs
+index 8321406..8d2d406 100644
+--- a/src/clipboard.rs
++++ b/src/clipboard.rs
+@@ -11,8 +11,8 @@
+ //! AppKit ships with macOS, so it counts like the standard library under the
+ //! no-dependencies rule. The binary does not link it: this module loads it
+ //! with `dlopen` the first time a command touches the clipboard, so every
+-//! other command runs without AppKit in the process. This module holds the
+-//! program's only `unsafe` code.
++//! other command runs without AppKit in the process. Its calls go through
++//! the Objective-C helpers in `src/objc.rs`.
+ 
+ use std::time::Duration;
+ 
+@@ -75,123 +75,27 @@ fn spawn_clearer(change_count: isize) -> std::io::Result<()> {
+ 
+ #[cfg(target_os = "macos")]
+ mod macos {
+-    use std::ffi::{CStr, c_char, c_int, c_void};
++    use crate::objc::{Id, class, new_string, release, send, send1, send2, with_pool};
++    use std::ffi::CStr;
+     use std::sync::OnceLock;
+ 
+-    type Id = *mut c_void;
+-    type Sel = *mut c_void;
+-
+     /// `NSPasteboardContentsCurrentHostOnly`, which keeps Universal Clipboard
+     /// from sending the contents to other devices.
+     const CURRENT_HOST_ONLY: usize = 1;
+-    const NS_UTF8_STRING_ENCODING: usize = 4;
+     const PLAIN_TEXT: &str = "public.utf8-plain-text";
+     const CONCEALED: &str = "org.nspasteboard.ConcealedType";
+ 
+     const APPKIT: &CStr = c"/System/Library/Frameworks/AppKit.framework/AppKit";
+-    const RTLD_LAZY: c_int = 1;
+-
+-    // From libSystem, which every macOS program links.
+-    unsafe extern "C" {
+-        fn dlopen(path: *const c_char, mode: c_int) -> *mut c_void;
+-        fn dlerror() -> *mut c_char;
+-    }
+-
+-    #[link(name = "objc")]
+-    unsafe extern "C" {
+-        fn objc_getClass(name: *const c_char) -> Id;
+-        fn sel_registerName(name: *const c_char) -> Sel;
+-        fn objc_msgSend();
+-        fn objc_autoreleasePoolPush() -> *mut c_void;
+-        fn objc_autoreleasePoolPop(pool: *mut c_void);
+-    }
+-
+-    // `objc_msgSend` must be called through a pointer of the method's exact
+-    // type, because on Apple silicon a variadic call passes arguments in
+-    // different registers than the method expects.
+-    unsafe fn send<R>(receiver: Id, selector: &CStr) -> R {
+-        let f: unsafe extern "C" fn(Id, Sel) -> R =
+-            unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
+-        unsafe { f(receiver, sel_registerName(selector.as_ptr())) }
+-    }
+-
+-    unsafe fn send1<A, R>(receiver: Id, selector: &CStr, a: A) -> R {
+-        let f: unsafe extern "C" fn(Id, Sel, A) -> R =
+-            unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
+-        unsafe { f(receiver, sel_registerName(selector.as_ptr()), a) }
+-    }
+-
+-    unsafe fn send2<A, B, R>(receiver: Id, selector: &CStr, a: A, b: B) -> R {
+-        let f: unsafe extern "C" fn(Id, Sel, A, B) -> R =
+-            unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
+-        unsafe { f(receiver, sel_registerName(selector.as_ptr()), a, b) }
+-    }
+-
+-    unsafe fn send3<A, B, C, R>(receiver: Id, selector: &CStr, a: A, b: B, c: C) -> R {
+-        let f: unsafe extern "C" fn(Id, Sel, A, B, C) -> R =
+-            unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
+-        unsafe { f(receiver, sel_registerName(selector.as_ptr()), a, b, c) }
+-    }
+ 
+     /// Loads AppKit into the process once, so that `NSPasteboard` exists.
+-    /// The handle is never closed: AppKit cannot be unloaded once loaded.
+     fn load_appkit() -> Result<(), String> {
+         static LOADED: OnceLock<Result<(), String>> = OnceLock::new();
+         LOADED
+-            .get_or_init(|| {
+-                // `dlopen` takes a NUL-terminated path, and `dlerror` returns
+-                // either null or a NUL-terminated message, valid until the
+-                // next `dl` call on this thread, so it is copied at once.
+-                let handle = unsafe { dlopen(APPKIT.as_ptr(), RTLD_LAZY) };
+-                if !handle.is_null() {
+-                    return Ok(());
+-                }
+-                let reason = unsafe {
+-                    let message = dlerror();
+-                    if message.is_null() {
+-                        "unknown error".to_string()
+-                    } else {
+-                        CStr::from_ptr(message).to_string_lossy().into_owned()
+-                    }
+-                };
+-                Err(format!("could not load AppKit for the clipboard: {reason}"))
+-            })
++            // `APPKIT` is the absolute path of a system framework.
++            .get_or_init(|| unsafe { crate::objc::load(APPKIT, "AppKit for the clipboard") })
+             .clone()
+     }
+ 
+-    fn class(name: &CStr) -> Id {
+-        unsafe { objc_getClass(name.as_ptr()) }
+-    }
+-
+-    /// An `NSString` holding `s`, owned by the caller, who must release it.
+-    /// It is built from bytes and a length, so a value holding a NUL
+-    /// character is not cut short.
+-    unsafe fn new_string(s: &str) -> Id {
+-        unsafe {
+-            let allocated: Id = send(class(c"NSString"), c"alloc");
+-            send3(
+-                allocated,
+-                c"initWithBytes:length:encoding:",
+-                s.as_ptr().cast::<c_void>(),
+-                s.len(),
+-                NS_UTF8_STRING_ENCODING,
+-            )
+-        }
+-    }
+-
+-    unsafe fn release(object: Id) {
+-        unsafe { send::<()>(object, c"release") }
+-    }
+-
+-    /// Runs `f` inside an autorelease pool, so objects AppKit hands back for
+-    /// the caller to drop are freed before this returns.
+-    fn with_pool<T>(f: impl FnOnce() -> T) -> T {
+-        let pool = unsafe { objc_autoreleasePoolPush() };
+-        let result = f();
+-        unsafe { objc_autoreleasePoolPop(pool) };
+-        result
+-    }
+-
+     pub struct Pasteboard {
+         handle: Id,
+         #[cfg(test)]
+@@ -275,7 +179,7 @@ mod macos {
+                 if found.is_null() {
+                     return None;
+                 }
+-                let bytes: *const c_char = send(found, c"UTF8String");
++                let bytes: *const std::ffi::c_char = send(found, c"UTF8String");
+                 Some(CStr::from_ptr(bytes).to_string_lossy().into_owned())
+             })
+         }
+@@ -291,7 +195,7 @@ mod macos {
+                 (0..count)
+                     .map(|i| {
+                         let kind: Id = send1(types, c"objectAtIndex:", i);
+-                        let bytes: *const c_char = send(kind, c"UTF8String");
++                        let bytes: *const std::ffi::c_char = send(kind, c"UTF8String");
+                         CStr::from_ptr(bytes).to_string_lossy().into_owned()
+                     })
+                     .collect()
+diff --git a/src/main.rs b/src/main.rs
+index 0ea91ab..49a8475 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,6 +1,8 @@
+ mod age;
+ mod clipboard;
+ mod crypto;
++#[cfg(target_os = "macos")]
++mod objc;
+ mod otp;
+ mod store;
+ mod tty;
+diff --git a/src/objc.rs b/src/objc.rs
+new file mode 100644
+index 0000000..80b9691
+--- /dev/null
++++ b/src/objc.rs
+@@ -0,0 +1,133 @@
++//! Calls into Apple's frameworks through the Objective-C runtime, shared by
++//! the modules that use a framework.
++//!
++//! A framework is loaded with `dlopen` only when a command needs it, so a
++//! command that never uses it runs without it in the process.
++//!
++//! These are the unsafe building blocks, not a safe interface. `send`
++//! through `send3`, `new_string`, and `release` are `unsafe`: the runtime
++//! cannot check that a receiver answers a selector with the argument and
++//! return types the caller names, so the caller must know that it does, and
++//! must own any object it releases. `load` is `unsafe` because `dlopen`
++//! runs the library's initializers, so the caller must name a system
++//! framework. `class` and `with_pool` are safe. The modules that call these,
++//! such as `src/clipboard.rs`, wrap them in safe interfaces.
++
++use std::ffi::{CStr, c_char, c_int, c_void};
++
++pub type Id = *mut c_void;
++type Sel = *mut c_void;
++
++const RTLD_LAZY: c_int = 1;
++const NS_UTF8_STRING_ENCODING: usize = 4;
++
++// From libSystem, which every macOS program links.
++unsafe extern "C" {
++    fn dlopen(path: *const c_char, mode: c_int) -> *mut c_void;
++    fn dlerror() -> *mut c_char;
++}
++
++#[link(name = "objc")]
++unsafe extern "C" {
++    fn objc_getClass(name: *const c_char) -> Id;
++    fn sel_registerName(name: *const c_char) -> Sel;
++    fn objc_msgSend();
++    fn objc_autoreleasePoolPush() -> *mut c_void;
++    fn objc_autoreleasePoolPop(pool: *mut c_void);
++}
++
++/// Loads the framework at `path` into the process, naming it as `what` in
++/// the error. The handle is never closed, because a framework that defines
++/// Objective-C classes cannot be unloaded.
++///
++/// # Safety
++///
++/// `dlopen` runs the library's initializers in this process, so `path` must
++/// be the absolute path of a system framework under
++/// `/System/Library/Frameworks`.
++pub unsafe fn load(path: &CStr, what: &str) -> Result<(), String> {
++    // `dlopen` takes a NUL-terminated path, and `dlerror` returns either
++    // null or a NUL-terminated message, valid until the next `dl` call on
++    // this thread, so it is copied at once.
++    let handle = unsafe { dlopen(path.as_ptr(), RTLD_LAZY) };
++    if !handle.is_null() {
++        return Ok(());
++    }
++    let reason = unsafe {
++        let message = dlerror();
++        if message.is_null() {
++            "unknown error".to_string()
++        } else {
++            CStr::from_ptr(message).to_string_lossy().into_owned()
++        }
++    };
++    Err(format!("could not load {what}: {reason}"))
++}
++
++// `objc_msgSend` must be called through a pointer of the method's exact
++// type, because on Apple silicon a variadic call passes arguments in
++// different registers than the method expects. Each caller must pass a
++// receiver that responds to `selector` with exactly these argument and
++// return types.
++
++pub unsafe fn send<R>(receiver: Id, selector: &CStr) -> R {
++    let f: unsafe extern "C" fn(Id, Sel) -> R =
++        unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
++    unsafe { f(receiver, sel_registerName(selector.as_ptr())) }
++}
++
++pub unsafe fn send1<A, R>(receiver: Id, selector: &CStr, a: A) -> R {
++    let f: unsafe extern "C" fn(Id, Sel, A) -> R =
++        unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
++    unsafe { f(receiver, sel_registerName(selector.as_ptr()), a) }
++}
++
++pub unsafe fn send2<A, B, R>(receiver: Id, selector: &CStr, a: A, b: B) -> R {
++    let f: unsafe extern "C" fn(Id, Sel, A, B) -> R =
++        unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
++    unsafe { f(receiver, sel_registerName(selector.as_ptr()), a, b) }
++}
++
++pub unsafe fn send3<A, B, C, R>(receiver: Id, selector: &CStr, a: A, b: B, c: C) -> R {
++    let f: unsafe extern "C" fn(Id, Sel, A, B, C) -> R =
++        unsafe { std::mem::transmute(objc_msgSend as unsafe extern "C" fn()) };
++    unsafe { f(receiver, sel_registerName(selector.as_ptr()), a, b, c) }
++}
++
++/// The class named `name`, or null when no loaded framework defines it.
++pub fn class(name: &CStr) -> Id {
++    // `objc_getClass` takes a NUL-terminated name and only looks it up.
++    unsafe { objc_getClass(name.as_ptr()) }
++}
++
++/// An `NSString` holding `s`, owned by the caller, who must release it.
++/// It is built from bytes and a length, so a value holding a NUL character
++/// is not cut short.
++pub unsafe fn new_string(s: &str) -> Id {
++    unsafe {
++        let allocated: Id = send(class(c"NSString"), c"alloc");
++        send3(
++            allocated,
++            c"initWithBytes:length:encoding:",
++            s.as_ptr().cast::<c_void>(),
++            s.len(),
++            NS_UTF8_STRING_ENCODING,
++        )
++    }
++}
++
++/// Releases an object the caller owns, which must not be used afterwards.
++pub unsafe fn release(object: Id) {
++    unsafe { send::<()>(object, c"release") }
++}
++
++/// Runs `f` inside an autorelease pool, so objects a framework hands back
++/// for the caller to drop are freed before this returns.
++pub fn with_pool<T>(f: impl FnOnce() -> T) -> T {
++    // The pool is pushed and popped on this thread, in order, as the
++    // runtime requires.
++    let pool = unsafe { objc_autoreleasePoolPush() };
++    let result = f();
++    unsafe { objc_autoreleasePoolPop(pool) };
++    result
++}
