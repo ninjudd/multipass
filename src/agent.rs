@@ -347,6 +347,9 @@ pub struct Agent<A: Approver> {
     exe: Option<(PathBuf, ExeId)>,
     /// Set by the first `end`: the session is over, and no request is served.
     ending: AtomicBool,
+    /// The thread whose `end` call won `ending`, so only the handler that
+    /// ended the session stops `serve`, once its reply is out.
+    ender: Mutex<Option<std::thread::ThreadId>>,
     /// Set once the handler that ended the session has written its reply, so
     /// `serve` returns, and the process exits, only after that reply is out.
     stopped: AtomicBool,
@@ -408,6 +411,7 @@ impl<A: Approver> Agent<A> {
             approver,
             exe,
             ending: AtomicBool::new(false),
+            ender: Mutex::new(None),
             stopped: AtomicBool::new(false),
             one_sheet: Mutex::new(()),
         }
@@ -462,6 +466,7 @@ impl<A: Approver> Agent<A> {
         if self.ending.swap(true, Ordering::SeqCst) {
             return;
         }
+        *self.ender.lock().unwrap_or_else(|p| p.into_inner()) = Some(std::thread::current().id());
         let note = format!("{} {}\n", why.word(), now_ms() / 1000);
         let _ = fs::write(&self.paths.note, note);
         let _ = fs::remove_file(&self.paths.socket);
@@ -479,7 +484,8 @@ impl<A: Approver> Agent<A> {
     /// ended the session.
     fn handle(&self, stream: UnixStream) {
         self.handle_one(stream);
-        if self.ending.load(Ordering::SeqCst) {
+        let ender = *self.ender.lock().unwrap_or_else(|p| p.into_inner());
+        if ender == Some(std::thread::current().id()) {
             self.stopped.store(true, Ordering::SeqCst);
         }
     }
@@ -959,7 +965,11 @@ mod tests {
     }
 
     fn setup(name: &str) -> Setup {
-        let root = temp(name);
+        setup_in(temp(name))
+    }
+
+    /// `setup` in a directory that already exists.
+    fn setup_in(root: PathBuf) -> Setup {
         let package = root.join("store.multipass");
         let vault = Vault::new(&package, FAST);
         let now = now_ms();
@@ -1034,6 +1044,82 @@ mod tests {
         agent.stopped.store(true, Ordering::SeqCst);
         serving.join().unwrap();
         fs::remove_dir_all(&s.root).unwrap();
+    }
+
+    /// Only the handler whose `end` won the guard stops `serve`. Catches a
+    /// concurrent request, such as a `status`, that finishes while the session
+    /// is ending and stops `serve` before the ending handler has replied.
+    #[test]
+    fn a_concurrent_request_does_not_stop_serve() {
+        let s = setup("concurrent");
+        let agent = agent(&s, Fake::always(Approval::Approved));
+        agent.end(Ended::Locked);
+        let (mine, theirs) = UnixStream::pair().unwrap();
+        let handler = {
+            let agent = Arc::clone(&agent);
+            std::thread::spawn(move || agent.handle(theirs))
+        };
+        (&mine).write_all(b"status\n").unwrap();
+        handler.join().unwrap();
+        assert!(!agent.stopped.load(Ordering::SeqCst));
+        fs::remove_dir_all(&s.root).unwrap();
+    }
+
+    /// Serves an agent from whichever copy of the test binary runs it, until
+    /// killed. Only `connect_refuses_an_agent_from_another_executable` runs
+    /// it, from a copy at another path.
+    #[test]
+    #[ignore]
+    fn serve_for_another_executable() {
+        let Some(root) = std::env::var_os("MULTIPASS_TEST_AGENT_ROOT") else {
+            return;
+        };
+        let root = PathBuf::from(root);
+        let s = setup_in(root.clone());
+        let agent = agent(&s, Fake::always(Approval::Approved));
+        let listener = agent.bind().unwrap();
+        fs::write(root.join("serving"), s.deadline.to_string()).unwrap();
+        agent.serve(listener);
+    }
+
+    /// `Peer::SameBinary` refuses an agent that runs from another executable
+    /// file, and `Peer::SameUser`, for `status` and `lock`, still reaches it.
+    /// Catches a client that would hand a request to an agent an old or
+    /// foreign binary is running.
+    #[test]
+    fn connect_refuses_an_agent_from_another_executable() {
+        let root = temp("other-exe");
+        let copy = root.join("copy-of-tests");
+        fs::copy(std::env::current_exe().unwrap(), &copy).unwrap();
+        let mut child = Command::new(&copy)
+            .args([
+                "--exact",
+                "agent::tests::serve_for_another_executable",
+                "--ignored",
+            ])
+            .env("MULTIPASS_TEST_AGENT_ROOT", &root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let serving = root.join("serving");
+        for _ in 0..1000 {
+            if serving.exists() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let deadline: u64 = fs::read_to_string(&serving).unwrap().parse().unwrap();
+        let paths = Paths::new(&root.join("agent"), &root.join("store.multipass"));
+        let refused = connect(&paths, Peer::SameBinary);
+        let reached = connect(&paths, Peer::SameUser)
+            .ok()
+            .and_then(Client::status);
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(matches!(refused, Err(Tried::Updated)));
+        assert_eq!(reached, Some(deadline));
+        fs::remove_dir_all(&root).unwrap();
     }
 
     fn wait_until(mut done: impl FnMut() -> bool) {
