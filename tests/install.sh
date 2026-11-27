@@ -238,6 +238,19 @@ if [ "$(uname -s)" = Darwin ]; then
   run env PATH="$WORK/fake-rustup:$PATH" bash "$WORK/release/install.sh" verify
   expect_status 65 "verify with a deployment target that is not a version"
 
+  # verify checks the source as an install from source does, before it
+  # builds anything from it.
+  printf 'rustc-release %s\nrustflags -C link-arg=-Wl,-oso_prefix,.\nmacosx_deployment_target 11.0\n' "$RUST" >"$INFO"
+  mv "$MIRROR/archive/v$VERSION.tar.gz" "$WORK/good-source.tar.gz"
+  mkdir -p "$WORK/bad-source/multipass-$VERSION"
+  printf '[package]\nname = "multipass"\nversion = "9.9.9"\n' >"$WORK/bad-source/multipass-$VERSION/Cargo.toml"
+  tar -czf "$MIRROR/archive/v$VERSION.tar.gz" -C "$WORK/bad-source" "multipass-$VERSION"
+  run env PATH="$WORK/fake-rustup:$PATH" bash "$WORK/release/install.sh" verify
+  expect_status 65 "verify of a source that names another version"
+  printf '%s\n' "$OUT" | grep -q "Cargo.toml says version 9.9.9" ||
+    fail "verify of a source that names another version did not say so; output:"$'\n'"$OUT"
+  mv "$WORK/good-source.tar.gz" "$MIRROR/archive/v$VERSION.tar.gz"
+
   # A slice that differs exits 65 and names each field that differs, even
   # where xcodebuild fails, as it does with only the Command Line Tools.
   printf '#!/bin/sh\nexit 1\n' >"$WORK/fake-rustup/xcodebuild"

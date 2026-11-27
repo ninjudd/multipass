@@ -5,7 +5,7 @@
 #
 #   curl -fsSL https://getmultipass.dev/install.sh | bash
 #   curl -fsSL https://getmultipass.dev/install.sh | bash -s -- status
-#   ./install.sh [install|status|uninstall]          from a checkout
+#   ./install.sh [install|status|verify [<version>]|uninstall]   from a checkout
 #
 # A release installs only code it can show came from its tag: with cargo on
 # PATH it builds the tag's source, and otherwise it installs the prebuilt
@@ -177,6 +177,18 @@ build() {
   CANDIDATE="$WORK/target/release/multipass"
 }
 
+# Fails unless the unpacked source in $1 says it is version $2 and its lock
+# file lists one package, multipass itself, so building it runs no code from
+# outside the tagged source.
+check_release_source() {
+  local src="$1" version="$2"
+  [ "$(cargo_version "$src")" = "$version" ] ||
+    die "$EX_DATAERR" "the v$version source's Cargo.toml says version $(cargo_version "$src")"
+  [ "$(grep -c '^\[\[package\]\]$' "$src/Cargo.lock")" = 1 ] &&
+    grep -qx 'name = "multipass"' "$src/Cargo.lock" ||
+    die "$EX_DATAERR" "the v$version source's Cargo.lock lists packages other than multipass"
+}
+
 build_release_source() {
   local version="$1" archive="$WORK/source.tar.gz" src="$WORK/source"
   fetch "$ARCHIVE_URL/v$version.tar.gz" "$archive"
@@ -184,13 +196,7 @@ build_release_source() {
   mkdir "$src"
   tar -xzf "$archive" -C "$src" --strip-components 1 ||
     die "$EX_DATAERR" "could not unpack the v$version source archive"
-  [ "$(cargo_version "$src")" = "$version" ] ||
-    die "$EX_DATAERR" "the v$version source's Cargo.toml says version $(cargo_version "$src")"
-  # One package in the lock file means multipass and nothing else, so the
-  # build runs no code from outside the tagged source.
-  [ "$(grep -c '^\[\[package\]\]$' "$src/Cargo.lock")" = 1 ] &&
-    grep -qx 'name = "multipass"' "$src/Cargo.lock" ||
-    die "$EX_DATAERR" "the v$version source's Cargo.lock lists packages other than multipass"
+  check_release_source "$src" "$version"
   build "$src"
   row "built" "v$version with rustc $BUILT_WITH"
 }
@@ -454,6 +460,7 @@ cmd_verify() {
   mkdir "$src"
   tar -xzf "$WORK/source.tar.gz" -C "$src" --strip-components 1 ||
     die "$EX_DATAERR" "could not unpack the v$version source archive"
+  check_release_source "$src" "$version"
   # The target directory sits inside the source, as in the release build,
   # because the linker records object paths relative to the directory cargo
   # runs in.

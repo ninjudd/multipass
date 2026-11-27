@@ -134,14 +134,15 @@ A release is reproducible: anyone with the same Rust toolchain and macOS SDK get
 | Field | Example |
 | --- | --- |
 | `tag`, `commit` | `v0.2.0`, the full commit SHA |
-| `rustc` | The full `rustc -vV` output, including the commit hash of rustup's toolchain |
+| `rustc` | `rustc --version`, such as `rustc 1.97.1 (8bab26f4f 2026-07-14)` |
+| `rustc-<field>` | One line for each field of `rustc -vV`, such as `rustc-release 1.97.1` and `rustc-commit-hash`, the commit of rustup's toolchain |
 | `xcode`, `sdk` | `xcodebuild -version` and `xcrun --show-sdk-version` |
 | `macosx_deployment_target` | `11.0` |
 | `rustflags` | `-C link-arg=-Wl,-oso_prefix,.`, which `install.sh verify` builds with |
 | `command` | The exact `cargo build` command |
-| `sha256` | Each slice's digest and the universal binary's |
+| `sha256-<target>`, `sha256-universal` | Each slice's digest, such as `sha256-aarch64-apple-darwin`, and the universal binary's |
 
-`install.sh verify 0.2.0` downloads the source, the binary, and the build info, builds your Mac's slice with `cargo +<version> build --release --locked --offline --target <triple>`, extracts the same slice with `lipo -thin`, and compares them. It prints `reproduced     v0.2.0 arm64 slice matches the release`, or `differs` with each build-info field that differs on your Mac, such as the SDK version, and exits 65. It needs rustup, because a toolchain from Homebrew embeds its own install path in the binary, and it stops with status 69 and the `rustup toolchain install` command when the toolchain the release names is missing, rather than installing one itself. It builds with the build info's `rustflags` and `macosx_deployment_target`, inside the unpacked source as the release build does. The build info comes from the build that `verify` exists to distrust, and a flag such as `-C linker=<program>` would make `cargo` run any program, so `verify` accepts only the release build's `-C link-arg=-Wl,-oso_prefix,.` and a deployment target such as `11.0`, and otherwise stops with status 65, naming the field, before it builds anything.
+`install.sh verify 0.2.0` downloads the source, the binary, and the build info, checks the source's `Cargo.toml` and `Cargo.lock` as an install from source does (§ 2.1 step 4.2), builds your Mac's slice with `rustup run <version> cargo build --release --locked --offline --target <triple>`, extracts the same slice with `lipo -thin`, and compares them. It prints `reproduced     v0.2.0 arm64 slice matches the release`, or `differs` with each build-info field that differs on your Mac, such as the SDK version, and exits 65. It needs rustup, because a toolchain from Homebrew embeds its own install path in the binary, and it stops with status 69 and the `rustup toolchain install` command when the toolchain the release names is missing, rather than installing one itself. It builds with the build info's `rustflags` and `macosx_deployment_target`, inside the unpacked source as the release build does. The build info comes from the build that `verify` exists to distrust, and a flag such as `-C linker=<program>` would make `cargo` run any program, so `verify` accepts only the release build's `-C link-arg=-Wl,-oso_prefix,.` and a deployment target such as `11.0`, and otherwise stops with status 65, naming the field, before it builds anything.
 
 To check the installer before you run it, download it and verify it the same way:
 
