@@ -81,9 +81,9 @@ You upgrade with `multipass upgrade`, which runs the installer for you, or by ru
 4. It runs `/bin/bash install.sh`, with `MULTIPASS_VERSION` set when you named a version, and `MULTIPASS_BIN_DIR` set to the receipt's directory, and passes the installer's rows and exit status through. The installer then builds from source or checks the binary's attestation, exactly as § 2.1 describes.
 5. It removes the temporary directory.
 
-The version is an argument rather than an option, because `--version` already prints multipass's own version.
+The version is an argument rather than an option, because `--version` already prints multipass's own version. It may carry a leading `v`, and anything but a release version such as `0.2.0` or `1.0.0-rc.1` is refused before any download, so a version never puts anything else into a URL. `upgrade` takes no other option, `--store` included, since it opens no store. A signal that ends the installer makes `upgrade` exit 1.
 
-`multipass upgrade --check` runs `/usr/bin/curl -fsSI https://github.com/ninjudd/multipass/releases/latest`, reads the newest release's tag from the redirect, compares it with its own version, and changes nothing. It prints `multipass 0.2.0 is the newest release` and exits 0, or `multipass 0.3.0 is out, and this is 0.2.0 -- run multipass upgrade` and exits 1, so a script can test it.
+`multipass upgrade --check` runs `/usr/bin/curl -fsSI https://github.com/ninjudd/multipass/releases/latest`, reads the newest release's tag from the redirect, compares it with its own version, and changes nothing. It prints `multipass 0.2.0 is the newest release` and exits 0, or `multipass 0.3.0 is out, and this is 0.2.0 -- run multipass upgrade` and exits 1, so a script can test it. A build newer than the newest release, such as one from a checkout ahead of it, prints `multipass 0.3.0 is newer than the newest release, 0.2.0` and exits 0.
 
 `upgrade` never asks for the passphrase and opens no store. It passes its own environment through to the installer, which needs `PATH` and `HOME`, and adds only the two variables above. A running session-unlock agent ends on its own after an upgrade (§ 2.7).
 
