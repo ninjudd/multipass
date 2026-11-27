@@ -57,7 +57,9 @@ created 1764200000
 commitment <base64 of 32 bytes>
 member 3f9a… Alex age1pq1… <base64 ML-DSA-65 public key>
 member 5b2c… Sam age1pq1… <base64 ML-DSA-65 public key>
-removed 8a7f… ends 7c1e…
+removed 8a7f…
+replaced 5b2c… <fingerprint of Sam's previous keys>
+ends 7c1e… 2d4b…
 signer 3f9a…
 signature <base64 ML-DSA-65 signature over every line above>
 ```
@@ -67,25 +69,31 @@ signature <base64 ML-DSA-65 signature over every line above>
 | `follows` | The generation or generations this one replaces. A rotation that reconciles two concurrent generations lists both. |
 | `commitment` | HMAC-SHA-256 under the vault key's text of the label `multipass vault key commitment`, computed in `src/crypto`. It binds the record to the one vault key the grants deliver, without revealing it. |
 | `member` | Each current member's id, display name, recipient, and signing public key |
-| `removed` | A member removed by this rotation, and the generations the removal ends: every generation the record follows. |
+| `removed` | A member removed by this rotation. It revokes their signing key and recipient. |
+| `replaced` | A member whose keys this record replaces, after `passwd`, with the fingerprint of the keys it revokes. The `member` line lists the new keys. |
+| `ends` | Generations whose keys this record ends, so they are never carried forward as `retired` and their store files are no longer merged: every generation the record follows when it removes or replaces anyone, and every generation it reconciles that still lists a revoked member or key. |
 | `signer`, `signature` | The member who rotated, and their ML-DSA-65 signature |
+
+A `removed` or `replaced` line revokes a signing key and a recipient. A revocation binds every generation that does not lead to it: its ancestors keep what they had, and every other generation, descendant, sibling, or cousin, is held to it. A member keeps the union of every revocation in every generation they have accepted, whatever order the generations arrived in, and never drops one.
 
 A member accepts generation `G` at a prompt only when all of these hold:
 
 1. Their grant for `G` decrypts with their identity, giving a vault key `K`.
-2. `members.G.age` opens with `K`, and its `commitment` matches `K`.
+2. `members.G.age` opens with `K`, and its `commitment` equals the one computed from `K`, compared with `crypto::ct_eq` as `AGENTS.md` requires for every MAC.
 3. Some generation in `follows` is one they already trust, or is itself accepted by these rules first, back to their `trusted` generation.
 4. `signer` is listed as a member in a generation `G` follows, and the signature verifies under the signing key listed there.
-5. `signer` has not been removed in any generation they trust.
+5. No generation they have accepted revokes the signing key that signed `G`, unless `G` is an ancestor of that generation.
 
-A grant that fails any rule is left in place and ignored, with a warning naming it: `grant.9d4e….age is not signed by a member you trust`. So a key planted by someone who knows a member's recipient, a grant a removed member replays, and a fork a removed member signs from before their removal all open nothing for members who saw the removal.
+A grant that fails any rule is left in place and ignored, with a warning naming it: `grant.9d4e….age is not signed by a member you trust`. So a key planted by someone who knows a member's recipient, a grant a removed member replays, a fork a removed member signs, and a fork signed with keys a `passwd` replaced all open nothing for members who have seen the revoking generation.
+
+A generation can pass all five rules and still be tainted: a sibling that a routine rotation made while another member removed someone lists the removed member, and granted them its key. So when a member has accepted a generation that lists a member or a key some other accepted generation revoked, and does not lead to that revocation, they treat it as ended. They never carry its key forward as `retired`, and once they have seen the revocation, they no longer merge new store files under it, but warn about them. The reconciling rotation that follows both names it in `ends`. This holds whichever of the two arrives first. A member who accepted the sibling first used it in good faith until the revocation arrived, and from then on treats it as ended.
 
 ### 2.4 How a member opens the vault
 
 1. `open` asks for the passphrase and finds the member's identity file. `~/.multipass/vaults` records, per package, which member this device is and the newest generation it has trusted. A device with no record tries each `identity.*.age` in the package with the passphrase, which takes about 300 ms each, and records the one that opens.
 2. It takes the newer of the identity file's `trusted` generation and the device's record as its starting point. A package whose newest acceptable generation is older than the device's record means files were removed from the package; it warns, `this package is older than this Mac last saw`, and refuses to save.
 3. It accepts every newer generation by the rules in § 2.3, and learns each one's vault key, creation time, and retired keys from the grants.
-4. From here the vault-key plan's § 2.3 runs as before: merge every store file it has a key for, and rotate when the current key is 14 or more days old or when there are several generations. Retired keys come only from accepted generations, and never from a generation a removal ended.
+4. From here the vault-key plan's § 2.3 runs as before: merge every store file it has a key for, and rotate when the current key is 14 or more days old or when there are several generations. Retired keys come only from accepted generations, and never from a generation a revocation ended (§ 2.3).
 5. A rotation writes a new membership record, signed with the member's key, and one grant per member it lists, instead of one key file under a passphrase. When the accepted generations moved past the identity file's `trusted` line, it writes a new identity file.
 
 ### 2.5 Membership
@@ -96,9 +104,9 @@ A grant that fails any rule is left in place and ignored, with a warning naming 
 | Admit | A member runs `multipass admit <member>`. It shows the join request's name and fingerprint, and the member's own. The two people read both fingerprints to each other out of band, in person or on a call, and the member confirms. It rotates, with the newcomer added to the record, and deletes the join request. |
 | First open by the newcomer | The newcomer has no trusted generation yet. multipass shows who signed the generation that lists them, with that person's fingerprint, and asks the newcomer to confirm it matches what they heard. On yes, it writes their identity file with that generation as `trusted`. |
 | Remove | A member runs `multipass remove <member>`. It rotates, with a `removed` line, and carries no key from the ended generations forward as `retired`. |
-| `passwd` | Makes a new identity, both key pairs, writes it as a new identity file under the new passphrase, and rotates with a record signed by the member's old signing key that lists their new public keys. Other members accept it without re-verifying, because their old key signed it. The old identity file opens no grant written afterwards, and the old signing key is no longer listed, so it signs nothing anyone accepts. |
+| `passwd` | Makes a new identity, both key pairs, writes it as a new identity file under the new passphrase, and rotates with a record signed by the member's old signing key that lists their new public keys. Other members accept it without re-verifying, because their old key signed it. The record's `replaced` line revokes the old keys, so once a member has seen it, nothing the old signing key signs is accepted, a sibling forked from before the `passwd` included, and no grant to the old recipient is used. The old identity file opens no grant written afterwards. |
 | Routine rotation | Unchanged from the vault-key plan: any member's prompt rotates a key 14 or more days old, signs the record, and writes grants for every member it lists. |
-| Concurrent rotations | Two members who rotate before hearing of each other produce two generations. The next prompt accepts both, and rotates once more with a record that follows both. Its members are the union of both lists, less everyone either removed. |
+| Concurrent rotations | Two members who rotate before hearing of each other produce two generations. The next prompt accepts both, and rotates once more with a record that follows both. Its members are the union of both lists, less everyone either removed, with each replaced member's new keys. Its `ends` line names every reconciled generation that still lists a revoked member or key. |
 | More devices | A member's identity file is in the package, so every device that syncs it unlocks with the same passphrase, and starts from the newest `trusted` generation any of the member's devices wrote. |
 
 A fingerprint is the first 20 bytes of SHA-256 over the member's recipient and signing public key, shown as five groups of eight base32 characters, computed in `src/crypto`. Reading both fingerprints aloud is what stops a person in the middle from swapping their own keys in for either side's.
@@ -110,7 +118,7 @@ A fingerprint is the first 20 bytes of SHA-256 over the member's recipient and s
 | The weakest passphrase | Anyone with a copy of the package, a removed member or a sync service included, can guess each member's passphrase offline at scrypt's cost. One member's weak passphrase gives up their identity, every grant to them, and so the vault. |
 | A removed member keeps what they had | Every secret they read, every vault key they held, and every store file written under those keys in sync history and backups. Rotation protects only what is written afterwards, so change the secrets themselves at their source. |
 | A removed member keeps folder access | Until whoever shares the folder stops sharing it. What they write is ignored: a grant they sign fails rule 5, and a store file under an ended generation is warned about and not merged. |
-| A member who saw no removal | A member whose newest trusted generation is from before a removal, and who never receives the removing record, can accept a fork the removed member signs from that older generation. Once the removing record arrives, the removal is sticky and the fork's signer fails rule 5. |
+| A member who has not yet seen a revocation | Until the revoking record reaches them, a member can accept a fork the removed member signs, or a fork signed with keys a `passwd` replaced, and can use a sibling generation that still grants the removed member its key. A removed member can write store files under such a sibling until then, and the merge keeps them. Once the record arrives, the revocation is sticky, the fork fails rule 5, and the sibling is ended. |
 | Rolling back a new device | Someone who can delete files from the folder can delete the newest generations and identity files. A device with a record refuses the older package, but a new device has only what the package holds. |
 | A malicious member | Can read and change every entry, admit others, and remove members. Membership changes are signed, so the record shows who made them, but store files are not, so nothing shows which member changed an entry. |
 
@@ -128,7 +136,7 @@ This is the plan's largest risk. age's `mlkem768x25519` stanza is HPKE (RFC 9180
 | HPKE base mode | RFC 9180 | 150 lines |
 | Bech32 for `age1pq` and `AGE-SECRET-KEY-PQ-` | BIP 173, without its length limit, as age uses it | 100 lines |
 
-That is about 2,300 lines in `src/crypto`, far more than all the cryptography there today, each checked against its official vectors. The constant-time rule matters more here than anywhere so far. ML-KEM's arithmetic, its decapsulation's implicit rejection, ML-DSA's signing, and X25519's ladder must not branch on or index by secret data. Bech32 decoding of an `AGE-SECRET-KEY-PQ-` identity falls under the same rule, as the vault-key plan's `base64::encode` does, so it maps characters to values with masked arithmetic rather than a table. A subtle mistake would leak a member's identity, which then opens every grant ever written to them.
+That is about 2,300 lines in `src/crypto`, far more than all the cryptography there today, each checked against its official vectors. The constant-time rule matters more here than anywhere so far. ML-KEM's arithmetic, its decapsulation's implicit rejection, ML-DSA's signing, and X25519's ladder must not branch on or index by secret data. Bech32 decoding of an `AGE-SECRET-KEY-PQ-` identity falls under the same rule, as the vault-key plan's `base64::encode` does, so it maps characters to values with masked arithmetic rather than a table. So does base64 decoding of the identity file's `signer` seed, which means `base64::decode` needs the masked rewrite the passkeys plan already lists, since the vault-key plan kept its `match` only because nothing secret passed through it. A subtle mistake would leak a member's identity, which then opens every grant ever written to them.
 
 The alternative is Apple's CryptoKit, which the passkeys plan's rule allows on Apple devices. CryptoKit's Swift interface in the macOS 27.2 SDK declares, each from macOS 26 and iOS 26: `MLKEM768` and `MLKEM1024`; `XWingMLKEM768X25519`, the X-Wing hybrid, which Apple's documentation describes as defined in draft-connolly-cfrg-xwing-kem-06; the HPKE ciphersuite `XWingMLKEM768X25519_SHA256_AES_GCM_256`; enclave forms `SecureEnclave.MLKEM768` and `SecureEnclave.MLKEM1024`; and the signatures `MLDSA65` and `MLDSA87`. Apple's documentation also lists `HPKE.KEM.XWingMLKEM768X25519` as a KEM, `HPKE.AEAD.chaChaPoly` as an AEAD, and a `Ciphersuite.init(kem:kdf:aead:)` that combines them.
 
@@ -149,7 +157,7 @@ Whether stock age can read what CryptoKit writes comes down to three things. Eac
 | AEAD | ChaCha20Poly1305 | The predefined suite uses AES-GCM-256; `chaChaPoly` is available through `init(kem:kdf:aead:)` | The predefined suite does not match, verified. A custom suite should match, unverified. |
 | KEM | "MLKEM768-X25519 from draft-ietf-hpke-pq-03", which the specification calls "i.e. X-Wing", with a 1120-byte encapsulated key | X-Wing from draft-connolly-cfrg-xwing-kem-06 | Unverified. An X-Wing ciphertext is 1,088 bytes of ML-KEM-768 plus 32 bytes of X25519, 1,120 in all, which agrees with age's length, but the two drafts may differ in the combiner or the HPKE KEM identifier. |
 
-So a grant that CryptoKit writes with a custom suite of X-Wing, HKDF-SHA256, ChaCha20-Poly1305, and age's `info` string may be readable by stock age, but nobody has checked. § 6 question 7 is that check.
+So a grant that CryptoKit writes with a custom suite of X-Wing, HKDF-SHA256, ChaCha20-Poly1305, and age's `info` string may be readable by stock age, but nobody has checked. § 6 question 8 is that check.
 
 ### 2.8 Changes by file
 
@@ -157,12 +165,13 @@ So a grant that CryptoKit writes with a custom suite of X-Wing, HKDF-SHA256, Cha
 | --- | --- |
 | `src/crypto/sha3.rs`, `mlkem.rs`, `mldsa.rs`, `x25519.rs`, `hpke.rs`, `bech32.rs` | New, each against its official vectors, and constant-time as § 2.7 says. Not needed if the user chooses CryptoKit. |
 | `src/crypto/mod.rs` | The vault key commitment and the member fingerprint, so neither computes on a secret or a key outside `src/crypto`. |
+| `src/crypto/base64.rs` | `decode` maps characters to values with masked arithmetic, because it now decodes the `signer` seed. The passkeys plan lists the same change. |
 | `src/share.rs` | New. Identity files, membership records, grants, join requests, the acceptance rules in § 2.3, and `join`, `admit`, and `remove`. |
 | `src/vault.rs` | `open` starts from an identity file and accepted generations when the package is shared, and `rotate` writes a record and grants instead of a key file. Solo stores are unchanged. |
 | `src/main.rs` | Adds `join`, `admit`, and `remove`, and makes `passwd` in a shared vault replace the member's identity. |
 | `testdata/` | The age specification's `mlkem768x25519` test files, which are encrypted files with published keys, the same exception the reference fixtures already are. |
 | `AGENTS.md` | "multipass is a single-user password manager" becomes "a password manager for one person, or a few who share a vault". "Stay in age's passphrase (scrypt) mode" becomes: store, key, and identity files stay in passphrase mode; grants alone use the `mlkem768x25519` recipient type, and never a recipient type that is not quantum-resistant. "Every primitive lives in `src/crypto`" adds FIPS 202, 203, and 204, RFC 7748, RFC 9180, and BIP 173 to the required vectors. "Compatibility with age" says recovering a shared vault needs an age that reads `mlkem768x25519`. "Never commit … any other encrypted file" names the new test files as an exception. If the user chooses CryptoKit, the Apple-frameworks rule names `src/` modules that call it, beyond the passkeys plan's P-256 exemption. |
-| `README.md` | "no sharing" becomes sharing with a few people you trust. "One passphrase, no public keys" says the data and every file you unlock with a passphrase stay symmetric, and that post-quantum public keys only deliver and sign vault keys in a shared vault. The advice to keep shared logins in 1Password stays for everyday sharing, with shared vaults for the few secrets a household or a small team must hold together. Adds joining, admitting with fingerprints, removing, and § 2.6. |
+| `README.md` | "no sharing" becomes sharing with a few people you trust. "One passphrase, no public keys" says the data and every file you unlock with a passphrase stay symmetric, and that post-quantum public keys only deliver and sign vault keys in a shared vault. The advice to keep shared logins in 1Password stays for everyday sharing, with shared vaults for the few secrets a household or a small team must hold together. Adds joining, admitting with fingerprints, removing, and § 2.6. Its count of about 1,000 lines of cryptography, and its list of the primitives in `src/crypto`, grow by the roughly 2,300 lines and the primitives in § 2.7, or name CryptoKit if the user chooses it. |
 
 ## 3. Why this design
 
@@ -176,6 +185,7 @@ So a grant that CryptoKit writes with a custom suite of X-Wing, HKDF-SHA256, Cha
 - **The data stays symmetric.** Entries are encrypted only under the vault key, so the public-key steps guard key delivery and membership and nothing else, and a solo store never uses them.
 - **Stock age still recovers everything.** Each file is an ordinary age file: `age -d identity.<member>.<random>.age` with the passphrase gives an identity file, `age -d -i <it> grant.<gen>.<member>.age` gives the key file text, and the vault-key plan's steps do the rest. This assumes an age build with the `mlkem768x25519` type, which § 6 asks the implementer to confirm.
 - **Fingerprints read aloud, both ways.** Nothing else can tell a member that the keys in a join request belong to the person they mean to admit, or tell a newcomer that the generation admitting them was signed by the person they spoke to.
+- **Reviews keep finding holes in this protocol, which is the strongest argument for MLS.** Every review of this plan has found another way for a removed member, a replaced key, or a concurrent rotation to get around the rules, and each fix has added a rule. That is group key management with concurrent membership changes, a notoriously hard problem, and the IETF has a standard for it: Messaging Layer Security (MLS, RFC 9420). It defines epochs, signed commits, how a removal takes effect, and how concurrent commits are resolved. A custom protocol is likely to keep having holes that MLS has already closed. § 6 asks whether to adopt MLS's model or an implementation of it before anyone builds this.
 - **Rejected: invite codes over an outside channel.** A member could send the vault key, wrapped under a one-time code, through a message or a call. It works for joining, but every removal and every routine rotation would mean sending every remaining member a new code, so rotation would stop happening.
 - **Rejected: each new vault key encrypted under the previous one.** It needs no public keys, but it defeats rotation. Anyone who ever held one key could follow the chain to every later key, so a key leaked once leaks forever, and no member could ever be removed.
 - **Rejected: an identity per device.** It would let a lost laptop be removed without the person, but it multiplies grants and admissions. An identity per member, unlocked by their passphrase on any device, keeps admission to once per person. § 6 defers per-device identities.
@@ -190,11 +200,13 @@ So a grant that CryptoKit writes with a custom suite of X-Wing, HKDF-SHA256, Cha
 | After B removes A, A copies an old grant back into the package, and signs a new generation that follows the generation before the removal | B's next open warns about both, and A's files are not merged |
 | B runs `multipass remove A`, then adds `z` | A's next open finds no grant for the new generation and cannot see `z` |
 | B runs `multipass passwd`, then someone uses B's old identity file with the old passphrase | It opens no grant written after the `passwd`, and A accepts B's next rotation without re-verifying |
+| After B's `passwd`, someone with B's old identity signs a sibling of the `passwd` generation that adds them as a member | Once A has seen the `passwd` generation, A warns about the sibling and never grants its keys, whichever arrived first |
+| B removes A while C runs a routine rotation from the same generation, then A writes a store file under C's sibling key | The next reconciling rotation leaves A out and ends C's sibling. A's later store file under it is warned about and not merged, in both arrival orders. |
 | A and B each rotate before syncing | The next open accepts both generations, rotates once, and writes grants for both |
 | Delete the newest generation's files from a package that a device has already opened | That device warns `this package is older than this Mac last saw` and refuses to save |
 | `age -d` on B's identity file, `age -d -i` on B's grant with that output, then the store file, with a stock age that has `mlkem768x25519` | Prints the store text |
 
-Tests: each new primitive against its official vectors, FIPS 202, FIPS 203, FIPS 204, RFC 7748, RFC 9180, and BIP 173, plus the age specification's `mlkem768x25519` test files. A grant written by multipass decrypts with stock age, and one written by stock age decrypts with multipass. Each acceptance rule in § 2.3 fails on its own, with the other four holding: a grant whose key does not match the record's commitment, a record that follows no trusted generation, a record signed by a non-member, one with a bad signature, and one signed by a removed member. The identity file's output works as an `age -i` file. A removal rotation carries no `retired` line from the generations it ends. Concurrent rotations, one removing A and one not, reconcile without A.
+Tests: each new primitive against its official vectors, FIPS 202, FIPS 203, FIPS 204, RFC 7748, RFC 9180, and BIP 173, plus the age specification's `mlkem768x25519` test files. A grant written by multipass decrypts with stock age, and one written by stock age decrypts with multipass. Each acceptance rule in § 2.3 fails on its own, with the other four holding: a grant whose key does not match the record's commitment, a record that follows no trusted generation, a record signed by a non-member, one with a bad signature, and one signed by a removed member. The identity file's output works as an `age -i` file. A removal rotation carries no `retired` line from the generations it ends. Concurrent rotations, one removing A and one not, reconcile without A, end the sibling, and in both arrival orders refuse a store file A writes under the sibling's key after the removal is seen. A record signed by a key a `passwd` replaced is refused once the replacing generation is seen. A `commitment` that differs in its last byte fails rule 2.
 
 ## 5. Cost
 
@@ -202,7 +214,7 @@ Opening adds one HPKE decapsulation per grant and one ML-DSA verification per ne
 
 ## 6. Open questions
 
-Every question here is deliberately deferred until the plan is scheduled. The user owns questions 1 to 6. Questions 7 and 8 are checks for whoever implements the plan.
+Every question here is deliberately deferred until the plan is scheduled. The user owns questions 1 to 7. Questions 8 and 9 are checks for whoever implements the plan.
 
 1. **Lifting the passphrase-only rule.** Shared vaults are the first feature to use public-key cryptography, for grants and membership signatures, and AGENTS.md and the README say multipass uses none. § 2.8 says how those rules would change, if the user wants shared vaults at all.
 2. **Hand-written cryptography or CryptoKit.** Writing ML-KEM, ML-DSA, X25519, SHA-3, HPKE, and Bech32 keeps shared vaults working on every platform, at the cost and risk in § 2.7. CryptoKit makes them cheap and well vetted on Apple devices, requires macOS 26 or iOS 26, and reaches the CLI through a Swift shim or the Mac app's helper.
@@ -210,8 +222,9 @@ Every question here is deliberately deferred until the plan is scheduled. The us
 4. **Signing store files**, so a reader can tell which member changed an entry, and a compromised member cannot pose as another.
 5. **Per-device identities**, including one in the Secure Enclave with `SecureEnclave.MLKEM768`, and whether to add Ed25519 to ML-DSA-65 as a hybrid signature.
 6. **Routine rotation in a large vault.** Whether 21 days still fits, since every rotation ends every member's sessions.
-7. **Compatibility of CryptoKit's X-Wing with age's `mlkem768x25519`.** The KDF matches, and the AEAD can be made to match with a custom suite. Whether the KEMs are byte-identical is unverified (§ 2.7). Owner: the implementer, by decrypting the age specification's `mlkem768x25519` test files with a CryptoKit suite of X-Wing, HKDF-SHA256, and ChaChaPoly, and by having stock age decrypt a grant CryptoKit wrote.
-8. **Which age releases read `mlkem768x25519`.** The C2SP age specification defines it, and the Rust `age` crate at 0.12.1 does not implement it (§ 7). Which Go release does, and so what "stock age" means for recovering a shared vault, is unverified. Owner: the implementer.
+7. **MLS instead of a custom protocol.** Before anyone builds shared vaults, study MLS's treatment of removals, concurrent commits, and epochs (RFC 9420), and decide whether to adopt its model, or an MLS implementation if the dependency rule allows one, instead of the protocol in § 2.3. MLS assumes a delivery service that puts commits in one order, which a shared folder does not, so adopting its model would also mean a deterministic rule for which concurrent commit wins.
+8. **Compatibility of CryptoKit's X-Wing with age's `mlkem768x25519`.** The KDF matches, and the AEAD can be made to match with a custom suite. Whether the KEMs are byte-identical is unverified (§ 2.7). Owner: the implementer, by decrypting the age specification's `mlkem768x25519` test files with a CryptoKit suite of X-Wing, HKDF-SHA256, and ChaChaPoly, and by having stock age decrypt a grant CryptoKit wrote.
+9. **Which age releases read `mlkem768x25519`.** The C2SP age specification defines it, and the Rust `age` crate at 0.12.1 does not implement it (§ 7). Which Go release does, and so what "stock age" means for recovering a shared vault, is unverified. Owner: the implementer.
 
 ## 7. Background
 
@@ -220,3 +233,4 @@ Every question here is deliberately deferred until the plan is scheduled. The us
 - CryptoKit's Swift interface in the macOS 27.2 SDK declares `MLKEM768`, `MLKEM1024`, `XWingMLKEM768X25519`, the HPKE ciphersuite `XWingMLKEM768X25519_SHA256_AES_GCM_256`, `SecureEnclave.MLKEM768`, `SecureEnclave.MLKEM1024`, `MLDSA65`, and `MLDSA87`, each available from macOS 26 and iOS 26. It shows no enclave form of X-Wing. Apple's documentation lists `HPKE.KEM.XWingMLKEM768X25519` among HPKE's KEMs and `chaChaPoly` among its AEADs.
 - The `age` crate at version 0.12.1 depends on `ml-kem`, `x25519-dalek`, `hpke`, and `sha3`, but its source implements only the `tagpq` type, ML-KEM-768 with P-256 for hardware keys, and has no `mlkem768x25519`. So at that version Rust age cannot read a grant. Whether the Go implementation, `age` and `age-keygen`, reads it, and from which release, is unverified.
 - The mergeable-store plan's § 2.1 gives each store format number one definition: 3 is its own `modified` and tombstones, and 4 is the passkeys plan's `passkey` field. Shared vaults change the store text not at all.
+- Messaging Layer Security (RFC 9420) is the IETF standard for group key agreement with members added and removed over time. Its groups move through numbered epochs, each changed by a signed commit. IETF drafts propose post-quantum ciphersuites for it; which ones, and their status, are unverified here. Its Rust implementations are crates, which the dependency rule bans without the maintainer's approval.
