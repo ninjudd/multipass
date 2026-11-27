@@ -68,7 +68,7 @@
   </ul>
 
   <h2>Install without this domain</h2>
-  <p>This domain only redirects to the newest release on GitHub. To skip it, use GitHub's URL directly:</p>
+  <p>This domain only redirects to releases on GitHub: <code>/install.sh</code> to the newest, and <code>/v&lt;version&gt;/install.sh</code> to that release. To skip it, use GitHub's URL directly:</p>
   <pre><code>curl -fsSL https://github.com/ninjudd/multipass/releases/latest/download/install.sh | bash</code></pre>
   <p>To pin a release, so a later one cannot change what you run, name its tag and its version:</p>
   <pre><code>curl -fsSL https://github.com/ninjudd/multipass/releases/download/v0.1.0/install.sh | MULTIPASS_VERSION=0.1.0 bash</code></pre>
