@@ -1,0 +1,64 @@
+{
+ "version": 1,
+ "name": "Installer release check results",
+ "project": "installer",
+ "pr": {
+  "repo": "ninjudd/multipass",
+  "number": 47,
+  "title": "Record the installer checks that v0.2.0 answered",
+  "head": "705b695110d90eaf78ba0d4aafe0e3ef0eb2a04c",
+  "headRef": "installer-0.2.0-results",
+  "base": "4299aa2e98b2851a6a123c28f1484f8bcd858b5a",
+  "baseRef": "main"
+ },
+ "overview": {
+  "summary": [
+   "multipass installs from a GitHub release: <code>install.sh</code> builds the tagged source when Rust is installed, and otherwise installs the release's prebuilt binary only after <code>gh attestation verify</code> proves the release workflow built it. <code>multipass upgrade</code> runs the newest installer for you. The installer plan, <code>docs/projects/installer/readme.md</code>, is finished (<code>status: completed</code>), and its § 9 Outcome lists each acceptance check with the evidence for it.",
+   "Two of those checks could not run until a second release existed: a release started by merging a pull request that raises the version (the first release, <code>v0.1.0</code>, was started by a workflow dispatch), and <code>multipass upgrade</code> from one release behind. The merge of #46 published <code>v0.2.0</code>, so this pull request records what those checks showed. It edits only § 9 and changes no status or decision.",
+   "The first head put the new group in the middle of the \"Not run\" list, so three checks that never ran read as verified with <code>v0.2.0</code>. The second commit moved the group to the end of § 9, and the review's finding on it is resolved."
+  ],
+  "cards": [
+   {
+    "id": "evidence",
+    "title": "What public evidence confirms",
+    "html": "<ul class=\"tight\"><li>The <code>v0.2.0</code> release is immutable, carries the five assets, and its tag names <code>4299aa2</code>.</li><li>Release run 46049576523 ran on the push of <code>4299aa2</code> to <code>main</code> and succeeded.</li><li>The binary's attestation passes for <code>refs/heads/main</code> at <code>4299aa2</code>, with no login.</li><li><code>SHA256SUMS</code> matches the downloaded binary and <code>install.sh</code>.</li><li><code>getmultipass.dev/install.sh</code> and <code>/v0.2.0/install.sh</code> redirect to the right release files.</li></ul>"
+   },
+   {
+    "id": "owner-only",
+    "title": "What only the owner's runs show",
+    "html": "<ul class=\"tight\"><li>The <code>upgrade --check</code> and <code>upgrade</code> runs from 0.1.0, and their output.</li><li>The first attempt that met a <code>504</code> and exited 69, leaving 0.1.0 installed.</li><li>The one-line install through <code>getmultipass.dev</code> installing 0.2.0.</li></ul><p class=\"note\">The quoted messages and exit codes match the code at <code>v0.1.0</code> and the installer's output rows.</p>"
+   }
+  ]
+ },
+ "groups": [
+  {
+   "id": "outcome",
+   "title": "The plan's outcome",
+   "kicker": "§ 9 records the results of the two checks that waited for v0.2.0",
+   "intro": [
+    "§ 9 of the plan sorts every acceptance check into groups by how it was shown: verified against <code>v0.1.0</code> and the live domain, verified by the tests CI runs, and not run. The first item under \"Not run\" said that the merge-started release and the upgrade from one release behind needed a second release. This change rewords that item to say both have since passed, and appends a fourth group after the \"Not run\" list, \"Verified with <code>v0.2.0</code>, after this plan merged\", with one item per result. The other three \"Not run\" items stay where they were.",
+    "A completed plan is a record of what was decided and built, so it keeps its decisions as they were. Its outcome may still take the result of a check it deferred, once the check runs, and that is all this change adds."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": "docs/projects/installer/readme.md",
+     "note": "The installer plan; only § 9 Outcome changes.",
+     "collapsed": false,
+     "checks": [
+      {
+       "kind": "verify",
+       "line": 419,
+       "text": "Checked from public evidence: <code>gh release view v0.2.0</code> reports an immutable release with the five assets, the tag names <code>4299aa2</code>, run 46049576523 is the Release workflow on that push and succeeded, and <code>gh attestation verify</code> on the downloaded binary passes with <code>--source-ref refs/heads/main</code> and <code>--source-digest</code> at <code>4299aa2</code>, and fails with <code>refs/tags/v0.2.0</code>."
+      },
+      {
+       "kind": "context",
+       "line": 421,
+       "text": "These runs happened on the owner's machine, so no public record shows them. The messages, exit codes, and output rows quoted here match <code>src/upgrade.rs</code> at <code>v0.1.0</code> and <code>install.sh</code>, and <code>rustc 1.97.1</code> is the toolchain the release's build info names."
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}
