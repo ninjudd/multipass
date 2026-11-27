@@ -1,0 +1,85 @@
+{
+ "version": 1,
+ "name": "Websites find follow-ups",
+ "project": "websites",
+ "pr": {
+  "repo": "ninjudd/multipass",
+  "number": 44,
+  "title": "Have find's usage errors exit 2 too",
+  "head": "e525165a51a1c7f379b2670f16e23f87a29e62e2",
+  "headRef": "websites-find-followups",
+  "base": "b0589e613513aad97b2903a2fc121e5f962f45dc",
+  "baseRef": "main"
+ },
+ "overview": {
+  "summary": [
+   "multipass is a password manager whose CLI keeps every login in one encrypted store. The websites plan, which is <code>ready</code> and not built yet, lets each entry list the websites it is used on, and adds <code>multipass find &lt;url&gt;</code>, which prints the names of the entries for a page. Like <code>grep</code>, <code>find</code> exits 0 on a match, 1 on no match, and 2 on any error, so a script can tell the cases apart without reading stderr.",
+   "This pull request changes only that plan, to close two gaps left when the exit statuses were decided:",
+   "<ol><li><b>Usage errors.</b> The plan said <code>find</code> picks its own exit status the way <code>upgrade</code> does. But <code>parse</code>, which reads the command line, hands every usage error back to <code>main</code> before any command's own exit route runs, and <code>main</code> exits 1 for every error. So copying <code>upgrade</code>'s route alone would leave <code>multipass find</code> with no address at 1. The plan now has <code>main</code> give a usage error for <code>find</code> status 2, and every other command's usage errors stay at 1.</li><li><b>Touch ID sessions.</b> On a Mac with Touch ID, a background <em>session agent</em> holds the store's key after the first passphrase prompt, and each later command asks it for one thing behind one Touch ID sheet. Today it answers only a read or change of one named entry and a list of names, none of which gives <code>find</code> every entry's websites. The plan adds a request, <code>Find(page)</code>, behind one sheet that names the page's host. The agent replies with only the names and websites of the matching and related entries, never a secret.</li></ol>",
+   "No code changes, and the plan stays <code>ready</code>."
+  ],
+  "cards": [
+   {
+    "id": "terms",
+    "title": "Terms",
+    "html": "<ul class=\"tight\"><li><b>Session agent</b>: <code>multipass __agent</code>, a background process that holds the vault key between commands and answers one request per Touch ID approval, in <code>src/agent.rs</code>.</li><li><b>Sheet</b>: the Touch ID dialog macOS shows, reading \"multipass is trying to …\". Declining it ends the session.</li><li><b>Related entry</b>: an entry with a website under the page's root domain but not matching it, which <code>find</code> names on stderr as a hint.</li><li><b>Usage error</b>: a command line <code>parse</code> refuses, such as a missing argument or an unknown option.</li></ul>"
+   },
+   {
+    "id": "review",
+    "title": "Review so far",
+    "html": "<ul class=\"tight\"><li>The Projector review of <code>e525165</code> is clean, with no finding threads.</li><li>It lists four suggestions: say how <code>main</code> knows an option-loop error belongs to <code>find</code>, say that a no-match after a prompt still starts the agent, give the <code>find</code> reply's wire form, and have the README row reword the sentences that every sheet names one entry.</li></ul>"
+   }
+  ]
+ },
+ "groups": [
+  {
+   "id": "plan",
+   "title": "The websites plan",
+   "kicker": "Exit status 2 for find's usage errors, and a Find request to the session agent",
+   "intro": [
+    "The plan's § 2.2 says how <code>find</code> matches and how it exits. This change adds three paragraphs there: one on where the exit status of a usage error is decided, and two on how <code>find</code> opens the store during a Touch ID session. § 2.5's table of changes by file gains a row for <code>src/agent.rs</code> and wider rows for <code>README.md</code> and <code>AGENTS.md</code>. § 4 gains two acceptance rows and a test, and § 6 records the owner's choice of the agent request as decided question 3.",
+    "The agent request follows the rule the repository's <code>AGENTS.md</code> sets for the agent: it answers a request only after a touch approves that one request, and hands over no secret. A <code>find</code> request is about a page rather than one entry, so its sheet names the page's host, as the existing <code>list</code> sheet says \"list your entries\", and the plan amends the rule to say so."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": "docs/projects/websites/readme.md",
+     "collapsed": false,
+     "note": "§ 2.2 decides where <code>find</code>'s usage errors get status 2 and adds the <code>Find(page)</code> agent request; § 2.5, § 4, and § 6 follow.",
+     "checks": [
+      {
+       "kind": "verify",
+       "line": 79,
+       "text": "§ 2.2: on <code>main</code>, <code>parse</code> returns every usage error to <code>main</code>, which exits through <code>ExitCode::FAILURE</code>, and <code>upgrade 0.2</code> fails inside <code>parse</code> at <code>upgrade::release_version</code>, so the example exits 1 as the sentence says. Checked by reading <code>main</code> and <code>parse</code> in <code>src/main.rs</code>."
+      },
+      {
+       "kind": "context",
+       "line": 79,
+       "text": "§ 2.2: <code>parse</code> reads options before it knows the command, so an error such as an unknown option in <code>multipass find --bogus https://github.com</code> is raised before <code>find</code>'s own branch runs. The review suggests the plan say how <code>main</code> tells such an error belongs to <code>find</code>."
+      },
+      {
+       "kind": "context",
+       "line": 81,
+       "text": "§ 2.2: today <code>run</code> starts the session agent only when the command returns <code>Ok</code>. A <code>find</code> that prompts and matches nothing exits 1, so how that exit is routed decides whether a session starts."
+      },
+      {
+       "kind": "verify",
+       "line": 125,
+       "text": "§ 2.5: a <code>find &lt;n&gt;</code> line followed by the page bytes fits the agent's framing, as <code>read</code> uses it: <code>read_line</code> takes at most 64 bytes, and <code>read_body</code> takes a counted body up to <code>MAX_BODY</code>. Checked in <code>src/agent.rs</code>."
+      },
+      {
+       "kind": "verify",
+       "line": 153,
+       "text": "§ 4: a declined sheet makes the agent reply <code>denied</code> and end the session, and the client fails with <code>the request was not approved</code>, as this row expects. Checked in <code>Agent::answer</code> and <code>Ctx::fall_back</code>."
+      },
+      {
+       "kind": "context",
+       "line": 184,
+       "text": "§ 6 item 3 is the only question this change adds, and it is decided, so the plan's <code>ready</code> status still holds."
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}
