@@ -5,9 +5,9 @@ priority: now
 
 # Session unlock
 
-After you type the passphrase once, a background agent keeps the store unlocked until its vault key expires, at most 14 days, and every later read or change asks for a touch of Touch ID or a press on an Apple Watch, naming the entry it is for, instead of the passphrase.
+After you type the passphrase once, a background agent keeps the store unlocked until its vault key expires, at most 21 days, and every later read or change asks for a touch of Touch ID or a press on an Apple Watch, naming the entry it is for, instead of the passphrase.
 
-This project depends on the [vault key](../vault-key/readme.md), which ships first: the passphrase unlocks a random vault key, and the vault key encrypts the store, so the agent can read and save holding only the vault key.
+This project depends on the [vault key](../vault-key/readme.md), which in turn depends on the [mergeable store](../store-merge/readme.md); both ship first. With them, the passphrase unlocks a random vault key, the vault key encrypts the store's files, every save adds a new file that is never modified, and opening merges the files entry by entry. So the agent can read and save holding only the vault key, and saves on two Macs never overwrite each other.
 
 ## 1. Problem
 
@@ -17,9 +17,9 @@ The prompt also guarantees something a fix must keep: only a person who knows th
 
 ## 2. Solution
 
-Whenever a command has to ask for the passphrase, it gets the vault key from the key file, as the vault-key plan describes, and starts a background agent, `multipass __agent`, holding only that key. The agent listens on a Unix socket in a 0700 directory, checks that each client runs as the same user from the same `multipass` binary, and answers requests for one entry at a time: read it, change it, or list the names. Each request asks you to approve with Touch ID or an Apple Watch, on a sheet that names the entry, such as "multipass is trying to read github.com". Only after you approve does the agent decrypt the store and answer, or save the change. So no program can read or change an entry without your finger on the sensor, a request you did not make shows up as a sheet for an entry you did not ask about, and declining it ends the session. After the first prompt, `get`, `list`, `add`, `rm`, and `otp` each cost one touch, and only `init`, `passwd`, and `rekey` still ask for the passphrase.
+Whenever a command has to ask for the passphrase, it gets the vault key from the package's key file, as the vault-key plan describes, and starts a background agent, `multipass __agent`, holding only that key. The agent listens on a Unix socket in a 0700 directory, checks that each client runs as the same user from the same `multipass` binary, and answers requests for one entry at a time: read it, change it, or list the names. Each request asks you to approve with Touch ID or an Apple Watch, on a sheet that names the entry, such as "multipass is trying to read github.com". Only after you approve does the agent decrypt the store and answer, or save the change. So no program can read or change an entry without your finger on the sensor, a request you did not make shows up as a sheet for an entry you did not ask about, and declining it ends the session. After the first prompt, `get`, `list`, `add`, `rm`, and `otp` each cost one touch, and only `init`, `passwd`, and `rekey` still ask for the passphrase.
 
-A session ends when the vault key expires, 14 days after the key was made, whatever time the session started. It also ends on a restart, on `multipass lock`, or when you decline a request. Sleep, the screen lock, and time without use do not end it. The next command then asks for the passphrase, says why, and starts a fresh session. After expiry, that prompt also rotates the vault key, as the vault-key plan's § 2.4 describes, so every Mac shares one deadline and the first to ask makes the new key. `multipass status` tells you whether the store is unlocked and until when. Over SSH, and wherever Touch ID and a watch are both unavailable, no agent starts, and every command prompts as today.
+A session ends when the vault key expires, 21 days after the key was made, whatever time the session started. Any passphrase prompt rotates a key that is 14 or more days old, as the vault-key plan's § 2.5 describes, so a session always starts with at least 7 days left, and without restarts you type the passphrase about every 21 days. A session also ends on a restart, on `multipass lock`, when you decline a request, and when another Mac rotates the key. Sleep, the screen lock, and time without use do not end it. The next command then asks for the passphrase, says why, and starts a fresh session. `multipass status` tells you whether the store is unlocked and until when. Over SSH, and wherever Touch ID and a watch are both unavailable, no agent starts, and every command prompts as today.
 
 The agent keeps the vault key in protected memory: it denies debugger attachment, writes no core file, locks the key's page out of swap, and wipes it on exit. Root or a kernel exploit can still copy it during a session (§ 2.7). § 8 designs a Secure Enclave mode for the signed Mac app from the passkeys plan, in which the agent holds only a copy of the key wrapped by the enclave, and the enclave itself demands the touch. That mode ships with the app, not in this project.
 
@@ -30,7 +30,7 @@ This plan stays a draft until the prototype in § 6.5 confirms that the agent ca
 ### 2.1 How a session starts
 
 1. You run any command, such as `multipass get github.com`, and no agent answers for this store, or `open` skips the agent (§ 2.4). The command asks for the passphrase on `/dev/tty`, as today. When an earlier session for this store has ended, the prompt says why, such as `Passphrase (the session ended): ` (§ 2.4).
-2. `open` opens the key file and the store with the vault-key plan's `Store::open`, and the command runs. A wrong passphrase fails here, and no agent starts.
+2. `open` opens the package with the vault-key plan's `vault::open`, which merges its store files and rotates the key when it is 14 or more days old, and the command runs. A wrong passphrase fails here, and no agent starts.
 3. When the command succeeds, and neither `MULTIPASS_NO_AGENT` nor `SSH_CONNECTION` is set, it starts `multipass --store <path> __agent` as a child, with stdin and stdout piped and stderr discarded. It writes the start message (§ 2.6) to the child's stdin and closes it. The vault key goes only to a process the command started itself, never over the socket.
 4. The agent calls `setsid`, so closing the terminal does not end it. It protects its memory (§ 2.7) and asks LocalAuthentication whether Touch ID or an Apple Watch can approve requests (§ 2.8). When neither can, it exits, and no session starts. Otherwise it checks the vault key against the store, binds its socket (§ 2.5), removes the store's end note (§ 2.4), writes `ready` to stdout, and closes stdout.
 5. The command waits up to 2 seconds for `ready` and then exits. It says nothing about the agent either way, so a failed start costs nothing but the next prompt.
@@ -39,7 +39,7 @@ This plan stays a draft until the prototype in § 6.5 confirms that the agent ca
 
 1. You run `multipass get github.com`. `open` connects to the socket for this store, checks the directory and the peer (§ 2.5), and sends `read github.com`. `list` sends `list` instead.
 2. The agent asks for approval (§ 2.8), and macOS shows its Touch ID sheet: "multipass is trying to read github.com", or "multipass is trying to list your entries". When you cancel, or leave the sheet for 60 seconds, it replies `denied` and exits. When Touch ID and the watch are both unavailable at that moment, such as with the lid closed and no watch in reach, it replies `unavailable` and stays unlocked.
-3. When you approve, the agent reads the store file and decrypts it with the vault key. When the vault key no longer opens it, because a rotation ran on another machine, it replies `stale` and exits. Otherwise it replies with that one entry, as store text holding only it, or `missing` when there is none. `list` gets the names and nothing else.
+3. When you approve, the agent lists the package. When it holds a key file of another generation, or a store file under a generation the agent has no key for, a rotation ran on another Mac, so it replies `stale` and exits. Otherwise it decrypts every store file and merges them with `Store::merge`, and compacts them into one new file when there were several, as the vault-key plan's § 2.3 describes. It then replies with that one entry, as store text holding only it, or `missing` when there is none. `list` gets the names and nothing else.
 4. `open` parses the reply with `Store::from_text`, and the command goes on as today. On `denied`, the command fails with `the request was not approved`, and the next command asks for the passphrase. On `stale` or `unavailable`, or when no agent answers, `open` asks for the passphrase and a session starts as § 2.1 describes.
 
 A store saved on another machine still opens, because both machines share the vault key through the synced key file.
@@ -47,9 +47,9 @@ A store saved on another machine still opens, because both machines share the va
 ### 2.3 How a change works while unlocked
 
 1. You run `multipass add x`. `open_to_save` connects and sends `edit x`.
-2. The agent asks for approval with the reason `change x`. On approval it reads and decrypts the store, remembers the file's bytes, and replies with entry `x` as store text, or `missing`. The connection stays open while the command asks for the secret, for up to 5 minutes.
+2. The agent asks for approval with the reason `change x`. On approval it merges the store files as § 2.2 step 3 describes, and replies with entry `x` as store text, or `missing`. The connection stays open while the command asks for the secret, for up to 5 minutes.
 3. The command makes its change and sends `save` with store text holding the new `x`, or holding nothing to remove `x`.
-4. The agent refuses with `refused` when the text holds any entry other than `x`. It refuses with `changed` when the store file no longer holds the bytes it read, because another command saved in between; the command then fails with `the store changed while you were editing; run the command again`. Otherwise it puts or removes `x` in the store it decrypted, encrypts it with the vault key, writes it through `Store::save`, and replies `saved`.
+4. The agent refuses with `refused` when the text holds any entry other than `x`. Otherwise it merges the store files again, since another Mac or command may have saved meanwhile, puts `x` or a tombstone for it with a fresh stamp, writes the result as a new store file, deletes the files it read, and replies `saved`. A save that another command makes at the same moment writes its own new file, and the next request merges both.
 5. When no agent answers, the command asks for the passphrase, opens the store, saves with the vault key, and starts a session as § 2.1 describes.
 
 `init`, `passwd`, and `rekey` always ask for the passphrase, because they write the key file, which the passphrase encrypts. `passwd` and `rekey` both rotate the vault key, so they send `lock` to the old agent and start a fresh one with the new key. Agents on other Macs find on their next request that the key no longer opens the store, and end with `the vault key changed`. That is rare, and costs each Mac one prompt.
@@ -85,11 +85,11 @@ Every request is one line of ASCII, followed by a counted run of bytes where it 
 
 | Message | Path | Reply |
 | --- | --- | --- |
-| `start <deadline-unix> <n>\n`, then the `n` bytes of the vault key's text. The deadline is the key's creation time plus 14 days. | The agent's stdin, from the process that started it | `ready\n` on stdout, or exit with status 1 |
+| `start <deadline-unix> <n>\n`, then the `n` bytes of the key file's text: the current vault key, its creation time, and the retired keys. The deadline is the key's creation time plus 21 days. | The agent's stdin, from the process that started it | `ready\n` on stdout, or exit with status 1 |
 | `read <n>\n`, then an entry name | Socket | `ok <n>\n` then store text holding only that entry, or `missing\n`, `denied\n`, `unavailable\n`, or `stale\n` |
 | `list\n` | Socket | `ok <n>\n` then the entry names, one per line, escaped as the store escapes them, or `denied\n`, `unavailable\n`, or `stale\n` |
 | `edit <n>\n`, then an entry name | Socket | The same as `read`, and on `ok` or `missing` the connection waits for `save` |
-| `save <n>\n`, then store text holding the named entry or nothing | Socket, after `edit` on the same connection | `saved\n`, `changed\n`, or `refused\n` |
+| `save <n>\n`, then store text holding the named entry or nothing | Socket, after `edit` on the same connection | `saved\n` or `refused\n` |
 | `status\n` | Socket | `unlocked <deadline-unix>\n` |
 | `lock\n` | Socket | `ok\n`, then the agent writes its end note, removes its socket, and exits |
 
@@ -97,7 +97,7 @@ The agent never sends the vault key, and no message carries the passphrase. `sta
 
 ### 2.7 What session unlock exposes
 
-An agent trades a passphrase per command for a touch per request, and holds the vault key in memory between them, for up to 14 days. The touch keeps what the prompt guaranteed: no program can read or change an entry without a person at the Mac. What it loses is the knowledge factor. A person at your Mac, once past its own lock screen, can use the store with an enrolled finger or your watch, without knowing the passphrase, until the session ends. Because sessions start on their own, everyone who uses multipass on a Mac with Touch ID or a watch has such a session after each prompt, unless they set `MULTIPASS_NO_AGENT=1`.
+An agent trades a passphrase per command for a touch per request, and holds the vault key, and the retired keys from the key file, in memory between them, for up to 21 days. The touch keeps what the prompt guaranteed: no program can read or change an entry without a person at the Mac. What it loses is the knowledge factor. A person at your Mac, once past its own lock screen, can use the store with an enrolled finger or your watch, without knowing the passphrase, until the session ends. Because sessions start on their own, everyone who uses multipass on a Mac with Touch ID or a watch has such a session after each prompt, unless they set `MULTIPASS_NO_AGENT=1`.
 
 The agent protects the vault key in memory in four ways, all in `src/sys.rs`. `ptrace(PT_DENY_ATTACH)` refuses debuggers. `setrlimit(RLIMIT_CORE, 0)` means a crash leaves no core file. `mlock` keeps the key's page out of swap. And the agent overwrites the key with zeros before it exits. It also zeroes the decrypted store buffer it owns after each reply. Strings made while parsing are not wiped; the README's planned memory-wiping work covers those.
 
@@ -108,8 +108,8 @@ The agent protects the vault key in memory in four ways, all in `src/sys.rs`. `p
 | Malware running as you, reading | Must trojan the binary and wait for a prompt | The same as an AI agent, with one opening: it can send its request just before one of your own commands, so your touch approves its request. It then learns one entry, and the sheet named that entry, not the one you asked for. Your own command then asks a second time, which is a second sign. Declining ends the session. |
 | Malware running as you, writing | Cannot write a valid store without the passphrase | Needs a touch, with the same opening, and a stolen touch can silently change or delete one entry. The agent saves only the entry the sheet named, so the damage stops at that entry, and a sheet saying `change github.com` when you ran `get bank` is the sign. A backup brings the entry back. |
 | Malware running as you, posing as the agent | Nothing to pose as | Must run the `multipass` binary to pass the client's executable check, and that binary only ever holds a key a command handed it. A program that can replace the binary can already capture the passphrase at the next prompt, without an agent. |
-| A person at your Mac, past its lock screen | Needs the passphrase | Needs an enrolled finger or your watch, for up to 14 days |
-| Root, or a kernel exploit | Can read the passphrase from a command's memory while it runs | Can copy the vault key from the agent's memory at any time in the session, without a touch. The LocalAuthentication check runs inside the agent, so root can also skip it. The vault key opens every copy of the store written under it, here, in sync, and in backups, until the next rotation, at most 14 days later, or `multipass rekey` now. It does not reveal the passphrase. § 8's enclave mode narrows this. |
+| A person at your Mac, past its lock screen | Needs the passphrase | Needs an enrolled finger or your watch, for up to 21 days |
+| Root, or a kernel exploit | Can read the passphrase from a command's memory while it runs | Can copy the vault key from the agent's memory at any time in the session, without a touch. The LocalAuthentication check runs inside the agent, so root can also skip it. The vault key opens every copy of the store written under it, here, in sync, and in backups, until the next rotation, at most 21 days later, or `multipass rekey` now. It does not reveal the passphrase. § 8's enclave mode narrows this. |
 | A crash report or core dump | Could hold the passphrase from a running command | The agent leaves no core file |
 
 The README says this plainly, names `MULTIPASS_NO_AGENT=1` for anyone who wants a prompt every time, shows `multipass lock` for ending a session early, and says to run `multipass rekey` if the Mac may have been compromised.
@@ -134,11 +134,11 @@ Ending means the agent writes its end note, wipes the vault key, removes its soc
 
 | Trigger | How it happens |
 | --- | --- |
-| The vault key expires | A thread sleeps until the key's creation time plus 14 days, by the wall clock, so time asleep counts. Every Mac's agent ends at the same moment, so a session started on the key's thirteenth day lasts one day. The prompt that follows rotates the key. |
+| The vault key expires | A thread sleeps until the key's creation time plus 21 days, by the wall clock, so time asleep counts. Every Mac's agent for that key ends at the same moment. A session starts with at least 7 days left, because the prompt that starts it rotates a key 14 or more days old, and the prompt after expiry rotates too. |
 | A restart or logout | The agent is a process, so it ends with the login session and writes no note. Its socket file stays behind, which is how the next prompt knows to say `the session ended`. |
 | A declined request | § 2.8. |
 | `multipass lock` | § 2.4. |
-| A changed vault key | The vault key no longer opens the store (§ 2.2 step 3), after a rotation on another machine, by expiry, `passwd`, or `rekey`. |
+| A rotation elsewhere | The package holds a key file of another generation (§ 2.2 step 3), after a rotation on another Mac, by early rotation, expiry, `passwd`, or `rekey`. A Mac that prompted on the key's thirteenth day, and so did not rotate, loses its session when another Mac rotates on day 14 or later, possibly a day or two after its own prompt. That happens at most once per rotation, and the vault-key plan's § 2.5.1 says why it cannot be avoided: age requires an scrypt stanza to be a file's only stanza, so no file can be under both the old key and the new. |
 
 ### 2.10 Neighbors: passkeys and the clipboard
 
@@ -147,11 +147,12 @@ Ending means the agent writes its end note, wipes the vault key, removes its soc
 
 ### 2.11 Changes by file
 
-This table assumes the vault-key plan has shipped, and that pull request #9, which adds `--clip` and `src/clipboard.rs`, merged first.
+This table assumes the mergeable-store and vault-key plans have shipped, and that pull request #9, which adds `--clip` and `src/clipboard.rs`, merged first.
 
 | File | Change |
 | --- | --- |
-| `src/store.rs` | No new code. The agent decrypts with `Store::decrypt`, given the vault key's text, builds its one-entry replies with `Store::new`, `insert`, and `to_text`, and writes a changed store with `Store::save`. |
+| `src/store.rs` | No new code. The agent builds its one-entry replies with `Store::new`, `insert`, and `to_text`. |
+| `src/vault.rs` | No new code. The agent lists, merges, compacts, and saves the package through the functions the vault-key plan adds, given the keys it holds. |
 | `src/agent.rs` | New. The agent half: reads the start message from stdin, binds the socket, answers `read`, `list`, `edit` and `save`, `status`, and `lock` on a thread per connection, enforces the one-entry rule on `save`, ends the session as § 2.9 says, and writes the end note. It asks for approval through an `Approver` trait, which `touch_id::TouchId` implements and tests replace with a fake. The client half: `read`, `list`, `edit`, `status`, `lock`, `end_note`, and `start`, which spawns an agent and writes the start message. The socket path, the end note's path, and the directory check live here, shared by both halves. |
 | `src/touch_id.rs` | New `unsafe` module. Links `LocalAuthentication.framework`, and wraps `canEvaluatePolicy:error:`, `evaluatePolicy:localizedReason:reply:`, and `invalidate` in a safe `TouchId::available()` and `TouchId::approve(reason, timeout) -> Approval`, where `Approval` is `Approved`, `Denied`, or `Unavailable`. |
 | `src/objc.rs` | New `unsafe` module. The typed `objc_msgSend`, class, selector, and `NSString` helpers move here from `src/clipboard.rs`, so the clipboard and Touch ID share one copy, and it adds the global block that carries `evaluatePolicy`'s reply. |
@@ -202,10 +203,10 @@ This table assumes the vault-key plan has shipped, and that pull request #9, whi
 | With the lid closed, an external display, and no Apple Watch, `multipass get github.com` while unlocked | `get` asks for the passphrase, and the agent stays unlocked |
 | `pmset sleepnow` while unlocked, wake the Mac, then `multipass get github.com` | Only the sheet, no passphrase prompt |
 | Restart the Mac, then `multipass list` | Asks `Passphrase (the session ended): ` |
-| Two `multipass add` commands at once, each touched | One saves. The other fails with `the store changed while you were editing; run the command again`, and the store holds the first change. |
+| `multipass add x` and `multipass add y` at once, each touched | Both save. `multipass list` and a touch show both, and the package holds one store file again. |
 | `multipass rekey` while unlocked, then `multipass get github.com` | `rekey` asks for the passphrase. `get` asks only for a touch, so the fresh agent holds the new key. |
 | `multipass passwd` or `multipass rekey` on another machine, let both files sync, then `multipass get github.com` here and touch the sensor | Asks `Passphrase (the vault key changed): ` |
-| `multipass status` while unlocked, then `multipass lock`, `multipass lock`, `multipass status` | `unlocked until …` at the vault key's expiry, at most 14 days out, then `Locked`, then `Not unlocked`, then `locked: locked by multipass lock …` |
+| `multipass status` while unlocked, then `multipass lock`, `multipass lock`, `multipass status` | `unlocked until …` at the vault key's expiry, at least 7 and at most 21 days out, then `Locked`, then `Not unlocked`, then `locked: locked by multipass lock …` |
 | `chmod 755 ~/.multipass/agent`, then `multipass list` | Refuses to use the agent, names the directory, and asks for the passphrase |
 | `lldb -p <agent pid>` | Attaching fails |
 | `ps -o args= -p <agent pid>` | Shows `multipass --store <path> __agent` and nothing secret |
@@ -215,8 +216,9 @@ Tests that must fail before the change and pass after it:
 - **The start message** round-trips through its writer and reader, and the reader rejects a short key, a missing count, and trailing bytes. Catches a key that arrives truncated.
 - **The approval gate**, with a fake `Approver` that counts its calls and records each reason. Two `read`s call it twice, `read github.com` asks with `read github.com`, and `edit x` asks with `change x`. `Denied` sends `denied`, sends no store bytes, writes the end note, and the agent exits. `Unavailable` sends `unavailable` and the agent keeps serving. Catches an agent that sends text before approval, a grace period that slips in, a sheet that names the wrong entry, and a cancel that does not end the session.
 - **One entry per request.** With an approving fake and a store of three entries, `read b` returns only `b`, `list` returns the three names and no fields, and a `save` after `edit b` that also holds `c`, or holds `c` instead of `b`, gets `refused` and leaves the file unchanged. Catches an agent that hands over the whole store, and a stolen change that rewrites other entries.
-- **`edit` and `save`.** `save` with a new `b`, and with no entries, puts and removes `b`, and `Store::open` with the passphrase then reads the result. A store rewritten between `edit` and `save` gets `changed` and keeps the rewrite. A `save` with no `edit` before it on the connection is refused. Catches a lost update and a save that skips approval.
-- **The deadline**: the deadline a command passes to a new agent is the vault key's creation time plus 14 days, not the session's start, and an agent given a deadline in the past ends at once with `the vault key expired`. Catches a session that outlives its key, and one that a busy week keeps alive forever.
+- **`edit` and `save`.** `save` with a new `b`, and with no entries, puts `b` and leaves a tombstone for it, and `vault::open` with the passphrase then reads the result. A store file that another process writes between `edit` and `save` survives the save, and the next `read` merges it. A `save` with no `edit` before it on the connection is refused. Catches a save that deletes a file it did not read, and a save that skips approval.
+- **Another generation.** A key file of a new generation copied into the package makes the next `read` reply `stale` and end the session with `the vault key changed`. Catches an agent that keeps saving under a retired key.
+- **The deadline**: the deadline a command passes to a new agent is the vault key's creation time plus 21 days, not the session's start, and an agent given a deadline in the past ends at once with `the vault key expired`. Catches a session that outlives its key, and one that a busy week keeps alive forever.
 - **The end note and the prompt.** Each reason the agent writes turns into its prompt text. A socket with no agent behind it gives `the session ended`, and a missing note, or one with an unknown reason, gives `Passphrase: `. Catches a prompt that blames the wrong cause.
 - **The agent switches in `open`**, as a pure function of `MULTIPASS_NO_AGENT` and `SSH_CONNECTION`. Catches an opt-out that still starts an agent.
 - **`sys::wipe`** leaves a buffer all zeros. Catches a wipe the compiler optimizes away, which is why it uses volatile writes.
@@ -227,7 +229,7 @@ Tests that must fail before the change and pass after it:
 
 ## 5. Cost
 
-An approved request costs one touch, about a second of your time, plus one socket round trip, one file read, and scrypt at the vault-key plan's work factor 10, a few milliseconds in all. A change adds one encryption at the same work factor. Today's read costs typing the passphrase plus about 300 ms of scrypt. A command that prompts still runs the 300 ms once, on the key file, and starting the agent after it adds a process start and the agent's `canEvaluatePolicy` call, well under the 2 seconds the command waits. The agent idles in a sleeping thread between requests and holds a 43-character key.
+An approved request costs one touch, about a second of your time, plus one socket round trip, a directory listing, and scrypt at the vault-key plan's work factor 10 for each store file, normally one, a few milliseconds in all. A change adds one encryption at the same work factor. The agent decrypts the files on every request rather than caching them by name, which immutable files would allow, because a cache would keep plaintext in memory and the files cost a millisecond each. Today's read costs typing the passphrase plus about 300 ms of scrypt. A command that prompts still runs the 300 ms once, on the key file, and starting the agent after it adds a process start and the agent's `canEvaluatePolicy` call, well under the 2 seconds the command waits. The agent idles in a sleeping thread between requests and holds a key file's text, normally under 200 bytes.
 
 ## 6. Open questions
 
@@ -239,7 +241,7 @@ Decided: the vault key, from the [vault-key plan](../vault-key/readme.md), which
 
 ### 6.2 When it locks
 
-Decided: a session ends when the vault key expires, 14 days after the key was made, whatever time the session started, and the first prompt after that rotates the key (vault-key plan § 2.4). A restart ends it too, because the key is only in memory. There is no idle timeout and no locking on sleep or the screen lock, because the touch for every request is the guard. `multipass lock`, and declining or timing out an unexpected Touch ID sheet, end it too.
+Decided: a session ends when the vault key expires, 21 days after the key was made, whatever time the session started. Any passphrase prompt rotates a key 14 or more days old (vault-key plan § 2.5), so expiry never forces a prompt within 7 days of the last one on a Mac. A restart ends it too, because the key is only in memory. There is no idle timeout and no locking on sleep or the screen lock, because the touch for every request is the guard. `multipass lock`, and declining or timing out an unexpected Touch ID sheet, end it too.
 
 ### 6.3 Who may read the unlocked store
 

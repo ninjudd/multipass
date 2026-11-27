@@ -5,169 +5,194 @@ priority: now
 
 # Vault key
 
-The store becomes a package, a folder holding a key file and the store. The passphrase unlocks a random vault key in the key file, the vault key encrypts the store, and the vault key is replaced every 14 days and on every `passwd`.
+The store becomes a package of files that are never modified once written. The passphrase unlocks a random vault key, the vault key encrypts the store, every save adds a new file, and the vault key is replaced at least every 21 days and on every `passwd`.
+
+This project depends on the [mergeable store](../store-merge/readme.md), which ships first and supplies store format 3 and `Store::merge`.
 
 ## 1. Problem
 
-Today the passphrase encrypts the store directly. `Store::save` runs scrypt at work factor 18 on the passphrase, about 300 ms, and the age format requires a fresh salt and file key for every file. So every save needs the passphrase itself, and `passwd` re-encrypts the whole store.
+Today the passphrase encrypts the store directly, in one file that every save replaces. That causes three problems.
 
-That blocks session unlock, which `docs/projects/session-unlock` plans next. Its agent must save while you are not typing, and an agent that saves under today's design must hold the passphrase, which opens every copy of the store ever written under it. A key between the passphrase and the store lets the agent hold that key instead. Replacing that key on a schedule bounds how long a copied key stays useful, and gives every Mac one shared deadline for its session. Commands in this project still ask for the passphrase every time; only the layout and the keys change.
+- **Every save needs the passphrase.** `Store::save` runs scrypt at work factor 18, about 300 ms, and the age format requires a fresh salt and file key for every file. So session unlock, which comes next, would need an agent that holds the passphrase, which opens every copy of the store ever written under it.
+- **Sync can destroy changes.** When two Macs save before sync catches up, the sync service must reconcile two writes to the same file, and one is lost. So the README says to edit on one machine at a time.
+- **Changing keys makes that worse.** A design that replaced a key on a schedule would rewrite the key file and the store together. If another Mac saved under the old key before the new files arrived, the sync service could leave a store beside a key file that does not open it, and the store would be lost for good.
 
 ## 2. Solution
 
-A store becomes a package: a directory, `~/.multipass/store.multipass` by default, holding two ordinary age passphrase files. `key.age` is encrypted under your passphrase at work factor 18, as the store is today. It holds a random 256-bit vault key, written as base64 text, and the time the key was made. `store.age` is encrypted with that text as its passphrase, at work factor 10. A random 256-bit key needs no stretching, so scrypt stays there only because age's passphrase mode is what lets stock `age -d` open the file. Opening runs the slow scrypt once on `key.age`, then the fast one on `store.age`. Saving runs only the fast one, with a fresh salt and file key as the age format requires.
+A store becomes a package: a directory, `~/.multipass/store.multipass` by default, of ordinary age passphrase files that multipass writes once and never modifies. A key file, `key.<generation>.age`, is encrypted under your passphrase at work factor 18 and holds a random 256-bit vault key, the time it was made, and the keys it replaced in the last 90 days. A store file, `store.<generation>.<random>.age`, is encrypted with the vault key's text at work factor 10, and holds a whole store in format 3. Every save writes a new store file holding the merged store plus the change, then deletes the files it read. Opening decrypts every store file it has a key for and merges them, entry by entry, with `Store::merge`. A file another Mac writes at the same moment is never touched, survives, and is merged next time, so no sync service can lose a change, and edits on two Macs to different entries both survive.
 
-A vault key lasts 14 days. The first passphrase prompt after it expires, on whichever Mac comes first, rotates it: it makes a new vault key, re-encrypts `store.age`, and rewrites `key.age`, in an order a crash cannot break. `passwd` rotates too, so an old passphrase never leads to the current key, and `multipass rekey` rotates on demand. A store written by today's multipass keeps opening, and moves into a package at its first passphrase prompt. Stock `age -d` still recovers everything, in two steps.
+A vault key lives 21 days. Any passphrase prompt rotates it when it is 14 or more days old: it writes a new key file and a new store file under the new key, then deletes the old ones. `passwd` always rotates, and `multipass rekey` rotates on demand. So after you type the passphrase on a Mac, its key has at least 7 days left, and without restarts you type it about every 21 days. A store from today's multipass moves into a package at its first prompt, and stock `age -d` still recovers everything.
 
 ### 2.1 The package
 
 | Path | What it is | Encrypted under | Work factor | Plaintext |
 | --- | --- | --- | --- | --- |
 | `store.multipass/` | The package, named by `--store` or `MULTIPASS_STORE`, by default `~/.multipass/store.multipass`. A directory with mode 0700. | | | |
-| `store.multipass/key.age` | The key file | Your passphrase | 18 (`age::DEFAULT_WORK_FACTOR`) | `multipass-key 1`, then one or two lines of `key <vault key> <created>` |
-| `store.multipass/store.age` | The store, one file for every entry | The text of a vault key from `key.age` | 10 (new `age::VAULT_WORK_FACTOR`) | The store text, `multipass 2`, unchanged |
+| `key.<gen>.age` | A key file, normally the only one | Your passphrase | 18 (`age::DEFAULT_WORK_FACTOR`) | § 2.2 |
+| `store.<gen>.<random>.age` | A store file, normally the only one. `<gen>` names the key file whose key encrypts it. | The text of generation `<gen>`'s vault key | 10 (new `age::VAULT_WORK_FACTOR`) | A whole store, in format 3 |
+| `.<name>.tmp` | A file being written; every reader ignores it | | | |
 
-A vault key is 32 bytes from `crypto::random::fill`, encoded by `crypto::base64::encode` as 43 characters of unpadded base64. `<created>` is the Unix time it was made. The store's passphrase is those 43 characters as bytes, so multipass never decodes the key. `key.age` holds two `key` lines only while a rotation runs (§ 2.4).
+`<gen>` and `<random>` are each 16 random bytes from `crypto::random::fill`, written as 32 lower-case hex digits. They are random rather than derived from the key, so a file name reveals nothing about a key, and no code outside `src/crypto` computes anything from one. Every file is written under its `.tmp` name, flushed to disk, and renamed into place, and the directory is flushed after the rename, so a reader sees a whole file or none, and a file exists only once it is durable.
+
+Finder shows a directory as one item only when an installed app declares its extension as a package type. Until the passkeys plan's Mac app declares `.multipass`, Finder shows the package as an ordinary folder. That costs nothing: iCloud Drive, Dropbox, git, and Time Machine already sync, copy, and back up a folder as a unit, and multipass never needs Finder's view. The README tells you to move or copy the whole folder, never one file out of it.
+
+### 2.2 The key file
 
 ```text
 multipass-key 1
-key mXHnHUSvp+wCWtqvVrFcsN82rLveCB+L/s0F/V5yi9E 1764160000
+generation 3f9a1c2e8b7d4f6a0c5e9b1d2f3a4c5e
+created 1764160000
+key mXHnHUSvp+wCWtqvVrFcsN82rLveCB+L/s0F/V5yi9E
+retired 7c1e9a3b5d2f4e6a8c0b1d3f5a7c9e2b 1763000000 Qm9vYmFyYmF6cXV4Zm9vYmFyYmF6cXV4Zm9vYmFyYmE
 ```
 
-Finder shows a directory as one item only when an installed app declares its extension as a package type. Until the passkeys plan's Mac app declares `.multipass`, Finder shows `store.multipass` as an ordinary folder with two files in it. That costs nothing: iCloud Drive, Dropbox, git, and Time Machine already sync, copy, and back up a folder as a unit, and multipass never needs Finder's view. The README tells you to move or copy the whole folder, never one file out of it.
+| Line | Meaning |
+| --- | --- |
+| `generation` | This key's id, the `<gen>` in its file names |
+| `created` | When the key was made, in Unix seconds. The key expires 21 days later. |
+| `key` | The vault key: 32 random bytes as 43 characters of unpadded base64, from a constant-time `crypto::base64::encode`. Its text is the passphrase of this generation's store files, so multipass never decodes it. |
+| `retired` | An earlier generation's id, when it was retired, and its key. Kept for 90 days, so a store file that another Mac wrote under that key before it heard of the rotation can still be opened and merged. |
 
-### 2.2 How a store opens
+### 2.3 How a store opens at a passphrase prompt
 
-1. `open` asks for the passphrase and reads both files.
-2. It decrypts `key.age` with the passphrase. A wrong passphrase fails here with `wrong passphrase, or the store is damaged`, as today.
-3. It tries each `key` line, in order, as the passphrase of `store.age`. The first that opens it is the vault key. When the file held two lines, `open` finishes or undoes the interrupted rotation (§ 2.4).
-4. When no line opens `store.age`, `open` tries every other `.age` file in the package as a key file, because sync services leave conflict copies there, such as `key 2.age`. When one works, it uses that key and warns, naming the conflict copies. When none does, it fails with `key.age does not open store.age; if they are still syncing, try again shortly`, and names any conflict copies it found. It never deletes them, because multipass does not merge.
-5. When the vault key is 14 days old or older, `open` rotates it before the command runs (§ 2.4).
+1. `open` asks for the passphrase and lists the package. It ignores `.tmp` files and warns about any file that does not match `key.*.age` or `store.*.age`, without touching it. Names that match loosely, such as a sync service's `store.3f9a….age 2`, are not adopted.
+2. It decrypts every key file with the passphrase. The newest by `created`, with ties going to the larger `generation`, is current. Every key, current or retired, from every file it opened, goes into one set of known keys.
+3. A key file that does not open with this passphrase is probably from a `passwd` on another Mac that has not synced its successor. `open` says so, naming the file, and asks `Other passphrase (or Enter to skip): `. A key file it still cannot open is left alone, with a warning.
+4. It decrypts every store file whose generation it has a key for, and merges them with `Store::merge`. A store file with an unknown generation is left alone, with a warning. When it finds key files but no store file it can open, it fails with `the store is still syncing; try again shortly`. A file that disappears while it reads, because another Mac deleted it after merging it, makes it list the package again, up to three times.
+5. It rotates (§ 2.5) when the current key is 14 or more days old, when it opened more than one key file, or when the command is `passwd` or `rekey`.
+6. Otherwise, when it merged more than one store file, it compacts: it writes one new store file under the current key, holding the merged store, and then deletes the store files it read.
+7. The command runs on the merged store.
 
-### 2.3 How a save works
+A merge or a compaction deletes only files it read, and only after its own new file is durable. A file another Mac writes meanwhile was not read, so it survives. When a deletion reaches another Mac before the file that replaced it, that Mac briefly sees fewer entries, never wrong ones, and they come back when the newer file arrives, because a merge only adds what it finds.
 
-`Store::save` takes the vault key instead of the passphrase, and encrypts the store with it at work factor 10, with a fresh salt and file key, through the existing temporary file and rename inside the package. It never touches `key.age`. A save no longer needs the passphrase, which is what lets session unlock's agent save while you are not typing.
+### 2.4 How a save works
 
-### 2.4 Rotation
+1. The command, or session unlock's agent, merges every store file it can open, as § 2.3 steps 4 and 6 describe, using the keys it holds.
+2. It applies the change, stamped as the mergeable-store plan's § 2.2 describes.
+3. It writes the result as a new `store.<current gen>.<random>.age`, and then deletes the store files it read.
 
-Rotation replaces the vault key. One function does it, `vault::rotate(package, store, passphrase)`, and four things call it.
+No save modifies a file. Two Macs that save at the same moment each write their own new file, each delete only what they read, and the next open merges both. A save never needs the passphrase, only the current key.
 
-| Caller | When | Passphrase for the new `key.age` |
-| --- | --- | --- |
-| `open` | The current key is 14 days old or older | The one you just typed |
-| `passwd` | Every time | The new one |
-| `multipass rekey` | When you ask, for a suspected leak | The one you just typed |
-| `init` | Once, to make the first key | The new one |
+### 2.5 Rotation
 
-Each rotation makes a new vault key and writes three times, each through a temporary file and a rename. `init` has no old key, so it writes only `store.age` and then step 3.
+| Trigger | Passphrase for the new key file |
+| --- | --- |
+| A prompt finds the current key 14 or more days old | The one you just typed |
+| A prompt finds more than one key file | The one you just typed |
+| `passwd`, every time | The new one |
+| `multipass rekey`, for a suspected leak | The one you just typed |
+| `init`, to make the first key | The new one |
 
-1. `key.age` with two lines, the old key then the new, under the old passphrase.
-2. `store.age` under the new key.
-3. `key.age` with only the new key, under the passphrase the table names.
+A rotation runs four steps, each a durable write or delete:
 
-A crash at any point leaves files that open with the old passphrase, or after step 3 with the new one. Before step 2 the old key opens the store, and after it the new key does. `open` (§ 2.2 step 3) tries both lines, and when it finds two, it rewrites `key.age` with only the line that opened the store, since it has the passphrase in hand. A rotation that stopped before step 2 is then undone, and the next expired prompt, or the next `passwd` or `rekey`, does it again. A `passwd` that stopped before step 3 leaves the old passphrase in force, and says so when you run it again.
+1. Make a new vault key, and write `key.<new>.age` holding it, `created` now, and as `retired` lines every key in the known set that is under 90 days retired.
+2. Write `store.<new>.<random>.age` holding the merged store.
+3. Delete the store files it read.
+4. Delete the key files it opened, whose keys now live on as `retired` lines.
 
-#### 2.4.1 One deadline for every Mac
+A crash at any point leaves a package that opens. After step 1, the next prompt finds two key files, merges everything it can open with both, and rotates again. After step 2 or 3, the leftover files merge into the same content. A `passwd` cut short before step 4 leaves the old key file under the old passphrase, which § 2.3 step 3 handles.
 
-The creation time travels inside `key.age`, so every Mac that syncs the package sees the same expiry.
+#### 2.5.1 How Macs share the 21 days
 
-1. Your key expires on Monday. On Tuesday you type the passphrase on your laptop. The laptop rotates, and the new `key.age` and `store.age` sync.
-2. On Wednesday you type the passphrase on your desktop. It reads the new `key.age`, finds a key a day old, and does not rotate.
-3. A Mac where nobody types the passphrase for months rotates at its next prompt only if the key it reads then is expired. If another Mac rotated in the meantime and sync has delivered the files, the key is fresh, and it does not.
-4. A Mac that comes back online and prompts before sync delivers the newer files rotates from the stale ones. The two Macs then hold different keys, and the sync service keeps one version of each file and a conflict copy of the other. § 2.2 step 4 opens the store with whichever key matches and names the conflict copies. If `store.age` has a conflict copy too, the README's recovery steps open it with the other key, as they would any conflicting edit today.
+The key's `created` time travels in the key file, so every Mac that syncs the package sees the same expiry.
 
-So each Mac asks for the passphrase about once per 14 days, and usually only the first to ask rotates. Sync both files of the package, and edit on one machine at a time, as today.
+1. A key is made on day 0. You type the passphrase on your laptop on day 15. The key is 15 days old, so the laptop rotates, and the new files sync.
+2. On day 16 you type it on your desktop. The desktop finds a key a day old and does not rotate.
+3. If nobody types it for a month, the key expires on day 21, and the first prompt anywhere afterwards rotates.
+4. Two Macs that rotate before hearing of each other each write their own key file and store file. The next prompt on either finds two key files, merges every store file under both, and rotates once more into one generation. Nothing is lost, because neither Mac deleted a file it had not read.
+5. A Mac that saves under an old key after another Mac rotated writes a store file under the old generation. The next prompt opens it with the `retired` key in the new key file and merges it, for up to 90 days.
 
-### 2.5 Moving a store into a package
+One case cannot be avoided. Your desktop prompts on day 13, so it does not rotate, and its session holds the day-0 key. Your laptop prompts on day 15 and rotates. The desktop's session ends when it sees the new generation, two days after you last typed the passphrase there. It happens at most once per rotation. It cannot be avoided because age requires an scrypt stanza to be the only stanza in a file, so a store file cannot be encrypted under both the old key and the new one at once, and new files must use the new key for rotation to retire the old one.
 
-A store from before this project is a single `store.age` file encrypted under the passphrase. When `--store` or `MULTIPASS_STORE` names such a file, `open` asks for the passphrase, decrypts it, and moves it into a package beside it, named for it with `.multipass` in place of `.age`:
+### 2.6 Moving a store into a package
 
-1. It writes `key.age` and `store.age` into a new directory, `store.multipass.tmp`, with a fresh vault key.
-2. It renames that directory to `store.multipass`. The rename is atomic, so the package appears whole or not at all.
-3. It removes the old `store.age`, and prints `Moved <old file> into <package>` to stderr.
+A store from before this project is a single file encrypted under the passphrase. When `--store` or `MULTIPASS_STORE` names such a file, or neither is set and `~/.multipass/store.age` exists but `~/.multipass/store.multipass` does not, `open` asks for the passphrase and moves it:
 
-The default path follows the same steps: with no `--store` and no `MULTIPASS_STORE`, multipass uses `~/.multipass/store.multipass`, and when that does not exist but `~/.multipass/store.age` does, it moves that file. When `--store` or `MULTIPASS_STORE` still names the old file after the move, multipass opens the package beside it and prints `note: <old file> moved to <package>; update MULTIPASS_STORE or --store`. A crash before step 2 leaves a `.tmp` directory, which the next attempt removes and rebuilds. A crash before step 3 leaves both, and the package wins, with the old file removed at the next open.
+1. It builds the package in `<name>.multipass.tmp`, with a key file from `init`'s rotation and one store file holding the old store, read as format 3 with `modified 0`.
+2. It renames the directory to `<name>.multipass`, so the package appears whole or not at all.
+3. It removes the old file, and prints `Moved <old file> into <package>` to stderr.
 
-After the move, an older multipass cannot open the store, because it looks for a single file. The README says so.
+When `--store` or `MULTIPASS_STORE` still names the old file afterwards, multipass opens the package beside it and prints `note: <old file> moved to <package>; update MULTIPASS_STORE or --store`. A crash before step 2 leaves a `.tmp` directory, which the next attempt removes and rebuilds. A crash before step 3 leaves both, and the package wins, with the old file removed at the next open. An older multipass cannot open a package, and the README says so.
 
-### 2.6 Recovering the store with stock age
+### 2.7 Recovering the store with stock age
 
-The README's recovery section becomes two steps:
+Normally the package holds one key file and one store file:
 
 ```sh
-age -d ~/.multipass/store.multipass/key.age     # copy the text after "key ", up to the space
-age -d ~/.multipass/store.multipass/store.age   # paste that text at age's passphrase prompt
+cd ~/.multipass/store.multipass
+age -d key.*.age      # prints the key file; copy the text after "key "
+age -d store.*.age    # paste that text at age's passphrase prompt
 ```
 
-When `key.age` shows two `key` lines, an interrupted rotation left them, and one of the two opens the store.
+With several key files, decrypt each and use the one with the largest `created`. A store file's middle part names its generation, so `store.3f9a….age` opens with the `key` or `retired` line for generation `3f9a…`. With several store files, each holds a whole store, and for each entry the version with the largest `modified` is the current one.
 
-### 2.7 What the vault key exposes
+### 2.8 What the vault key exposes
 
 | Who | Today | With a vault key |
 | --- | --- | --- |
-| Someone with a copy of the package, guessing offline | Runs scrypt at work factor 18 for every guess at the passphrase | The same, on `key.age`. The store's key is random and 256 bits, so guessing it is hopeless despite its low work factor. |
-| Someone who learns the passphrase and has the files | Reads the store | The same, through `key.age` |
-| Someone who copies a vault key, for example from session unlock's agent | Not possible | Reads every copy of the store written under that key, here, in sync, and in backups. The next rotation retires it, so it opens no store written after that, at most 14 days later, or at once after `rekey`. The key does not reveal the passphrase. |
-| Someone with an old passphrase and an old copy of `key.age`, such as from a git history or a backup | After `passwd`, reads only copies of the store from before the change | The same. `passwd` rotates the vault key, so the old `key.age` yields a retired key that opens only copies of `store.age` from before the change. |
-| A future quantum computer | Nothing to attack: passphrase mode is symmetric | The same. Both files use only scrypt and ChaCha20-Poly1305. |
-| Someone who sees the synced files without decrypting them | Sees one file and when it changes | Sees two files, when they change, and so roughly when a rotation happened. The entry names, count, and sizes stay inside the one `store.age`. |
+| Someone with a copy of the package, guessing offline | Runs scrypt at work factor 18 for every guess at the passphrase | The same, on a key file. The store's key is random and 256 bits, so guessing it is hopeless despite its low work factor. |
+| Someone who learns the passphrase and has the files | Reads the store | The same, through a key file |
+| Someone who copies a vault key, for example from session unlock's agent | Not possible | Reads every store file written under that key, here, in sync, and in backups. The next rotation retires it, at most 21 days later, or at once after `rekey`, and it opens nothing written after that. It does not reveal the passphrase. |
+| Someone with an old passphrase and an old key file, such as from a git history or a backup | After `passwd`, reads only copies of the store from before the change | The same, because `passwd` rotates. The old key file's keys open only store files from before the change. |
+| Someone who watches the synced files | Sees one file and when it changes | Sees how many files there are and when each appears, so how often you save and roughly when keys rotate. A sync service sees this anyway. The entry names, count, and sizes stay inside each store file. |
+| A future quantum computer | Nothing to attack: passphrase mode is symmetric | The same. Every file uses only scrypt and ChaCha20-Poly1305. |
 
-### 2.8 Changes by file
+### 2.9 Changes by file
 
 | File | Change |
 | --- | --- |
 | `src/age.rs` | Adds `VAULT_WORK_FACTOR`, 10. `encrypt` and `decrypt` are unchanged, and `decrypt` already accepts work factors 1 to 22. |
-| `src/crypto/base64.rs` | `encode` stops indexing `ALPHABET` with the data, and maps each 6-bit value to its character with masked arithmetic, because it now encodes the vault key. The RFC 4648 tests stay and must still pass. `decode` keeps its `match`, because nothing secret passes through it here; the passkeys plan changes it too. |
-| `src/vault.rs` | New. `VaultKey`, which holds the 43-character text and its creation time and never prints the text in `Debug`; `VaultKey::generate`; reading and writing `key.age`'s text; `rotate`, with the steps in § 2.4; the conflict-copy search in § 2.2 step 4; and the move into a package in § 2.5. The key file's parsing treats the key as text, as `src/store.rs` treats secrets. |
-| `src/store.rs` | `Store::save(package, &VaultKey)` encrypts at `VAULT_WORK_FACTOR` into the package. New `Store::open(package, passphrase) -> (Store, VaultKey)` follows § 2.2, including rotation on expiry. `Store::load` goes, and its one caller moves to `Store::open`. `save` keeps writing a temporary file and renaming it, now inside the package. |
-| `src/main.rs` | The default store path becomes `~/.multipass/store.multipass`, and `--store` and `MULTIPASS_STORE` name a package, with the old-file handling in § 2.5. `open` returns the vault key in place of the passphrase, and every save passes it. `init` and `passwd` call `rotate`. Adds `rekey` to the commands and `USAGE`. |
-| `README.md` | The recovery section shows § 2.6. "Sync between machines" says to sync and move the whole package, and that each Mac asks for the passphrase about once per 14 days. "Why it is built this way" says the passphrase unlocks a random vault key that rotates every 14 days, and the store is still only passphrase-mode age. Documents the move into a package, `rekey`, and that older builds cannot open a package. |
-| `AGENTS.md` | "Keep the store readable by stock age" changes from one `age -d` to the two steps in § 2.6, and the hand check runs both. Adds `src/vault.rs` to the places that keep secrets as text. "Write the store atomically" covers `key.age`, the package's temporary directory, and the rotation order. |
+| `src/crypto/base64.rs` | `encode` stops indexing `ALPHABET` with the data, and maps each 6-bit value to its character with masked arithmetic, because it now encodes the vault key. `decode` keeps its `match`, because nothing secret passes through it here; the passkeys plan changes it too. |
+| `src/vault.rs` | New. `VaultKey` and `KeyFile`, whose `Debug` output shows no key text; generating keys and ids; reading and writing the key file's text; listing a package; `open`, `save`, `rotate`, and `compact`, with the steps in § 2.3 to § 2.5; and the move in § 2.6. It keeps keys as text, as `src/store.rs` treats secrets. |
+| `src/store.rs` | The single-file `Store::load` and `Store::save` go. `Store::encrypt` and `Store::decrypt` stay, and `src/vault.rs` calls them with a key's text at `VAULT_WORK_FACTOR`. The durable write, a temporary file then a flush, a rename, and a flush of the directory, moves to a shared `write_private_durable`, used for every file in the package. |
+| `src/main.rs` | The default store path becomes `~/.multipass/store.multipass`, and `--store` and `MULTIPASS_STORE` name a package, with the old-file handling in § 2.6. `open` calls `vault::open` and keeps the known keys for the save. `init` and `passwd` rotate. Adds `rekey`. |
+| `README.md` | The recovery section shows § 2.7. "Sync between machines" replaces "edit on one machine at a time" with "edits to different entries merge; the newer edit to the same entry wins", says to sync and move the whole package, and says each Mac asks for the passphrase at least 7 and at most 21 days apart. "Why it is built this way" says the passphrase unlocks a random vault key that rotates, and the files are still only passphrase-mode age. Documents the move, `rekey`, the 90-day limits, and that older builds cannot open a package. |
+| `AGENTS.md` | "Keep the store readable by stock age" changes to § 2.7's steps, and the hand check runs them. "Write the store atomically" becomes: never modify a file in the package; write each file once, durably, under a new name. Adds `src/vault.rs` to the places that keep secrets as text. |
 
 ## 3. Why this design
 
-- **Two stock age files, not a new format.** Wrapping the vault key in its own age file keeps every byte on disk readable by `age -d`, which AGENTS.md requires, and keeps multipass in passphrase mode with no public-key step. A custom wrapper inside one file would need its own parser and would break stock-age recovery.
-- **A package rather than two loose files.** The two files must travel together: a store without its key file opens for no one. A directory keeps them together through sync, backups, and moves, and gives conflict copies a place to land where multipass can find them. Naming it with `.multipass` lets the Mac app later make Finder show it as one item.
-- **One `store.age`, not a file per entry.** Files per entry would show anyone who sees the synced folder how many entries you have, how long each secret is, and when you change each one. A save that touches two entries could not be atomic, and recovery would mean decrypting every file by hand. One file hides all of that, as the store does today.
-- **The vault key as text.** age's passphrase mode takes a passphrase, so the store's passphrase is the key's base64 text. Using the text as it is means multipass never decodes the key, and `key.age` shows exactly what to paste into `age -d`.
-- **Work factor 10 for the store.** scrypt slows down guessing a weak passphrase. Nobody can guess a random 256-bit key, so stretching it buys nothing, and work factor 10, about a megabyte and a millisecond, keeps saves instant. The tests already use 10, and `age::decrypt` accepts it. The reference `age` crate sets no lower bound either.
-- **A 14-day key.** A key copied from memory should not stay useful forever, and session unlock needs a deadline every Mac agrees on. Putting the creation time in `key.age` does both: the key's age is the session's age on every Mac, and the rotation that ends it also retires the key. Rotating needs the passphrase, so it happens at the prompt that expiry causes anyway.
-- **`passwd` rotates.** Changing the passphrase because someone may know it must also lock them out of the current store, and with a vault key that means a new key. The cost is that other Macs' sessions end, which is rare and costs one prompt each.
-- **Two `key` lines during rotation.** Two files cannot be renamed together, so `key.age` holds both keys while the store changes over. Every crash point then leaves a key that opens the store, without a journal or a lock file. The passphrase changes only in the last step, so a `passwd` cut short leaves the old one working.
-- **The move happens at the first prompt.** The passphrase is in hand only at a prompt, and session unlock's agent needs a vault key from its first session. Building the package in a temporary directory and renaming it makes the move all or nothing.
-- **Its own plan, before session unlock.** It changes the on-disk layout, recovery, and sync advice, and it is worth having alone, for the 14-day key, `rekey`, and a `passwd` that locks out an old passphrase. Session unlock builds on it.
-- **Reuse.** Both files go through `age::encrypt` and `age::decrypt`, and every write goes through the temporary-file-and-rename route in `Store::save`, which `src/vault.rs` calls for `key.age` rather than repeating it. `init`, `passwd`, `rekey`, and expiry share one `rotate`.
+- **Files that are never modified.** Every sync service handles a new file well and a file changed on two machines badly. If no file is ever changed, there is nothing to reconcile: each Mac adds files and removes only files it has read, and the merge makes sense of whatever is there. That holds without relying on iCloud's, Dropbox's, or git's own conflict handling.
+- **A new file per save, rather than one file per Mac.** Files per Mac would still be rewritten in place, so a Mac's own saves could race each other's sync, and a Mac's identity would have to be stored and kept unique. A new name per save needs neither.
+- **One store per file, not one file per entry.** Files per entry would show anyone who sees the synced folder how many entries you have, how long each secret is, and when you change each one, and recovery would mean decrypting every file by hand. A whole store in each file hides all of that.
+- **Generations in file names, with random ids.** The name tells each reader which key opens a file without trying every key. A random id says nothing about the key, and needs no cryptography outside `src/crypto`.
+- **Retired keys carried forward for 90 days.** A Mac that saves under an old key before it hears of a rotation is normal with sync, so its file must stay openable. Carrying the old key inside the new key file, under the passphrase, keeps it openable without keeping the old key file, and drops it on the same schedule as tombstones.
+- **Key files are immutable too.** Rotation writes a new key file and deletes old ones only after their keys live on in it, so two Macs rotating at once produce two key files that the next prompt merges, never one overwriting the other.
+- **21 days, rotating from 14.** The key needs a deadline every Mac agrees on, so session unlock's sessions end together and a copied key goes stale. A restart already costs a prompt, and rotating early at any prompt in the last 7 days means expiry never forces a second prompt within 7 days of the last on that Mac.
+- **`passwd` rotates.** Changing the passphrase because someone may know it must lock them out of the current store, and that means a new key. The cost is that other Macs' sessions end, which is rare.
+- **The vault key as text, and work factor 10.** age's passphrase mode takes a passphrase, so a store file's passphrase is the key's base64 text, and multipass never decodes it. Nobody can guess a random 256-bit key, so stretching it buys nothing, and work factor 10, about a millisecond, keeps saves and merges fast. scrypt stays only because passphrase mode is what stock `age -d` opens. `age::decrypt` and the reference `age` crate both accept it.
+- **A package.** The files must travel together: a store file without its key file opens for no one. A directory keeps them together through sync, backups, and moves, and gives multipass one place to list. Naming it `.multipass` lets the Mac app later make Finder show it as one item.
+- **Reuse.** Every file goes through `age::encrypt` and `age::decrypt`, every merge through `Store::merge`, and every write through one `write_private_durable`. `init`, `passwd`, `rekey`, expiry, and reconciling two key files share one `rotate`.
 
 ## 4. Acceptance criteria
 
 | Do | Expect |
 | --- | --- |
-| `multipass init`, then `ls -la ~/.multipass/store.multipass` | The directory has mode 0700 and holds `key.age` and `store.age`, both mode 0600 |
-| `age -d` on `key.age` with the passphrase, then `age -d` on `store.age` with the key text | The first prints `multipass-key 1` and one `key` line with a creation time, the second prints `multipass 2` and the entries. Run with both the reference Go `age` and the `age` crate. |
-| `multipass add x`, then `age -d` on `store.age` with the vault key | The store holds `x`, and `key.age`'s bytes did not change |
-| `multipass passwd`, then `multipass list` with the new passphrase | Lists the entries. `key.age` holds a different key line, and the old key no longer opens `store.age`. |
-| `multipass rekey`, then `multipass list` | Lists the entries, and the key line has changed |
+| `multipass init`, then `ls -la ~/.multipass/store.multipass` | Mode 0700, holding one `key.<gen>.age` and one `store.<gen>.<random>.age` with the same `<gen>`, both mode 0600 |
+| § 2.7's steps with both the reference Go `age` and the `age` crate | The key file prints `multipass-key 1`, `generation`, `created`, and `key`, and the store file prints `multipass 3` and the entries |
+| `multipass add x`, then `ls` the package | A different store file name than before, still one store file, and the same key file |
+| `multipass passwd`, then `multipass list` with the new passphrase | Lists the entries. The key file has a new generation, its `retired` line names the old one, and the old passphrase opens nothing in the package. |
+| Copy a package to a second directory. `multipass --store a add x` and `multipass --store b add y`. Copy each new store file into the other directory, then `multipass --store a list` | Lists both `x` and `y`, and `a` holds one store file again |
+| As above, but `b` runs `multipass rekey` before `add y` | `a` finds two key files, lists both entries, and ends with one key file of a newer generation |
+| As above, but `a` runs `rm x` and `b` edits `x` later | The later of the two changes wins |
 | Point `MULTIPASS_STORE` at a single-file store written by today's multipass, then `multipass list` | Asks for the passphrase, lists the entries, prints `Moved …`, and a package sits where the file was. A second `multipass list` prints the `note: … update MULTIPASS_STORE` line. |
-| Sync a package between two machines, run `multipass rekey` on one, let both files sync, then `multipass list` on the other | Opens with the new key and leaves `key.age` unchanged. The 14-day expiry itself is covered by the tests below, since nobody waits two weeks by hand. |
-| `multipass list` on a package whose two files do not match | Fails with `key.age does not open store.age; if they are still syncing, try again shortly` |
-| Put a conflict copy of `key.age`, holding the matching key, beside a mismatched `key.age`, then `multipass list` | Lists the entries and warns, naming the conflict copy |
+| A package holding a key file but no store file | Fails with `the store is still syncing; try again shortly` |
 
-Tests that must fail before the change and pass after it:
+Tests that must fail before the change and pass after it. A test harness simulates sync with two package directories and a copier that applies one directory's new files and deletions to the other, in every interleaving of the steps below:
 
-- **Expiry rotates once.** A key made 14 days ago rotates at `open`, and a key made 13 days ago does not. After the rotation, `open` with the same passphrase finds a fresh key and does not rotate again. Catches a rotation that never happens, and one that happens on every prompt.
-- **Rotation survives a crash at each step.** A test runs the steps in § 2.4 one at a time in a temporary directory, for `rekey` and for `passwd`, stops after each, and opens the store. Every stop opens with the old passphrase, or after step 3 with the new one, and the entries match. Catches a write order that leaves the two files disagreeing, and a `passwd` cut short that strands you between passphrases.
-- **Opening tries each key line**, and afterwards `key.age` holds only the line that opened the store. Catches a rotation that crashed between steps and left the store unopenable.
-- **Conflict copies.** A package whose `key.age` does not match, with a `key 2.age` that does, opens and names `key 2.age`, and the copy is still there afterwards. Catches a sync conflict that locks you out, and a cleanup that deletes a version.
-- **`passwd` retires the old key.** After `passwd`, the old passphrase on a saved copy of the old `key.age` yields a key that does not open the new `store.age`. Catches a `passwd` that keeps the vault key.
-- **The move into a package**, and a move cut short. A single-file store opens and leaves a package and no old file. A leftover `.tmp` directory is rebuilt, and an old file left beside a finished package is removed. Catches a crash in the move that loses the store.
-- **Path handling**: no setting gives `~/.multipass/store.multipass`; a `--store` naming an old `.age` file that has moved opens the `.multipass` beside it; a `--store` naming any directory opens it as a package. Catches a store that lands somewhere sync does not carry.
-- **`base64::encode` still matches RFC 4648** after the masked rewrite, for every byte value. Catches a masked mapping that is off at a range boundary, such as 25 to 26 or 61 to 62.
-- **`VaultKey`'s `Debug` output** holds no key text. Catches a key that reaches an error message.
+- **Two saves at once.** A adds `x` and B adds `y`, in every copy order. Both survive, and after one more open on each side both directories hold the same single store file content. Catches a save that deletes a file it did not read.
+- **Edit against removal.** A edits `x` and B removes it, with B's stamp later, in every copy order. `x` is gone on both. Catches a tombstone lost in a copy.
+- **Rotation against an old-key save.** A rotates while B saves under the old key, in every order. B's change survives on both, opened through A's `retired` line. Catches the lost-store hazard in § 1.
+- **Two offline rotations.** A and B each rotate, then copy. The next prompt merges both generations, rotates once, and leaves one key file. Catches a key file that orphans another's store.
+- **Crash points.** A rotation, a compaction, and a move into a package, each stopped after every step, open with every entry intact. A `passwd` stopped before its last step opens with the old passphrase. Catches a step order that loses data.
+- **Expiry boundaries.** A prompt with the key 13 days 23 hours old does not rotate, and at 14 days it does. An agent deadline is `created` plus 21 days. After a rotation, the next prompt does not rotate again. Catches early rotation that never fires, and rotation on every prompt.
+- **Retired keys expire.** A store file under a generation retired 91 days ago is left alone with a warning; at 89 days it is merged. Catches a key kept forever, and one dropped too soon.
+- **Foreign names.** A file named `store.<gen>.<random>.age 2` is warned about and left in place, and a `.tmp` file is ignored. Catches adopting a sync service's half-copied file.
+- **`base64::encode`** still matches RFC 4648 after the masked rewrite, for every byte value, and `KeyFile`'s `Debug` output holds no key text.
 
 ## 5. Cost
 
-Opening runs scrypt at work factor 18 once, on `key.age`, the same 300 ms as today, plus a millisecond at work factor 10 for the store. A save drops from 300 ms to about a millisecond. A rotation adds two writes of `key.age` at work factor 18, about 600 ms, once every 14 days, and on `passwd` and `rekey`. The move into a package happens once per store.
+Opening at a prompt runs scrypt at work factor 18 once per key file, normally one, about 300 ms as today, plus about a millisecond per store file at work factor 10. With compaction at every save and every prompt, a package normally holds one key file and one store file, and briefly one more store file per Mac that saved since the last merge. Below 16 files, an open stays well under half a second; beyond that it still works, a millisecond per store file. A save writes one file and deletes one or two. A rotation adds one key file write at work factor 18, about 300 ms, once in 7 to 21 days.
 
 ## 6. Open questions
 
-None. Every decision here is the user's: the package, one `store.age` inside it, the low work factor for the store, the 14-day key, rotation on `passwd`, and `rekey`.
+None. Every decision here is the user's: the package, files that are never modified, one store per file, the 21-day key rotating from 14 days, rotation on `passwd`, and `rekey`.
