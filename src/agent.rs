@@ -1091,7 +1091,16 @@ mod tests {
         let root = temp("other-exe");
         let copy = root.join("copy-of-tests");
         fs::copy(std::env::current_exe().unwrap(), &copy).unwrap();
-        let mut child = Command::new(&copy)
+        /// Kills the helper however the test ends, so a failed test never
+        /// leaves it serving an agent that approves every request.
+        struct KillOnDrop(std::process::Child);
+        impl Drop for KillOnDrop {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let child = Command::new(&copy)
             .args([
                 "--exact",
                 "agent::tests::serve_for_another_executable",
@@ -1102,6 +1111,7 @@ mod tests {
             .stderr(Stdio::null())
             .spawn()
             .unwrap();
+        let child = KillOnDrop(child);
         let serving = root.join("serving");
         for _ in 0..1000 {
             if serving.exists() {
@@ -1115,8 +1125,7 @@ mod tests {
         let reached = connect(&paths, Peer::SameUser)
             .ok()
             .and_then(Client::status);
-        let _ = child.kill();
-        let _ = child.wait();
+        drop(child);
         assert!(matches!(refused, Err(Tried::Updated)));
         assert_eq!(reached, Some(deadline));
         fs::remove_dir_all(&root).unwrap();
