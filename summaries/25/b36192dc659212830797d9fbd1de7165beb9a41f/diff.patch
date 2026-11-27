@@ -1,0 +1,763 @@
+diff --git a/README.md b/README.md
+index 4eed516..0403b48 100644
+--- a/README.md
++++ b/README.md
+@@ -78,6 +78,7 @@ multipass: PIN, 6 digits: 19.9 bits -- weak for a password you cannot rate-limit
+ | `--symbols <chars>` | all 32 ASCII punctuation characters | The symbols to use, for a site that accepts only some. |
+ | `--exclude <chars>` | | Characters never to use. |
+ | `--no-lookalikes` | | Leaves out `0`, `O`, `o`, `1`, `l`, `I`, and `\|`. |
++| `--rules <rules>` | | A site's password rules, as below. |
+ | `--words [<n>]` | `5`, or `6` with `--syllables` | Memorable words instead, from 3 to 15, drawn from the EFF's large word list of 7,776 words. |
+ | `--separator <sep>` | `hyphen` | With `--words`: `hyphen`, `space`, `period`, `comma`, `underscore`, `digit`, or `digit-or-symbol`. The last two draw a new character for each gap. |
+ | `--capitalize <how>` | `none` | With `--words`: `first` capitalizes every word, and `one` capitalizes one word chosen at random. |
+@@ -86,6 +87,15 @@ multipass: PIN, 6 digits: 19.9 bits -- weak for a password you cannot rate-limit
+ 
+ Every character, word, and separator is drawn from `/dev/urandom` without bias, and the strength line counts exactly the passwords that meet the options. A password under 64 bits gets a warning: that is too weak to survive an attacker who can guess offline, though a PIN that a bank's servers rate-limit is still fine.
+ 
++When a site limits what a password may hold, give its rules with `--rules`, in the format Apple defined for the `passwordrules` HTML attribute. Apple's [password-manager-resources](https://github.com/apple/password-manager-resources) repository records such rules for many sites in `quirks/password-rules.json`, so you can often copy a site's line from there:
++
++```console
++$ multipass add bank.example --generate --rules 'minlength: 8; maxlength: 16; required: lower; required: upper; required: digit; allowed: [-!#$]; max-consecutive: 2;'
++multipass: random characters, 16 from 66, with rules: 96.6 bits
++```
++
++Each `required` rule needs a character from one of the classes it names, so `required: lower, upper` is met by a letter of either case, and `required: lower; required: upper` needs one of each. `allowed` adds characters the password may hold; `minlength`, `maxlength`, and `max-consecutive` bound the length and how often one character repeats in a row. The classes are `upper`, `lower`, `digit`, `special`, `ascii-printable`, and a custom set in brackets such as `[-!#$]`, where a `-` must come first and a `]` is written `]]` at the end. With no class named, any printable character may appear. multipass never draws a space, even where `special` or `ascii-printable` allows one, and refuses `unicode`, `max-repeating`, and `max-sequential`. `--rules` replaces `--no-uppercase`, `--no-lowercase`, `--no-digits`, `--no-symbols`, and `--symbols`, while `--exclude`, `--no-lookalikes`, and `--length` still apply, with the length moved inside the rules' bounds.
++
+ ## Keep one-time passwords
+ 
+ An entry can hold a one-time password setup key beside its secret, username, and notes, and `otp` prints the entry's current code. When a site shows a QR code for an authenticator app, it usually offers the setup key as text too: either a base32 key such as `JBSW Y3DP EHPK 3PXP`, or an `otpauth://totp/` URI.
+diff --git a/docs/projects/password-generation/readme.md b/docs/projects/password-generation/readme.md
+index 4560ed2..917ac86 100644
+--- a/docs/projects/password-generation/readme.md
++++ b/docs/projects/password-generation/readme.md
+@@ -84,7 +84,17 @@ multipass: random characters, 16 from 66, with rules: 96.6 bits
+ | `minlength`, `maxlength` | The length is `--length` when it fits, and otherwise the nearest bound. |
+ | `max-consecutive: <n>` | No character repeats more than `n` times in a row. |
+ 
+-The classes are `upper`, `lower`, `digit`, `special` (ASCII punctuation), `ascii-printable`, and a custom set in brackets such as `[-!#$]`. `unicode` is refused, because multipass draws only ASCII. The rules replace the character-set options, so `--rules` with `--no-digits` or `--symbols` is an error. `--exclude` and `--no-lookalikes` still apply on top. Parsing the rules happens in `src/generate_rules.rs`, outside `src/crypto`, because the rules are public text and parsing them branches on every byte.
++The classes are `upper`, `lower`, `digit`, `special` (ASCII punctuation and the space), `ascii-printable` (the space through `~`), and a custom set in brackets such as `[-!#$]`. `unicode` is refused, because multipass draws only ASCII. The rules replace the character-set options, so `--rules` with `--no-digits` or `--symbols` is an error. `--exclude` and `--no-lookalikes` still apply on top. Parsing the rules happens in `src/generate_rules.rs`, outside `src/crypto`, because the rules are public text and parsing them branches on every byte.
++
++`src/generate_rules.rs` follows Apple's own parser, `tools/PasswordRulesParser/PasswordRulesParser.js` in `password-manager-resources`, read in November 2026:
++
++- **What the password may hold.** The allowed characters are the union of every `required` and `allowed` class, or every printable character when the rules name no class. multipass never draws the space, even where a class allows it, because a space at either end of a password is easy to lose when it is pasted.
++- **Repeated rules.** The largest `minlength` wins, and the smallest `maxlength` and `max-consecutive`. Each `required` rule is its own requirement, and a rule with an empty value is ignored.
++- **Custom classes.** A `-` may appear only first, and a literal `]` is written `]]` at the end of a class. Class names ignore case.
++- **What Apple skips, multipass refuses.** Apple's parser drops a `-` that is not first, an unknown class, or an unknown property with a console warning. multipass stops with an error naming it, because a silently dropped character changes what the password may hold.
++- **Newer properties.** Apple's parser also reads `max-repeating` and `max-sequential`. Their meaning is not written down where this plan could check it, so multipass refuses them by name.
++- **Overlapping classes.** When required classes share characters, such as `required: upper; required: [-A]`, the recipe splits the allowed characters into disjoint cells by which requirements each meets, so the count in § 2.5 stays exact. At most 8 `required` rules are accepted, because the count tracks every subset of them.
++- **Length.** The length is `--length`, or 20, moved inside the rules' bounds and within multipass's own 4 to 128.
+ 
+ ### 2.4 Word lists
+ 
+diff --git a/src/generate_rules.rs b/src/generate_rules.rs
+new file mode 100644
+index 0000000..2308200
+--- /dev/null
++++ b/src/generate_rules.rs
+@@ -0,0 +1,328 @@
++//! Parsing a site's password rules, written in the language Apple defined for
++//! the `passwordrules` HTML attribute, such as
++//! `minlength: 8; required: digit; allowed: lower, [-!#$];`.
++//!
++//! The rules are public text, so this module branches on every byte freely.
++//! It follows Apple's parser in `password-manager-resources`
++//! (`tools/PasswordRulesParser/PasswordRulesParser.js`) except where that
++//! parser skips input it cannot read: here, anything it would skip is an
++//! error, because a silently dropped character would change what the
++//! password may hold.
++
++use crate::crypto::generate::{DIGITS, LOWERCASE, SYMBOLS, UPPERCASE};
++
++/// The rules a site states, combined as Apple's parser combines them.
++#[derive(Debug, Default, PartialEq)]
++pub struct Rules {
++    /// One set per `required` rule: the password needs a character from
++    /// each.
++    pub required: Vec<Vec<u8>>,
++    /// Every character the password may hold, in ASCII order.
++    pub allowed: Vec<u8>,
++    pub min_length: Option<usize>,
++    pub max_length: Option<usize>,
++    pub max_consecutive: Option<usize>,
++}
++
++pub fn parse(text: &str) -> Result<Rules, String> {
++    if !text.is_ascii() {
++        return Err("password rules must be ASCII".into());
++    }
++    let mut rules = Rules::default();
++    let mut allowed = [false; 128];
++    let mut any_class = false;
++    for statement in statements(text)? {
++        let statement = statement.trim_matches(is_space);
++        if statement.is_empty() {
++            continue;
++        }
++        let (name, value) = statement
++            .split_once(':')
++            .ok_or_else(|| format!("password rule {statement:?} needs a colon after its name"))?;
++        let value = value.trim_matches(is_space);
++        // An empty value is ignored, as Apple's parser ignores it.
++        if value.is_empty() {
++            continue;
++        }
++        match name.trim_matches(is_space) {
++            "required" => {
++                let set = classes(value)?;
++                for &b in &set {
++                    allowed[b as usize] = true;
++                }
++                rules.required.push(set);
++                any_class = true;
++            }
++            "allowed" => {
++                for b in classes(value)? {
++                    allowed[b as usize] = true;
++                }
++                any_class = true;
++            }
++            "minlength" => {
++                let n = integer(name, value)?;
++                rules.min_length = Some(rules.min_length.map_or(n, |m| m.max(n)));
++            }
++            "maxlength" => {
++                let n = integer(name, value)?;
++                rules.max_length = Some(rules.max_length.map_or(n, |m| m.min(n)));
++            }
++            "max-consecutive" => {
++                let n = integer(name, value)?;
++                if n == 0 {
++                    return Err("max-consecutive must be at least 1".into());
++                }
++                rules.max_consecutive = Some(rules.max_consecutive.map_or(n, |m| m.min(n)));
++            }
++            "max-repeating" | "max-sequential" => {
++                return Err(format!(
++                    "multipass does not support the {name} password rule"
++                ));
++            }
++            other => return Err(format!("unknown password rule {other}")),
++        }
++    }
++    if !any_class {
++        for b in printable() {
++            allowed[b as usize] = true;
++        }
++    }
++    rules.allowed = (0..128u8).filter(|&b| allowed[b as usize]).collect();
++    Ok(rules)
++}
++
++fn is_space(c: char) -> bool {
++    matches!(c, ' ' | '\t' | '\n' | '\r' | '\x0c')
++}
++
++/// Splits the text at each `;` that is outside a custom class.
++fn statements(text: &str) -> Result<Vec<&str>, String> {
++    let bytes = text.as_bytes();
++    let mut out = Vec::new();
++    let mut start = 0;
++    let mut i = 0;
++    while i < bytes.len() {
++        match bytes[i] {
++            b'[' => i = class_end(bytes, i)?,
++            b';' => {
++                out.push(&text[start..i]);
++                start = i + 1;
++                i += 1;
++            }
++            _ => i += 1,
++        }
++    }
++    out.push(&text[start..]);
++    Ok(out)
++}
++
++/// The index just past the custom class that opens at `open`. The class ends
++/// at the first `]` followed by the end of the text, a space, a comma, or a
++/// semicolon, so a literal `]` is written as `]]` at the end of a class.
++fn class_end(bytes: &[u8], open: usize) -> Result<usize, String> {
++    let mut i = open + 1;
++    while i < bytes.len() {
++        let ends = bytes[i] == b']'
++            && bytes
++                .get(i + 1)
++                .is_none_or(|&next| is_space(next as char) || next == b',' || next == b';');
++        if ends {
++            return Ok(i + 1);
++        }
++        i += 1;
++    }
++    Err("a character class in the password rules has no closing ]".into())
++}
++
++/// The characters a `required` or `allowed` value names, in ASCII order.
++fn classes(value: &str) -> Result<Vec<u8>, String> {
++    let mut set = [false; 128];
++    let bytes = value.as_bytes();
++    let mut i = 0;
++    loop {
++        while i < bytes.len() && is_space(bytes[i] as char) {
++            i += 1;
++        }
++        if i >= bytes.len() {
++            return Err(format!("password rule value {value:?} ends with a comma"));
++        }
++        if bytes[i] == b'[' {
++            let end = class_end(bytes, i)?;
++            let inner = &bytes[i + 1..end - 1];
++            for (k, &b) in inner.iter().enumerate() {
++                if !(b' '..=b'~').contains(&b) {
++                    return Err("a character class may hold only printable ASCII".into());
++                }
++                if b == b'-' && k > 0 {
++                    return Err(format!(
++                        "a - in the class [{}] must come first",
++                        String::from_utf8_lossy(inner)
++                    ));
++                }
++                set[b as usize] = true;
++            }
++            i = end;
++        } else {
++            let start = i;
++            while i < bytes.len() && (bytes[i].is_ascii_alphabetic() || bytes[i] == b'-') {
++                i += 1;
++            }
++            let name = value[start..i].to_ascii_lowercase();
++            let chars: Vec<u8> = match name.as_str() {
++                "upper" => UPPERCASE.to_vec(),
++                "lower" => LOWERCASE.to_vec(),
++                "digit" => DIGITS.to_vec(),
++                "special" => [b" ", SYMBOLS].concat(),
++                "ascii-printable" => printable().collect(),
++                "unicode" => {
++                    return Err(
++                        "multipass draws only ASCII, so it cannot follow the unicode class".into(),
++                    );
++                }
++                "" => {
++                    return Err(format!(
++                        "password rule value {value:?} has something other than a class at {:?}",
++                        &value[start..]
++                    ));
++                }
++                other => return Err(format!("unknown character class {other}")),
++            };
++            for b in chars {
++                set[b as usize] = true;
++            }
++        }
++        while i < bytes.len() && is_space(bytes[i] as char) {
++            i += 1;
++        }
++        match bytes.get(i) {
++            None => break,
++            Some(b',') => i += 1,
++            Some(_) => {
++                return Err(format!(
++                    "password rule value {value:?} needs a comma between classes"
++                ));
++            }
++        }
++    }
++    Ok((0..128u8).filter(|&b| set[b as usize]).collect())
++}
++
++/// Every printable ASCII character, from the space to `~`.
++fn printable() -> impl Iterator<Item = u8> {
++    b' '..=b'~'
++}
++
++fn integer(name: &str, value: &str) -> Result<usize, String> {
++    if !value.bytes().all(|b| b.is_ascii_digit()) {
++        return Err(format!("{name} needs a whole number, not {value}"));
++    }
++    value
++        .parse()
++        .map_err(|_| format!("{name} is too large: {value}"))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn parses_the_plans_example() {
++        let rules = parse(
++            "minlength: 8; maxlength: 16; required: lower; required: upper; required: digit; allowed: [-!#$]; max-consecutive: 2;",
++        )
++        .unwrap();
++        assert_eq!(
++            rules.required,
++            vec![LOWERCASE.to_vec(), UPPERCASE.to_vec(), DIGITS.to_vec()]
++        );
++        assert_eq!(rules.allowed.len(), 66);
++        assert!(b"-!#$".iter().all(|b| rules.allowed.contains(b)));
++        assert_eq!(rules.min_length, Some(8));
++        assert_eq!(rules.max_length, Some(16));
++        assert_eq!(rules.max_consecutive, Some(2));
++    }
++
++    #[test]
++    fn parses_apples_examples() {
++        // Rules from Apple's documentation and its quirks list.
++        let rules = parse("required: upper; required: digit; allowed: [-().&@?'#,/\"+];").unwrap();
++        assert_eq!(rules.required.len(), 2);
++        assert_eq!(rules.allowed.len(), 26 + 10 + 13);
++        let rules = parse(
++            "minlength: 6; maxlength: 15; required: lower, upper; required: digit; allowed: [-_]",
++        )
++        .unwrap();
++        // One requirement satisfied by either case.
++        assert_eq!(rules.required[0], [UPPERCASE, LOWERCASE].concat());
++        assert!(rules.allowed.contains(&b'_'));
++    }
++
++    #[test]
++    fn defaults_to_every_printable_character() {
++        let rules = parse("minlength: 12;").unwrap();
++        assert_eq!(rules.allowed, (b' '..=b'~').collect::<Vec<u8>>());
++        assert!(rules.required.is_empty());
++    }
++
++    #[test]
++    fn combines_repeated_rules_as_apple_does() {
++        let rules =
++            parse("minlength: 8; minlength: 10; maxlength: 20; maxlength: 16; max-consecutive: 3; max-consecutive: 2").unwrap();
++        assert_eq!(rules.min_length, Some(10));
++        assert_eq!(rules.max_length, Some(16));
++        assert_eq!(rules.max_consecutive, Some(2));
++    }
++
++    #[test]
++    fn reads_custom_classes() {
++        // A semicolon inside a class does not end the rule, and a literal ]
++        // is written ]] at the end.
++        let rules = parse("allowed: [;a]; required: [-]]").unwrap();
++        assert_eq!(rules.allowed, b"-;]a".to_vec());
++        assert_eq!(rules.required, vec![b"-]".to_vec()]);
++        // Identifiers ignore case, and an empty value is ignored.
++        assert_eq!(
++            parse("required: DIGIT; allowed: ;").unwrap().allowed,
++            DIGITS.to_vec()
++        );
++    }
++
++    #[test]
++    fn refuses_what_apple_would_skip() {
++        let err = |text: &str| parse(text).unwrap_err();
++        assert_eq!(
++            err("required: unicode;"),
++            "multipass draws only ASCII, so it cannot follow the unicode class"
++        );
++        assert_eq!(err("must-have: digit"), "unknown password rule must-have");
++        assert_eq!(err("required: digits"), "unknown character class digits");
++        assert_eq!(
++            err("allowed: [a-z]"),
++            "a - in the class [a-z] must come first"
++        );
++        assert_eq!(
++            err("minlength: eight"),
++            "minlength needs a whole number, not eight"
++        );
++        assert_eq!(
++            err("allowed: [abc"),
++            "a character class in the password rules has no closing ]"
++        );
++        assert_eq!(
++            err("required digit"),
++            "password rule \"required digit\" needs a colon after its name"
++        );
++        assert_eq!(
++            err("max-repeating: 2"),
++            "multipass does not support the max-repeating password rule"
++        );
++        assert_eq!(
++            err("max-consecutive: 0"),
++            "max-consecutive must be at least 1"
++        );
++        assert_eq!(
++            err("required: upper lower"),
++            "password rule value \"upper lower\" needs a comma between classes"
++        );
++    }
++}
+diff --git a/src/generator.rs b/src/generator.rs
+index 654fbb4..218982f 100644
+--- a/src/generator.rs
++++ b/src/generator.rs
+@@ -6,6 +6,7 @@ use crate::crypto::generate::{
+     self, Capitalize, Cell, Chars, DIGITS, LOWERCASE, Recipe, SYMBOLS, Separator, UPPERCASE,
+     WordList, Words,
+ };
++use crate::generate_rules;
+ 
+ /// Characters that are easy to misread for one another.
+ const LOOKALIKES: &[u8] = b"0Oo1lI|";
+@@ -28,6 +29,7 @@ pub struct Options {
+     pub symbols: Option<String>,
+     pub exclude: Option<String>,
+     pub no_lookalikes: bool,
++    pub rules: Option<String>,
+     /// `Some(None)` for `--words` without a count.
+     pub words: Option<Option<usize>>,
+     pub separator: Option<String>,
+@@ -53,6 +55,7 @@ impl Options {
+             (self.symbols.is_some(), "--symbols"),
+             (self.exclude.is_some(), "--exclude"),
+             (self.no_lookalikes, "--no-lookalikes"),
++            (self.rules.is_some(), "--rules"),
+         ]
+         .into_iter()
+         .filter_map(|(given, flag)| given.then_some(flag))
+@@ -147,7 +150,105 @@ impl Options {
+         }))
+     }
+ 
++    /// The characters `--exclude` and `--no-lookalikes` leave out.
++    fn excluded(&self) -> Vec<u8> {
++        let mut excluded: Vec<u8> = self.exclude.as_deref().unwrap_or("").bytes().collect();
++        if self.no_lookalikes {
++            excluded.extend_from_slice(LOOKALIKES);
++        }
++        excluded
++    }
++
++    /// Random characters that follow a site's `--rules`. The rules replace
++    /// the set options, and `--exclude` and `--no-lookalikes` narrow them.
++    fn rules_recipe(&self, text: &str) -> Result<Recipe, String> {
++        let replaced = [
++            (self.no_uppercase, "--no-uppercase"),
++            (self.no_lowercase, "--no-lowercase"),
++            (self.no_digits, "--no-digits"),
++            (self.no_symbols, "--no-symbols"),
++            (self.symbols.is_some(), "--symbols"),
++        ];
++        if let Some((_, flag)) = replaced.iter().find(|(given, _)| *given) {
++            return Err(format!(
++                "--rules replaces {flag}; say it in the rules instead"
++            ));
++        }
++        let rules = generate_rules::parse(text)?;
++        // The strength count tracks every subset of the requirements met so
++        // far, so it grows as 2 to the number of required rules.
++        if rules.required.len() > 8 {
++            return Err("multipass follows at most 8 required rules".into());
++        }
++        let length = match self.length {
++            Some(length) => {
++                in_range("--length", length, 4, 128)?;
++                length
++            }
++            None => 20,
++        };
++        let min = rules.min_length.unwrap_or(0).max(4);
++        let max = rules.max_length.unwrap_or(128).min(128);
++        if min > max {
++            return Err(format!(
++                "the rules allow no length multipass can make: from {} to {}, and multipass makes 4 to 128",
++                rules.min_length.unwrap_or(0),
++                rules
++                    .max_length
++                    .map_or("any".to_string(), |m| m.to_string())
++            ));
++        }
++        let length = length.clamp(min, max);
++        // A space at the start or end of a password is easy to lose when it
++        // is pasted, so it is never drawn even where a site allows it.
++        let mut excluded = self.excluded();
++        excluded.push(b' ');
++        // Group the allowed characters by which requirements each meets, so
++        // that the cells are disjoint even when required classes overlap.
++        let mut cells: Vec<Cell> = Vec::new();
++        for &b in &rules.allowed {
++            if excluded.contains(&b) {
++                continue;
++            }
++            let satisfies = rules
++                .required
++                .iter()
++                .enumerate()
++                .filter(|(_, set)| set.contains(&b))
++                .fold(0u32, |bits, (i, _)| bits | 1 << i);
++            match cells.iter_mut().find(|cell| cell.satisfies == satisfies) {
++                Some(cell) => cell.chars.push(b),
++                None => cells.push(Cell {
++                    chars: vec![b],
++                    satisfies,
++                }),
++            }
++        }
++        for (i, _) in rules.required.iter().enumerate() {
++            if !cells.iter().any(|cell| cell.satisfies & 1 << i != 0) {
++                return Err(format!(
++                    "required rule {} has no character left to draw",
++                    i + 1
++                ));
++            }
++        }
++        if cells.is_empty() {
++            return Err("the rules leave no character to draw".into());
++        }
++        Ok(Recipe::Chars(Chars {
++            cells,
++            requirements: rules.required.len() as u32,
++            length,
++            // No run can be longer than the password, so a limit that large
++            // is no limit.
++            max_consecutive: rules.max_consecutive.filter(|&n| n < length),
++        }))
++    }
++
+     fn chars_recipe(&self) -> Result<Recipe, String> {
++        if let Some(text) = &self.rules {
++            return self.rules_recipe(text);
++        }
+         let length = self.length.unwrap_or(20);
+         in_range("--length", length, 4, 128)?;
+         let symbols = match &self.symbols {
+@@ -162,10 +263,7 @@ impl Options {
+             }
+             None => SYMBOLS.to_vec(),
+         };
+-        let mut excluded: Vec<u8> = self.exclude.as_deref().unwrap_or("").bytes().collect();
+-        if self.no_lookalikes {
+-            excluded.extend_from_slice(LOOKALIKES);
+-        }
++        let excluded = self.excluded();
+         let sets = [
+             (!self.no_uppercase, UPPERCASE, "uppercase letters"),
+             (!self.no_lowercase, LOWERCASE, "lowercase letters"),
+@@ -230,10 +328,22 @@ pub fn strength(recipe: &Recipe) -> String {
+     let what = match recipe {
+         Recipe::Chars(chars) => {
+             let alphabet: usize = chars.cells.iter().map(|cell| cell.chars.len()).sum();
+-            format!(
+-                "random characters, {} from {alphabet}, each set present",
+-                chars.length
+-            )
++            // The set options make one requirement per cell; anything else
++            // came from --rules.
++            let one_per_cell = chars.requirements as usize == chars.cells.len()
++                && chars
++                    .cells
++                    .iter()
++                    .enumerate()
++                    .all(|(i, cell)| cell.satisfies == 1 << i);
++            let how = if chars.max_consecutive.is_none() && one_per_cell {
++                ", each set present"
++            } else if chars.max_consecutive.is_none() && chars.requirements == 0 {
++                ""
++            } else {
++                ", with rules"
++            };
++            format!("random characters, {} from {alphabet}{how}", chars.length)
+         }
+         Recipe::Words(words) => {
+             let separator = match words.separator {
+@@ -442,6 +552,138 @@ mod tests {
+         );
+     }
+ 
++    fn rules(text: &str) -> Options {
++        Options {
++            rules: Some(text.into()),
++            ..Options::default()
++        }
++    }
++
++    #[test]
++    fn follows_password_rules() {
++        assert_eq!(
++            strength_of(rules(
++                "minlength: 8; maxlength: 16; required: lower; required: upper; required: digit; allowed: [-!#$]; max-consecutive: 2;"
++            )),
++            "random characters, 16 from 66, with rules: 96.6 bits"
++        );
++        // With no class named, every printable character but the space.
++        assert_eq!(
++            strength_of(rules("minlength: 24")),
++            "random characters, 24 from 94: 157.3 bits"
++        );
++        // --length is kept when it fits the bounds, and moved to the nearer
++        // bound when it does not.
++        let length = |text: &str, length: Option<usize>| match (Options {
++            length,
++            ..rules(text)
++        })
++        .recipe()
++        .unwrap()
++        {
++            Recipe::Chars(chars) => chars.length,
++            other => panic!("{other:?}"),
++        };
++        assert_eq!(length("minlength: 8; maxlength: 16", Some(12)), 12);
++        assert_eq!(length("minlength: 8; maxlength: 16", Some(30)), 16);
++        assert_eq!(length("minlength: 32", None), 32);
++    }
++
++    #[test]
++    fn drops_a_run_limit_the_password_cannot_reach() {
++        let limit = |text: &str| match rules(text).recipe().unwrap() {
++            Recipe::Chars(chars) => chars.max_consecutive,
++            other => panic!("{other:?}"),
++        };
++        assert_eq!(limit("max-consecutive: 18446744073709551615"), None);
++        assert_eq!(limit("maxlength: 16; max-consecutive: 16"), None);
++        assert_eq!(limit("maxlength: 16; max-consecutive: 15"), Some(15));
++        let recipe = rules("max-consecutive: 18446744073709551615")
++            .recipe()
++            .unwrap();
++        assert_eq!(password(&recipe).unwrap().len(), 20);
++    }
++
++    #[test]
++    fn splits_overlapping_requirements_into_disjoint_cells() {
++        // `required: upper; required: [A-]` overlaps on A: one requirement
++        // is met by any capital, the other by A or -, and the cells must not
++        // count A twice.
++        let Recipe::Chars(chars) = rules("required: upper; required: [-A]").recipe().unwrap()
++        else {
++            panic!()
++        };
++        let all: Vec<u8> = chars.cells.iter().flat_map(|c| c.chars.clone()).collect();
++        assert_eq!(all.len(), 27);
++        let a = chars
++            .cells
++            .iter()
++            .find(|c| c.chars.contains(&b'A'))
++            .unwrap();
++        assert_eq!((a.chars.clone(), a.satisfies), (b"A".to_vec(), 0b11));
++    }
++
++    #[test]
++    fn narrows_rules_with_exclude_but_not_with_set_options() {
++        let Recipe::Chars(chars) = Options {
++            exclude: Some("$".into()),
++            no_lookalikes: true,
++            ..rules("required: digit; allowed: [$%]")
++        }
++        .recipe()
++        .unwrap() else {
++            panic!()
++        };
++        let all: Vec<u8> = chars.cells.iter().flat_map(|c| c.chars.clone()).collect();
++        assert_eq!(all, b"%23456789".to_vec());
++        assert_eq!(
++            Options {
++                no_digits: true,
++                ..rules("required: digit")
++            }
++            .recipe()
++            .unwrap_err(),
++            "--rules replaces --no-digits; say it in the rules instead"
++        );
++        assert_eq!(
++            Options {
++                words: Some(None),
++                ..rules("required: digit")
++            }
++            .recipe()
++            .unwrap_err(),
++            "--rules applies to random characters, not --words"
++        );
++        assert_eq!(
++            Options {
++                exclude: Some("0123456789".into()),
++                ..rules("required: digit; allowed: lower")
++            }
++            .recipe()
++            .unwrap_err(),
++            "required rule 1 has no character left to draw"
++        );
++        assert_eq!(
++            rules("maxlength: 3").recipe().unwrap_err(),
++            "the rules allow no length multipass can make: from 0 to 3, and multipass makes 4 to 128"
++        );
++        // Four required classes in four characters is possible but narrow;
++        // five in four is not.
++        assert!(
++            rules(
++                "maxlength: 4; required: upper; required: lower; required: digit; required: special"
++            )
++            .recipe()
++            .is_ok()
++        );
++        assert_eq!(
++            rules("maxlength: 4; required: upper; required: lower; required: digit; required: [!]; required: [?]")
++                .recipe()
++                .unwrap_err(),
++            "these options leave too few passwords to draw from"
++        );
++    }
++
+     #[test]
+     fn draws_text_of_the_recipes_length() {
+         let pin = password(&Recipe::Pin { length: 8 }).unwrap();
+diff --git a/src/main.rs b/src/main.rs
+index cb0e368..17375a9 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,6 +1,7 @@
+ mod age;
+ mod clipboard;
+ mod crypto;
++mod generate_rules;
+ mod generator;
+ mod otp;
+ mod store;
+@@ -61,6 +62,9 @@ Password options, for generate and add --generate:
+   --symbols <chars>     The symbols to use [default: all ASCII punctuation]
+   --exclude <chars>     Characters never to use
+   --no-lookalikes       Leave out 0 O o 1 l I and |
++  --rules <rules>       A site's password rules in Apple's passwordrules format,
++                        such as 'minlength: 8; required: digit;'. They replace
++                        the set options above
+   --words [<n>]         Memorable words instead, from 3 to 15 [default: 5]
+     --separator <sep>   hyphen, space, period, comma, underscore, digit or
+                         digit-or-symbol [default: hyphen]
+@@ -268,6 +272,7 @@ fn parse(args: Vec<String>) -> Result<Parsed> {
+             "--exclude" => options.exclude = Some(take_value(&flag, inline, &mut args)?),
+             "--separator" => options.separator = Some(take_value(&flag, inline, &mut args)?),
+             "--capitalize" => options.capitalize = Some(take_value(&flag, inline, &mut args)?),
++            "--rules" => options.rules = Some(take_value(&flag, inline, &mut args)?),
+             "--generate" | "--no-uppercase" | "--no-lowercase" | "--no-digits" | "--no-symbols"
+             | "--no-lookalikes" | "--syllables"
+                 if inline.is_some() =>
+@@ -937,6 +942,35 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn parses_rules() {
++        // A rules line holds spaces, so it arrives as one argument.
++        let argv = |rules: &str| {
++            vec![
++                "generate".to_string(),
++                "--rules".to_string(),
++                rules.to_string(),
++            ]
++        };
++        let rules = "minlength: 8; required: digit;";
++        assert_eq!(
++            parse(argv(rules)).unwrap(),
++            Parsed::Run {
++                store: None,
++                command: Command::Generate {
++                    recipe: generator::Options {
++                        rules: Some(rules.into()),
++                        ..Default::default()
++                    }
++                    .recipe()
++                    .unwrap(),
++                    clip: false,
++                },
++            }
++        );
++        assert!(parse(argv("required: unicode;")).is_err());
++    }
++
+     #[test]
+     fn rejects_bad_arguments() {
+         for bad in [
