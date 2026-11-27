@@ -399,9 +399,10 @@ fn default_store_path() -> Result<PathBuf> {
     Ok(PathBuf::from(home).join(".multipass").join("store.age"))
 }
 
-/// A replaced setup key cannot be recovered, and losing it can lock you out
-/// of the account, so `otp --set` keeps an existing one unless forced. It
-/// runs before the key is read, so a refusal asks for nothing.
+/// Returns an error naming the entry when it already has a one-time password
+/// and `force` is false. A replaced setup key cannot be recovered, and losing
+/// it can lock you out of the account, so call this before reading the key,
+/// and a refusal then asks for nothing.
 fn refuse_otp_replacement(store: &Store, name: &str, force: bool) -> Result<()> {
     if !force && store.get(name).is_some_and(|entry| entry.otp.is_some()) {
         return Err(format!(
