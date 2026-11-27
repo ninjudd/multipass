@@ -240,8 +240,7 @@ impl Options {
             requirements: rules.required.len() as u32,
             length,
             // No run can be longer than the password, so a limit that large
-            // is no limit. Dropping it also keeps the draw's comparisons on
-            // the small values they are correct for.
+            // is no limit.
             max_consecutive: rules.max_consecutive.filter(|&n| n < length),
         }))
     }
