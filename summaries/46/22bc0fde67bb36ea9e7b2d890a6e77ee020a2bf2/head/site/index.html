@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>multipass</title>
+<meta name="description" content="A minimal password manager for the few secrets you never want on someone else's server: one passphrase, a few age-encrypted files, no dependencies.">
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #fbfaf7;
+    --fg: #1d1c1a;
+    --muted: #5f5c55;
+    --rule: #e3e0d8;
+    --code-bg: #f1eee6;
+    --accent: #1f5f8b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141414;
+      --fg: #ecebe6;
+      --muted: #a29f97;
+      --rule: #2c2b29;
+      --code-bg: #1f1e1c;
+      --accent: #7fb6dd;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 17px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  main { max-width: 44rem; margin: 0 auto; padding: 4rem 1rem 5rem; }
+  h1 { font-size: 2.4rem; letter-spacing: -0.02em; margin: 0 0 0.5rem; }
+  h2 { font-size: 1.15rem; margin: 2.75rem 0 0.5rem; }
+  p { margin: 0.6rem 0; }
+  .lede { font-size: 1.2rem; color: var(--muted); margin-bottom: 2rem; }
+  a { color: var(--accent); }
+  code, pre { font: 0.88rem/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    padding: 0.85rem 1rem;
+    overflow-x: auto;
+    margin: 0.75rem 0;
+  }
+  ul { padding-left: 1.2rem; }
+  li { margin: 0.35rem 0; }
+  footer { margin-top: 3.5rem; padding-top: 1rem; border-top: 1px solid var(--rule); color: var(--muted); font-size: 0.95rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>multipass</h1>
+  <p class="lede">A minimal password manager for the few secrets you never want on someone else's server, such as recovery codes, seed phrases, and the master password of your everyday password manager.</p>
+
+  <pre><code>curl -fsSL https://getmultipass.dev/install.sh | bash</code></pre>
+  <p>The installer builds the tagged release from source when Rust is installed. Without Rust, it installs the prebuilt macOS binary only after <code>gh attestation verify</code> proves that the release workflow built it from that tag. It never touches your stores or your shell's startup files.</p>
+
+  <h2>What it is</h2>
+  <ul>
+    <li><strong>One passphrase, one small folder.</strong> Your secrets, and the setup keys of your one-time passwords, live in a small folder of files encrypted with <a href="https://age-encryption.org">age</a> and unlocked by a passphrase you choose. There are no accounts and no server.</li>
+    <li><strong>No dependencies.</strong> Every line is in the repository, cryptography included, small enough to read in a day. No third-party crates, so a build from source trusts only the Rust toolchain, and GitHub to serve the tagged source. The prebuilt binary also trusts GitHub's hosted macOS runner, with its Xcode linker and <code>lipo</code>, the pinned Rust toolchain, and GitHub's and Sigstore's signing of its attestation, which <code>install.sh verify</code> lets you replace with your own build. The one-liner above also trusts whoever controls this domain, its registrar account, and its Vercel team, which the commands below avoid.</li>
+    <li><strong>Recoverable without it.</strong> Every file in the store is an ordinary age file, so two <code>age -d</code> commands print everything as plain text even if multipass disappears.</li>
+  </ul>
+
+  <h2>Install without this domain</h2>
+  <p>This domain only redirects to releases on GitHub: <code>/install.sh</code> to the newest, and <code>/v&lt;version&gt;/install.sh</code> to that release. To skip it, use GitHub's URL directly:</p>
+  <pre><code>curl -fsSL https://github.com/ninjudd/multipass/releases/latest/download/install.sh | bash</code></pre>
+  <p>To pin a release, so a later one cannot change what you run, name its tag and its version:</p>
+  <pre><code>curl -fsSL https://github.com/ninjudd/multipass/releases/download/v0.2.0/install.sh | MULTIPASS_VERSION=0.2.0 bash</code></pre>
+  <p>To check the installer before you run it, download it with its attestation bundle and verify it:</p>
+  <pre><code>curl -fsSLO https://github.com/ninjudd/multipass/releases/latest/download/install.sh
+curl -fsSLO https://github.com/ninjudd/multipass/releases/latest/download/multipass.sigstore.json
+gh attestation verify install.sh --bundle multipass.sigstore.json --repo ninjudd/multipass \
+  --signer-workflow ninjudd/multipass/.github/workflows/release.yml --source-ref refs/heads/main
+bash install.sh</code></pre>
+
+  <footer>
+    <a href="https://github.com/ninjudd/multipass">Source on GitHub</a> ·
+    <a href="https://github.com/ninjudd/multipass#readme">README</a> ·
+    MIT license. multipass is new and has not been audited.
+  </footer>
+</main>
+</body>
+</html>

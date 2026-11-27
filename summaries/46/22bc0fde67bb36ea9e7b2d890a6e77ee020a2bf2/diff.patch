@@ -1,0 +1,81 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index a4d4a42..5f7b07b 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -4,4 +4,4 @@ version = 4
+ 
+ [[package]]
+ name = "multipass"
+-version = "0.1.0"
++version = "0.2.0"
+diff --git a/Cargo.toml b/Cargo.toml
+index 922015c..859670d 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1,6 +1,6 @@
+ [package]
+ name = "multipass"
+-version = "0.1.0"
++version = "0.2.0"
+ edition = "2024"
+ rust-version = "1.85"
+ description = "A small single-user password manager: one passphrase, one age-encrypted file"
+diff --git a/README.md b/README.md
+index 4cfddf0..d615c01 100644
+--- a/README.md
++++ b/README.md
+@@ -39,7 +39,7 @@ curl -fsSL https://github.com/ninjudd/multipass/releases/latest/download/install
+ To pin a release, so a later one cannot change what you run, name its tag in the URL and its version for the installer:
+ 
+ ```sh
+-curl -fsSL https://github.com/ninjudd/multipass/releases/download/v0.1.0/install.sh | MULTIPASS_VERSION=0.1.0 bash
++curl -fsSL https://github.com/ninjudd/multipass/releases/download/v0.2.0/install.sh | MULTIPASS_VERSION=0.2.0 bash
+ ```
+ 
+ To check the installer before you run it, download it with its attestation bundle and verify it. The bundle makes the check work without a `gh` login:
+@@ -67,10 +67,10 @@ curl -fsSL https://getmultipass.dev/install.sh | bash -s -- status      # what i
+ curl -fsSL https://getmultipass.dev/install.sh | bash -s -- uninstall   # remove the binary the installer wrote, keeping your stores
+ ```
+ 
+-A release is reproducible, so you can check one by building it yourself. `install.sh verify 0.1.0` rebuilds your Mac's slice of that release with the Rust toolchain its build info names, and compares the bytes with the release's binary. It needs [rustup](https://rustup.rs), and the bytes match only with the macOS SDK the release used; when they differ, it names each build-info field that differs on your Mac:
++A release is reproducible, so you can check one by building it yourself. `install.sh verify 0.2.0` rebuilds your Mac's slice of that release with the Rust toolchain its build info names, and compares the bytes with the release's binary. It needs [rustup](https://rustup.rs), and the bytes match only with the macOS SDK the release used; when they differ, it names each build-info field that differs on your Mac:
+ 
+ ```sh
+-curl -fsSL https://github.com/ninjudd/multipass/releases/latest/download/install.sh | bash -s -- verify 0.1.0
++curl -fsSL https://github.com/ninjudd/multipass/releases/latest/download/install.sh | bash -s -- verify 0.2.0
+ ```
+ 
+ To upgrade a checkout install, pull the checkout and run `./install.sh` again. A rerun that would install the same bytes leaves the file alone. For a copy the installer installed from a release, `multipass upgrade` downloads the newest release's installer with `/usr/bin/curl`, checks its attestation with `gh` when `gh` is installed, and runs it; `multipass upgrade 0.2.0` installs a given release, and `multipass upgrade --check` only says whether a newer release is out. `upgrade` is the only command that reaches the network, and only when you type it. `uninstall` removes only a file that still matches the receipt, so it never deletes a `multipass` you replaced by hand. Set `MULTIPASS_BIN_DIR` to install somewhere other than `~/.local/bin`; a later rerun installs to the same place without it.
+diff --git a/site/index.html b/site/index.html
+index 82bb418..8c9ad0e 100644
+--- a/site/index.html
++++ b/site/index.html
+@@ -4,7 +4,7 @@
+ <meta charset="utf-8">
+ <meta name="viewport" content="width=device-width, initial-scale=1">
+ <title>multipass</title>
+-<meta name="description" content="A minimal password manager for the few secrets you never want on someone else's server: one passphrase, one age file, no dependencies.">
++<meta name="description" content="A minimal password manager for the few secrets you never want on someone else's server: one passphrase, a few age-encrypted files, no dependencies.">
+ <style>
+   :root {
+     color-scheme: light dark;
+@@ -62,16 +62,16 @@ <h1>multipass</h1>
+ 
+   <h2>What it is</h2>
+   <ul>
+-    <li><strong>One passphrase, one file.</strong> Your secrets, and the setup keys of your one-time passwords, live in one file encrypted with <a href="https://age-encryption.org">age</a> under a passphrase. There are no accounts and no server.</li>
++    <li><strong>One passphrase, one small folder.</strong> Your secrets, and the setup keys of your one-time passwords, live in a small folder of files encrypted with <a href="https://age-encryption.org">age</a> and unlocked by a passphrase you choose. There are no accounts and no server.</li>
+     <li><strong>No dependencies.</strong> Every line is in the repository, cryptography included, small enough to read in a day. No third-party crates, so a build from source trusts only the Rust toolchain, and GitHub to serve the tagged source. The prebuilt binary also trusts GitHub's hosted macOS runner, with its Xcode linker and <code>lipo</code>, the pinned Rust toolchain, and GitHub's and Sigstore's signing of its attestation, which <code>install.sh verify</code> lets you replace with your own build. The one-liner above also trusts whoever controls this domain, its registrar account, and its Vercel team, which the commands below avoid.</li>
+-    <li><strong>Recoverable without it.</strong> The store is a standard age file, so <code>age -d</code> prints it as plain text even if multipass disappears.</li>
++    <li><strong>Recoverable without it.</strong> Every file in the store is an ordinary age file, so two <code>age -d</code> commands print everything as plain text even if multipass disappears.</li>
+   </ul>
+ 
+   <h2>Install without this domain</h2>
+   <p>This domain only redirects to releases on GitHub: <code>/install.sh</code> to the newest, and <code>/v&lt;version&gt;/install.sh</code> to that release. To skip it, use GitHub's URL directly:</p>
+   <pre><code>curl -fsSL https://github.com/ninjudd/multipass/releases/latest/download/install.sh | bash</code></pre>
+   <p>To pin a release, so a later one cannot change what you run, name its tag and its version:</p>
+-  <pre><code>curl -fsSL https://github.com/ninjudd/multipass/releases/download/v0.1.0/install.sh | MULTIPASS_VERSION=0.1.0 bash</code></pre>
++  <pre><code>curl -fsSL https://github.com/ninjudd/multipass/releases/download/v0.2.0/install.sh | MULTIPASS_VERSION=0.2.0 bash</code></pre>
+   <p>To check the installer before you run it, download it with its attestation bundle and verify it:</p>
+   <pre><code>curl -fsSLO https://github.com/ninjudd/multipass/releases/latest/download/install.sh
+ curl -fsSLO https://github.com/ninjudd/multipass/releases/latest/download/multipass.sigstore.json

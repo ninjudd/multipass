@@ -1,0 +1,20 @@
+[package]
+name = "multipass"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.85"
+description = "A small single-user password manager: one passphrase, one age-encrypted file"
+license = "MIT"
+repository = "https://github.com/ninjudd/multipass"
+publish = false
+
+# multipass has no dependencies, not even for tests, and CI fails if one
+# appears. The cryptography is written by hand in src/crypto and checked
+# against the official test vectors and against files written by the
+# reference age implementation. See AGENTS.md before adding anything here.
+[dependencies]
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1

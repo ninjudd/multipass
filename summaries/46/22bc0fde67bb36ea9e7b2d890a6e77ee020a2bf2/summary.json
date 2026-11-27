@@ -1,0 +1,105 @@
+{
+ "version": 1,
+ "name": "Publish multipass 0.2.0",
+ "project": "installer",
+ "pr": {
+  "repo": "ninjudd/multipass",
+  "number": 46,
+  "title": "Release 0.2.0",
+  "head": "22bc0fde67bb36ea9e7b2d890a6e77ee020a2bf2",
+  "headRef": "release-0.2.0",
+  "base": "e10a01513fb88a9e12963fa8610e7b172c0289cb",
+  "baseRef": "main"
+ },
+ "overview": {
+  "summary": [
+   "multipass publishes a release by merging a pull request that raises <code>version</code> in <code>Cargo.toml</code>. This pull request raises it from 0.1.0 to 0.2.0. When it merges, the release workflow, <code>.github/workflows/release.yml</code>, tags <code>v0.2.0</code> at the merge commit, builds the universal macOS binary twice and checks that both builds match byte for byte, attests it, and publishes an immutable GitHub release.",
+   "The only release so far is 0.1.0. Everything merged since then reaches people who install multipass only once 0.2.0 is published, because the one-line install, <code>curl -fsSL https://getmultipass.dev/install.sh | bash</code>, and <code>multipass upgrade</code> both install the newest release. That includes the store package, password history, session unlock, and password generation. The README already describes those features, so this release makes the one-liner install what the README describes.",
+   "Besides the version, the pull request brings the two pages that tell people how to install multipass up to date with 0.2.0. Those are the README and the website's page, <code>site/index.html</code>. Their pinned-install examples now name 0.2.0, and the website now describes the store as a folder of age files rather than one file. Because the website changes, the merge also redeploys <code>getmultipass.dev</code>."
+  ],
+  "cards": [
+   {
+    "id": "release",
+    "title": "What the merge publishes",
+    "html": "<ul class=\"tight\"><li>The tag <code>v0.2.0</code>, created at the merge commit when the draft release is published.</li><li>Five files: <code>multipass-0.2.0-macos</code>, <code>install.sh</code>, <code>multipass.sigstore.json</code>, <code>SHA256SUMS</code>, and <code>multipass-0.2.0.buildinfo</code>.</li><li>Release notes that GitHub generates from the merged pull requests, so the release needs no changelog file.</li><li>The same Rust toolchain (1.97.1) and Xcode (16.4) that built 0.1.0.</li><li>A new deployment of <code>getmultipass.dev</code>, from the website workflow, because <code>site/</code> changes.</li></ul>"
+   },
+   {
+    "id": "upgrade",
+    "title": "What changes for someone on 0.1.0",
+    "html": "<ul class=\"tight\"><li><code>multipass upgrade --check</code> reports that 0.2.0 is out, because 0.1.0 compares versions by SemVer.</li><li><code>multipass upgrade</code> downloads and checks the 0.2.0 installer, which installs 0.2.0.</li><li>The first command that asks for the passphrase moves <code>~/.multipass/store.age</code> into the folder <code>~/.multipass/store.multipass</code>. It keeps the old file for 30 days and merges any change an older multipass makes to it.</li><li>After the old file is retired, 0.1.0 can no longer open the store, as the README's warning says.</li></ul>"
+   },
+   {
+    "id": "history",
+    "title": "Review history so far",
+    "html": "<ul class=\"tight\"><li>The first review, at <code>a673e04</code>, found that the website still pinned 0.1.0 and described a one-file store.</li><li><code>22bc0fd</code> fixed the website, and the finding is resolved.</li></ul>"
+   }
+  ]
+ },
+ "groups": [
+  {
+   "id": "version",
+   "title": "The version bump",
+   "kicker": "The change that starts the release.",
+   "intro": [
+    "The release workflow runs on a push to <code>main</code> that changes <code>Cargo.toml</code>. It reads the version from the file's first <code>version = \"…\"</code> line and publishes <code>v&lt;version&gt;</code> unless a published release already has that tag. <code>Cargo.lock</code> records the package's version too, and <code>cargo build --locked</code> fails when the two disagree, so both files change together."
+   ],
+   "checks": [
+    {
+     "kind": "verify",
+     "text": "The tag the workflow will create, <code>v0.2.0</code>, does not exist yet. <code>gh release list</code> and <code>git ls-remote --tags</code> list only <code>v0.1.0</code>."
+    },
+    {
+     "kind": "verify",
+     "text": "Nothing else hard-codes the release's version. <code>--version</code> and <code>upgrade --check</code> read <code>CARGO_PKG_VERSION</code>, and <code>build-release.sh</code>, <code>install.sh</code> and <code>tests/install.sh</code> read the version from <code>Cargo.toml</code>. A release build prints <code>multipass 0.2.0</code>, and <code>tests/install.sh</code> passes."
+    }
+   ],
+   "files": [
+    {
+     "path": "Cargo.toml",
+     "note": "The package version moves from 0.1.0 to 0.2.0. Merging this line starts the release."
+    },
+    {
+     "path": "Cargo.lock",
+     "note": "The lockfile records the same version, and nothing else in it changes.",
+     "checks": [
+      {
+       "kind": "verify",
+       "text": "<code>cargo tree -e all --prefix none</code> prints only <code>multipass v0.2.0</code>, and <code>cargo test --locked</code> passes, so the lockfile matches <code>Cargo.toml</code> and no dependency was added."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "docs",
+   "title": "Install pages that name a release",
+   "kicker": "The README and the website now describe 0.2.0.",
+   "intro": [
+    "Both the README's Install section and the website show how to pin a release, so a later release cannot change what you run. Those examples named 0.1.0, the newest release. They now name 0.2.0, which is the newest once this merges. The README's <code>install.sh verify</code> examples, which rebuild a release to check that its bytes match, move to 0.2.0 as well. The README's warning against going back to the published 0.1.0 keeps naming 0.1.0, because that is the release it means.",
+    "The website also described the store as a single age file, which is what 0.1.0 writes. 0.2.0 keeps the store in a folder: a key file encrypted under the passphrase, and store files encrypted under the vault key that the key file holds. The page now says so, and says that two <code>age -d</code> commands recover it, as the README's recovery section shows."
+   ],
+   "checks": [
+    {
+     "kind": "context",
+     "text": "The website redeploys only when a merge changes <code>site/</code>. This pull request changes it, so the merge deploys the new page at the same time as the release workflow runs. The deploy's live check tests only where the redirects point, not whether the release exists, so neither workflow waits on the other."
+    }
+   ],
+   "files": [
+    {
+     "path": "README.md",
+     "note": "The pinned install and both <code>install.sh verify</code> examples now name 0.2.0."
+    },
+    {
+     "path": "site/index.html",
+     "note": "The page's description and its \"What it is\" list now describe a folder of age files, and its pinned install names 0.2.0.",
+     "checks": [
+      {
+       "kind": "verify",
+       "text": "<code>tests/site.sh</code> passes, which runs <code>check-site.sh static</code> on this site and on the bad sites in <code>tests/site/</code>."
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}
