@@ -1,0 +1,157 @@
+{
+ "version": 1,
+ "name": "Password generation",
+ "project": "password-generation",
+ "pr": {
+  "repo": "ninjudd/multipass",
+  "number": 25,
+  "title": "Follow a site's password rules with --rules",
+  "head": "1c1a6cc47a1c53c4573c431911b3cce3dec48569",
+  "headRef": "pwgen-rules",
+  "base": "c65fc6a0b2bb4a7079caf8f8842ae81cbb13d180",
+  "baseRef": "pwgen-syllables",
+  "basePr": 24
+ },
+ "overview": {
+  "summary": [
+   "multipass can generate a new password, either printed by <code>multipass generate</code> or stored straight into an entry by <code>multipass add &lt;name&gt; --generate</code>. Many sites limit what a password may hold: a length range, a required digit, only certain symbols. Writing those limits as separate options by hand is slow and easy to get wrong.",
+   "This pull request adds <code>--rules</code>, which takes a site's limits as one line in the language Apple defined for the <code>passwordrules</code> HTML attribute. Apple publishes such lines for many sites in its <code>password-manager-resources</code> repository, so a user can often copy one from there:",
+   "<pre>multipass generate --rules 'minlength: 8; maxlength: 16; required: lower; required: upper; required: digit; allowed: [-!#$]; max-consecutive: 2;'</pre>",
+   "The change has two parts. A new parser, <code>src/generate_rules.rs</code>, reads the line into sets of characters and limits. <code>generator::Options</code> then turns those into the recipe the generator in <code>crypto::generate</code> already draws from. The generator itself does not change. It still draws whole passwords uniformly and draws again when one breaks a rule, and it still reports a strength that counts exactly the passwords that follow the rules.",
+   "This is the top layer of a stack: generation itself (#23), then made-up syllables (#24), then this. The plan lists <code>--rules</code> as an open question for the owner, so the layer holds only that feature and can be dropped on its own."
+  ],
+  "cards": [
+   {
+    "id": "terms",
+    "title": "Terms",
+    "html": "<ul class=\"tight\"><li><b>Rule.</b> One <code>name: value</code> statement, such as <code>required: digit</code>. Statements are separated by <code>;</code>.</li><li><b>Class.</b> A named set of characters (<code>upper</code>, <code>lower</code>, <code>digit</code>, <code>special</code>, <code>ascii-printable</code>), or a custom set in brackets such as <code>[-!#$]</code>.</li><li><b>Requirement.</b> One <code>required</code> rule. The password must hold at least one character from the classes it names.</li><li><b>Cell.</b> A group of allowed characters that meet exactly the same requirements. The generator needs cells that never share a character.</li><li><b>Acceptance.</b> The share of uniformly drawn strings that follow every rule. The generator refuses a recipe whose acceptance is below one in a million.</li></ul>"
+   },
+   {
+    "id": "review",
+    "title": "Review so far",
+    "html": "<p>The first Projector review, of <code>cd0d510</code>, found that a <code>max-consecutive</code> value of 2^63 + 129 or more made the generator loop forever, and suggested clearer README wording for <code>required</code>. <code>eacd02d</code> was the same commit rebased onto the moved base.</p><p>At <code>1c1a6cc</code>, one commit drops a run limit the password cannot reach, with a regression test, and one rewords the README. The finding is resolved as fixed, and the head is signed off clean.</p>"
+   }
+  ]
+ },
+ "groups": [
+  {
+   "id": "parser",
+   "title": "Reading the rules",
+   "kicker": "A strict parser for Apple's password rules language",
+   "intro": [
+    "<code>generate_rules::parse</code> turns the rules text into a <code>Rules</code> value: one character set per <code>required</code> rule, the set of every character the password may hold, and the length and run limits. It follows Apple's reference parser, <code>PasswordRulesParser.js</code>, in how it combines rules. The allowed characters are the union of every <code>required</code> and <code>allowed</code> class, or every printable character when no class is named. The largest <code>minlength</code> wins, and the smallest <code>maxlength</code> and <code>max-consecutive</code>.",
+    "Where Apple's parser skips input it cannot read and carries on, this one stops with an error that names the problem, because a silently dropped character would change what the password may hold. It also refuses <code>unicode</code> (multipass draws only ASCII) and the newer <code>max-repeating</code> and <code>max-sequential</code> rules, whose meaning the plan could not confirm. The rules are public text, so the parser may branch on every byte. The constant-time rule in the repository's guidelines covers only <code>src/crypto</code> and <code>src/age.rs</code>."
+   ],
+   "checks": [
+    {
+     "kind": "verify",
+     "text": "The class definitions match Apple's parser, which the reviewer read: <code>special</code> is all 32 ASCII punctuation characters plus the space, and class names ignore case while rule names do not."
+    }
+   ],
+   "files": [
+    {
+     "path": "src/generate_rules.rs",
+     "note": "New. Splits the text at each <code>;</code> outside brackets, then reads each rule's name and value. The tests at the bottom cover the plan's example, two of Apple's examples, repeated rules, custom classes, and one refusal for each kind of bad input.",
+     "checks": [
+      {
+       "kind": "context",
+       "text": "A custom class ends at the first <code>]</code> followed by the end of the text, a space, a comma, or a semicolon. So <code>]]</code> at the end of a class is a literal <code>]</code>, and a <code>-</code> is allowed only as the first character.",
+       "line": 125
+      },
+      {
+       "kind": "context",
+       "text": "<code>integer</code> accepts any value that fits in a <code>usize</code>. Apple's parser ignores values above 2^53. <code>rules_recipe</code> drops a <code>max-consecutive</code> of at least the length, so a huge value never reaches the draw.",
+       "line": 215
+      },
+      {
+       "kind": "verify",
+       "text": "The reviewer ran a release build on 12 malformed or unsatisfiable rule strings, such as an unclosed bracket, an unknown rule, <code>[a-z]</code>, and <code>required: []</code>. Each one exited at once with an error that names the problem."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "recipe",
+   "title": "Turning rules into a recipe",
+   "kicker": "Cells, length, and run limit for the existing generator",
+   "intro": [
+    "<code>Options::rules_recipe</code> builds the <code>Chars</code> recipe the generator draws from. It refuses <code>--no-uppercase</code>, <code>--no-lowercase</code>, <code>--no-digits</code>, <code>--no-symbols</code> and <code>--symbols</code> next to <code>--rules</code>, because the rules already say which characters to use. <code>--exclude</code> and <code>--no-lookalikes</code> still remove characters. The length is <code>--length</code>, or 20, moved inside the rules' bounds and multipass's own 4 to 128. The space is never drawn, because a space at either end of a password is easy to lose when it is pasted.",
+    "Two <code>required</code> classes can share characters: in <code>required: upper; required: [-A]</code>, the <code>A</code> meets both. The generator counts strength exactly only when its cells never share a character, so the recipe groups each allowed character by which requirements it meets. Here that gives one cell for <code>A</code> (meets both), one for the other capitals, one for <code>-</code>, and so on. The strength count grows with 2 to the number of requirements, so at most 8 <code>required</code> rules are accepted."
+   ],
+   "checks": [
+    {
+     "kind": "verify",
+     "text": "The strength count stays exact when classes overlap. For <code>required: upper; required: [-A]; maxlength: 4; allowed: lower</code>, counting by inclusion and exclusion gives 1,050,815 passwords, or 20.003 bits, and the release build printed <code>20.0 bits</code>."
+    },
+    {
+     "kind": "verify",
+     "text": "Drawing stays unbiased: the generator still draws every character uniformly from the whole allowed set and redraws a whole password that breaks a rule. It never places required characters first and shuffles."
+    }
+   ],
+   "files": [
+    {
+     "path": "src/generator.rs",
+     "note": "Adds the <code>rules</code> option, <code>rules_recipe</code>, and an <code>excluded</code> helper shared with the existing character-set path. The strength line says <code>with rules</code> when the recipe did not come from the set options.",
+     "checks": [
+      {
+       "kind": "verify",
+       "text": "A limit of at least the length is dropped, since no run can be longer than the password. With the release build, <code>max-consecutive: 18446744073709551615</code> and <code>9223372036854775936</code> each return a password in under 0.1 s, where the first head hung. <code>drops_a_run_limit_the_password_cannot_reach</code> fails if the <code>filter</code> is removed.",
+       "line": 242
+      },
+      {
+       "kind": "context",
+       "text": "The existing check that refuses a recipe with acceptance below one in a million also covers rules. For example, five single-character requirements in four characters are refused, which a test here pins.",
+       "line": 673
+      },
+      {
+       "kind": "verify",
+       "text": "With the release build and a temporary store under <code>expect</code>, <code>add --generate</code> with the plan's rules stored a 16-character password that met every rule. Unsatisfiable rules, <code>--rules</code> with <code>--symbols</code>, and <code>--rules</code> with <code>--words</code> each exited 1 before asking for the passphrase."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cli",
+   "title": "The command line",
+   "kicker": "The --rules flag and its help text",
+   "intro": [
+    "<code>main.rs</code> reads <code>--rules &lt;rules&gt;</code> into <code>Options</code> like the other options that take a value, and adds it to the help text. The recipe is built while the arguments are parsed, so bad rules fail before multipass asks for the passphrase."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": "src/main.rs",
+     "note": "Declares the module, parses the flag, and adds a test that a rules line arrives as one argument and that bad rules fail parsing."
+    }
+   ]
+  },
+  {
+   "id": "docs",
+   "title": "Documentation",
+   "kicker": "The README section and the plan's account of the parser",
+   "intro": [
+    "The README gains a table row and a section on <code>--rules</code>. The plan's § 2.3 records the decisions made while reading Apple's parser: what is refused instead of skipped, how repeated rules combine, how overlapping classes are counted, and how the length is chosen."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": "README.md",
+     "note": "Documents <code>--rules</code> with the plan's example.",
+     "checks": [
+      {
+       "kind": "verify",
+       "text": "The sentence now matches <code>generate_rules::parse</code>, which builds one set per <code>required</code> rule from the union of its classes: <code>required: lower, upper</code> is met by either case, and two separate rules need one of each.",
+       "line": 84
+      }
+     ]
+    },
+    {
+     "path": "docs/projects/password-generation/readme.md",
+     "note": "§ 2.3 now gives the space's place in <code>special</code> and <code>ascii-printable</code>, and lists how the parser follows Apple's and where it is stricter. The plan stays at <code>status: draft</code>."
+    }
+   ]
+  }
+ ]
+}
