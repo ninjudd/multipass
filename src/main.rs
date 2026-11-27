@@ -745,10 +745,13 @@ fn civil_from_days(days: u64) -> (u64, u64, u64) {
 fn package_path(named: Option<PathBuf>) -> Result<Place> {
     if let Some(path) = named {
         // A file is a single-file store from before the package: its
-        // package sits beside it, named for it.
-        return Ok(if path.is_file() {
+        // package sits beside it, named for it. Once a prompt retires the
+        // file, the package beside the name is still the one it means.
+        let beside = path.with_extension("multipass");
+        let retired = !path.exists() && path != beside && beside.is_dir();
+        return Ok(if path.is_file() || retired {
             Place {
-                package: path.with_extension("multipass"),
+                package: beside,
                 old: Some(path),
                 named_old: true,
             }
@@ -1300,5 +1303,33 @@ mod tests {
             let error = error.expect("an open that writes succeeded");
             assert!(error.starts_with(&refused), "{error}");
         }
+    }
+
+    /// `--store` naming the old single-file store keeps opening its package
+    /// once a prompt has retired the old file, and a path that names
+    /// nothing, with no package beside it, is a new package for `init`.
+    #[test]
+    fn a_named_old_file_opens_its_package_after_it_is_retired() {
+        use std::fs;
+
+        let root =
+            std::env::temp_dir().join(format!("multipass-main-named-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("store.multipass")).unwrap();
+        let old = root.join("store.age");
+        let retired = package_path(Some(old.clone())).unwrap();
+        fs::write(&old, b"old").unwrap();
+        let present = package_path(Some(old.clone())).unwrap();
+        let new = package_path(Some(root.join("other"))).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        for place in [&retired, &present] {
+            assert_eq!(place.package, root.join("store.multipass"));
+            assert_eq!(place.old.as_deref(), Some(old.as_path()));
+            assert!(place.named_old);
+        }
+        assert_eq!(new.package, root.join("other"));
+        assert_eq!(new.old, None);
+        assert!(!new.named_old);
     }
 }
