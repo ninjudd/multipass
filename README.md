@@ -24,6 +24,9 @@ Every line of multipass is in this repository, cryptography included: about 1,00
 cargo install --path .
 ```
 
+> [!WARNING]
+> Once this multipass has moved your store into a package, do not go back to a multipass from before the package. For up to 30 days an older multipass still reads and saves the old `store.age` beside the package, and the package merges its changes. After the old file is retired, an older multipass finds no store at `~/.multipass/store.age`, so every command fails, and its `init` would create a new, empty store beside the package.
+
 ## Use
 
 ```sh
@@ -40,6 +43,8 @@ multipass rekey                                  # replace the vault key now
 Every command asks for the passphrase. To use a different store, set `MULTIPASS_STORE` or pass `--store` with the path of its folder.
 
 The store is a folder, `~/.multipass/store.multipass`, that holds a key file, `key.<generation>.age`, encrypted under your passphrase, and a store file, `store.<generation>.<id>.age`, encrypted under the vault key in the key file. Finder shows it as an ordinary folder. Move or copy the whole folder, never one file out of it, because a store file opens only with the key file of its generation.
+
+A store from an earlier multipass is a single file, `~/.multipass/store.age`. The first command that asks for your passphrase moves it into `~/.multipass/store.multipass` and prints `Moved … into …`. To move a store elsewhere, point `--store` or `MULTIPASS_STORE` at the old file, and its package appears beside it, with the same name ending in `.multipass`. multipass leaves the old file where it is, because another Mac on an older multipass may still save to it, and merges any change made to it at the next prompt. Once the old file has gone 30 days unchanged, multipass deletes it. While `--store` or `MULTIPASS_STORE` still names the old file, multipass opens the package and reminds you to update it. A multipass from before the package cannot open one.
 
 When a passphrase prompt finds the vault key 14 or more days old, multipass replaces it: it writes a new key file and a new store file, and deletes the old ones. So the key in use is always under 21 days old. `passwd` always replaces the key, so your old passphrase opens nothing written afterwards, and `rekey` replaces it at once, for example when you think someone copied it. Neither reveals or changes your passphrase.
 

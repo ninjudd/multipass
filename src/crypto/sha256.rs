@@ -90,6 +90,18 @@ fn compress(state: &mut [u32; 8], block: &[u8; 64]) {
     }
 }
 
+/// The SHA-256 of `data` as 64 lower-case hex digits. Use it only for public
+/// data, such as a file's ciphertext: the hex table lookup is indexed by the
+/// digest.
+pub fn hex_digest(data: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    Sha256::digest(data)
+        .iter()
+        .flat_map(|b| [HEX[usize::from(b >> 4)], HEX[usize::from(b & 15)]])
+        .map(char::from)
+        .collect()
+}
+
 /// HKDF-SHA-256 with a 32-byte output, the only length age uses.
 pub fn hkdf(salt: &[u8], ikm: &[u8], info: &[u8]) -> [u8; 32] {
     let prk = hmac::<Sha256>(salt, &[ikm]);
@@ -135,6 +147,7 @@ mod tests {
             ),
         ];
         for (input, expected) in cases {
+            assert_eq!(hex_digest(input), expected);
             assert_eq!(Sha256::digest(input).to_vec(), hex(expected));
         }
     }

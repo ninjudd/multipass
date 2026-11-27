@@ -7,7 +7,7 @@ mod tty;
 mod vault;
 
 use std::io::{self, IsTerminal, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -320,9 +320,19 @@ fn parse(args: Vec<String>) -> Result<Parsed> {
 }
 
 fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
-    let path =
+    let place =
         package_path(store.or_else(|| std::env::var_os("MULTIPASS_STORE").map(PathBuf::from)))?;
-    let vault = Vault::new(&path, age::DEFAULT_WORK_FACTOR);
+    let path = place.package;
+    if place.named_old && path.exists() {
+        if let Some(old) = &place.old {
+            eprintln!(
+                "note: {} moved to {}; update MULTIPASS_STORE or --store",
+                old.display(),
+                path.display()
+            );
+        }
+    }
+    let vault = Vault::new(&path, age::DEFAULT_WORK_FACTOR).with_old(place.old.clone());
     let now = now_ms()?;
     let save = |session: &mut Session| session.save(&vault, now).map_err(|e| e.to_string());
 
@@ -330,6 +340,13 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
         Command::Init => {
             if path.exists() {
                 return Err(format!("a store already exists at {}", path.display()));
+            }
+            if let Some(old) = place.old.as_ref().filter(|old| old.is_file()) {
+                return Err(format!(
+                    "a store already exists at {}; any other command moves it into {}",
+                    old.display(),
+                    path.display()
+                ));
             }
             vault
                 .init(&new_passphrase()?, now)
@@ -527,14 +544,19 @@ fn open(vault: &Vault, now: u64, settle: bool) -> Result<Session> {
             }
         }
     };
-    let mut session = vault.open(&mut ask, now).map_err(|e| e.to_string())?;
-    for warning in &session.warnings {
-        eprintln!("multipass: {warning}");
+    let (mut session, moved) = vault
+        .open_or_move(&mut ask, now)
+        .map_err(|e| e.to_string())?;
+    if let (Some(old), true) = (vault.old(), moved) {
+        eprintln!("Moved {} into {}", old.display(), vault.path().display());
     }
     if session.writable().is_err() {
         eprintln!("multipass: opened read-only; another passphrase was set on another Mac");
     } else if settle {
         session.settle(vault, now).map_err(|e| e.to_string())?;
+    }
+    for warning in &session.warnings {
+        eprintln!("multipass: {warning}");
     }
     Ok(session)
 }
@@ -656,33 +678,45 @@ fn civil_from_days(days: u64) -> (u64, u64, u64) {
     (era * 400 + year_of_era + u64::from(month <= 2), month, day)
 }
 
-/// The store package to open: the path `--store` or `MULTIPASS_STORE`
-/// names, or `~/.multipass/store.multipass`. A single-file store from an
-/// earlier multipass, at the named path or at `~/.multipass/store.age`, is
-/// refused until it can be moved into a package.
-fn package_path(named: Option<PathBuf>) -> Result<PathBuf> {
-    let single_file = |path: &Path| {
-        format!(
-            "{} is a single-file store from an earlier multipass, which this build cannot open",
-            path.display()
-        )
-    };
+/// Where the store lives. `--store` or `MULTIPASS_STORE` names a package,
+/// or a single-file store from an earlier multipass, whose package is the
+/// same path ending in `.multipass`. Without either, the package is
+/// `~/.multipass/store.multipass`, moved from `~/.multipass/store.age`.
+fn package_path(named: Option<PathBuf>) -> Result<Place> {
     if let Some(path) = named {
-        return if path.is_file() {
-            Err(single_file(&path))
+        // A file is a single-file store from before the package: its
+        // package sits beside it, named for it.
+        return Ok(if path.is_file() {
+            Place {
+                package: path.with_extension("multipass"),
+                old: Some(path),
+                named_old: true,
+            }
         } else {
-            Ok(path)
-        };
+            Place {
+                package: path,
+                old: None,
+                named_old: false,
+            }
+        });
     }
     let home =
         std::env::var_os("HOME").ok_or("HOME is not set; pass --store or set MULTIPASS_STORE")?;
     let dir = PathBuf::from(home).join(".multipass");
-    let package = dir.join("store.multipass");
-    let old = dir.join("store.age");
-    if !package.exists() && old.is_file() {
-        return Err(single_file(&old));
-    }
-    Ok(package)
+    Ok(Place {
+        package: dir.join("store.multipass"),
+        old: Some(dir.join("store.age")),
+        named_old: false,
+    })
+}
+
+/// Where the store lives: its package, the single-file store from before
+/// the package that it was or will be moved from, and whether `--store` or
+/// `MULTIPASS_STORE` named that old file rather than the package.
+struct Place {
+    package: PathBuf,
+    old: Option<PathBuf>,
+    named_old: bool,
 }
 
 /// Returns an error naming the entry when it already has a one-time password

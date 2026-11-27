@@ -1,5 +1,5 @@
 ---
-status: in-progress
+status: completed
 priority: now
 ---
 
@@ -213,3 +213,16 @@ Opening at a prompt runs scrypt at work factor 18 once per key file, normally on
 ## 6. Open questions
 
 None. Every decision here is the user's: the package, files that are never modified, one store per file, the 21-day key rotating from 14 days, rotation on `passwd`, and `rekey`.
+
+## 7. Outcome
+
+Built as two stacked pull requests on the mergeable store: the package, key file, saves, rotation, `passwd`, and `rekey` first, then the move from a single-file store. `src/vault.rs` holds both, and its tests drive two package directories through a copier that plays a sync service, in every order of the two sides' changes and syncs. The build settled these details, which the sections above leave open or state differently:
+
+- **The move record's fields.** A move record holds `file`, the old store's file name in the package's directory, `sha256` of its bytes, `since`, the Unix second the hash was recorded, and the old store's decrypted text as the snapshot. The 30 unchanged days in § 2.6 count from `since`, not from the old file's modification time, which a sync service can change without changing the file.
+- **The move keeps a format 3 store's stamps.** § 2.6 says the move reads the old store "as format 3 with `modified 0`". A store from formats 1 and 2 does read that way, but the mergeable store's release writes format 3 to the single file, with real stamps, tombstones, and history, and the move keeps them, so a removal made before the move stays a removal. An old file found without a move record still imports at `modified 0`, as § 2.6 says, so it adds only what the package lacks.
+- **The old file is opened with every passphrase typed at the prompt.** A `passwd` after the move puts the package under the new passphrase while an older multipass on another Mac keeps the old file under the old one, so the check tries the passphrase and, when one was asked for, the other passphrase. When neither opens a changed old file, the prompt warns and leaves the record as it is.
+- **A move record whose old file is gone is deleted.** Another Mac retired the old file, so nothing remains to check.
+- **`.DS_Store` is ignored without a warning**, like a `.tmp` file, because Finder writes one into any folder it shows, and the package is an ordinary folder until the passkeys plan's app declares it.
+- **A read-only open says so.** When some key file stays closed, the command prints `opened read-only; another passphrase was set on another Mac`, and a command that saves fails before it asks for anything, with § 2.3's message.
+- **The 21-day expiry has no effect in the CLI yet.** Rotation from day 14 means a prompt never finds a key older than 14 days without replacing it, so only session unlock's agent, which ends its session at expiry, reads the 21 days. Its plan carries that check.
+- **The by-hand checks.** A store made by `main`'s multipass moved at the first `list`, printed `Moved …`, and the next `list` printed the `note: … update MULTIPASS_STORE` line. A save to the old file by that older multipass merged with `… changed after the move; merged its changes`. The reference `age` crate, version 0.12.1, in a scratch project outside the repository, decrypted the key file with the passphrase, the store file and the move record with the key's text, and printed `multipass-key 1`, `multipass 3`, and `multipass-moved 1`. Stock `age` was not installed, so the Go implementation was not run.
