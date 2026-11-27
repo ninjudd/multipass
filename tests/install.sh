@@ -137,6 +137,19 @@ expect_row kept "your stores" "uninstall"
 [ ! -e "$BIN" ] || fail "uninstall left the binary"
 [ ! -e "$RECEIPT" ] || fail "uninstall left the receipt"
 
+# A rerun without MULTIPASS_BIN_DIR replaces the copy the receipt names
+# rather than installing a second one, so uninstall then removes that copy.
+run env MULTIPASS_BIN_DIR="$HOME/bin" "$ROOT/install.sh"
+expect_row installed "~/bin/multipass $VERSION" "install into MULTIPASS_BIN_DIR"
+run "$ROOT/install.sh"
+expect_status 0 "rerun without MULTIPASS_BIN_DIR"
+expect_row current "~/bin/multipass $VERSION" "rerun without MULTIPASS_BIN_DIR"
+[ ! -e "$BIN" ] || fail "a rerun without MULTIPASS_BIN_DIR installed a second copy"
+run "$ROOT/install.sh" uninstall
+expect_row removed "~/bin/multipass" "uninstall after a rerun without MULTIPASS_BIN_DIR"
+[ ! -e "$HOME/bin/multipass" ] || fail "uninstall left the copy in MULTIPASS_BIN_DIR"
+rm -rf "$HOME/bin" "$BIN"
+
 # A release, from a mirror. The installer copied out of the checkout installs
 # a release rather than the checkout.
 MIRROR="$WORK/mirror"

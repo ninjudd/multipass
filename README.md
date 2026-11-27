@@ -34,7 +34,7 @@ The installer prints one row for each step. When `~/.local/bin` is not on your `
 ./install.sh uninstall   # remove the binary the installer wrote, keeping your stores
 ```
 
-To upgrade, pull the checkout and run `./install.sh` again. A rerun that would install the same bytes leaves the file alone. `uninstall` removes only a file that still matches the receipt, so it never deletes a `multipass` you replaced by hand. Set `MULTIPASS_BIN_DIR` to install somewhere other than `~/.local/bin`.
+To upgrade, pull the checkout and run `./install.sh` again. A rerun that would install the same bytes leaves the file alone. `uninstall` removes only a file that still matches the receipt, so it never deletes a `multipass` you replaced by hand. Set `MULTIPASS_BIN_DIR` to install somewhere other than `~/.local/bin`; a later rerun installs to the same place without it.
 
 ## Use
 

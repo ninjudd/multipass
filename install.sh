@@ -30,10 +30,11 @@ fi
 RELEASE_REPO="${MULTIPASS_REPO:-ninjudd/multipass}"
 DOWNLOAD_URL="${MULTIPASS_DOWNLOAD_URL:-https://github.com/$RELEASE_REPO/releases/download}"
 ARCHIVE_URL="${MULTIPASS_ARCHIVE_URL:-https://github.com/$RELEASE_REPO/archive/refs/tags}"
-BIN_DIR="${MULTIPASS_BIN_DIR:-$HOME/.local/bin}"
+# BIN_DIR and TARGET are set by set_bin_dir, once the receipt can be read.
+BIN_DIR=""
 RECEIPT_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/multipass-install"
 RECEIPT="$RECEIPT_DIR/receipt"
-TARGET="$BIN_DIR/multipass"
+TARGET=""
 WORK=""
 
 # Exit statuses, from sysexits.h.
@@ -135,6 +136,21 @@ installed_intact() {
   path="$(receipt_get path)"
   sum="$(receipt_get sha256)"
   [ -n "$path" ] && [ -f "$path" ] && [ "$(sha256 "$path")" = "$sum" ]
+}
+
+# Sets BIN_DIR from MULTIPASS_BIN_DIR, or else to the directory of the file
+# the receipt names while the installer still owns it, so a rerun without
+# the variable replaces that copy rather than adding a second one that the
+# receipt then names instead. With neither, it is ~/.local/bin.
+set_bin_dir() {
+  if [ -n "${MULTIPASS_BIN_DIR:-}" ]; then
+    BIN_DIR="$MULTIPASS_BIN_DIR"
+  elif installed_intact; then
+    BIN_DIR="$(dirname "$(receipt_get path)")"
+  else
+    BIN_DIR="$HOME/.local/bin"
+  fi
+  TARGET="$BIN_DIR/multipass"
 }
 
 describe_method() {
@@ -398,6 +414,7 @@ EOF_USAGE
 
 main() {
   check_settings
+  set_bin_dir
   case "${1:-install}" in
     install) cmd_install ;;
     status) cmd_status ;;

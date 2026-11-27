@@ -60,7 +60,7 @@ From `curl`, pass a command after `-s --`: `curl -fsSL <url> | bash -s -- status
 | --- | --- | --- |
 | `MULTIPASS_VERSION` | the newest release | The release to install, such as `0.2.0`. |
 | `MULTIPASS_BUILD` | `source` when `cargo` is on PATH, else `binary` | Forces one way to install. |
-| `MULTIPASS_BIN_DIR` | `~/.local/bin` | Where `multipass` goes. |
+| `MULTIPASS_BIN_DIR` | the directory of the file the receipt names, while it still matches the receipt, else `~/.local/bin` | Where `multipass` goes. The default means a rerun replaces the copy you installed before rather than adding a second one that `uninstall` would then miss. |
 | `MULTIPASS_UNVERIFIED` | unset | `1` installs a prebuilt binary without `gh`. |
 | `MULTIPASS_REPO` | `ninjudd/multipass` | The GitHub repository to install from, for a fork's releases. The attestation check names this repository. |
 | `MULTIPASS_DOWNLOAD_URL` | `https://github.com/<repo>/releases/download` | Where release assets come from, such as a `file://` mirror in a test. The attestation check still names `MULTIPASS_REPO`, so a mirror cannot change what passes. |
