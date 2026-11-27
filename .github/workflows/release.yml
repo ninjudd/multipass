@@ -22,15 +22,27 @@ env:
 
 jobs:
   build:
-    # A pinned image, so the Xcode linker and SDK the build info records
-    # change only when this line does.
     runs-on: macos-15
+    # GitHub moves the image's default Xcode without a change here, and the
+    # SDK version is in the binary's LC_BUILD_VERSION, so the build names its
+    # Xcode. The linker and SDK the build info records then change only when
+    # this line does, and a run fails once the image drops this Xcode.
+    # Change it only in a pull request of its own; see AGENTS.md.
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
     permissions:
       contents: read
     outputs:
       version: ${{ steps.version.outputs.version }}
       publish: ${{ steps.version.outputs.publish }}
     steps:
+      - name: Check the pinned Xcode
+        run: |
+          if [ ! -d "$DEVELOPER_DIR" ]; then
+            echo "::error::the runner image has no $DEVELOPER_DIR; pick an Xcode it lists, in a pull request of its own"
+            exit 1
+          fi
+          xcodebuild -version
       # The attestation records the ref the run started from, and the
       # installer accepts only main, so a run from any other ref could never
       # publish a binary anyone installs.
