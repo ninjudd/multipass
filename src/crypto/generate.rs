@@ -21,6 +21,9 @@ pub const SYMBOLS: &[u8] = b"!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
 pub const DIGITS: &[u8] = b"0123456789";
 pub const UPPERCASE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 pub const LOWERCASE: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
+/// Every consonant but `q`, which reads oddly without a `u` after it.
+pub const CONSONANTS: &[u8] = b"bcdfghjklmnprstvwxyz";
+pub const VOWELS: &[u8] = b"aeiou";
 
 /// The EFF's large word list, one lowercase word per line.
 const EFF_LARGE: &str = include_str!("wordlist/eff_large.txt");
@@ -60,8 +63,18 @@ pub struct Cell {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Words {
     pub count: usize,
+    pub list: WordList,
     pub separator: Separator,
     pub capitalize: Capitalize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum WordList {
+    /// The EFF's large word list.
+    Eff,
+    /// Made-up syllables: a consonant from [`CONSONANTS`], a vowel from
+    /// [`VOWELS`], and another consonant.
+    Syllables,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -90,9 +103,12 @@ pub struct Generated {
     pub len: usize,
 }
 
-/// The number of entries in the word list.
-pub fn word_count() -> usize {
-    EFF_LARGE.lines().count()
+/// The number of entries in `list`.
+pub fn word_count(list: WordList) -> usize {
+    match list {
+        WordList::Eff => EFF_LARGE.lines().count(),
+        WordList::Syllables => CONSONANTS.len() * VOWELS.len() * CONSONANTS.len(),
+    }
 }
 
 /// Draws a password from the operating system's generator.
@@ -132,7 +148,9 @@ pub fn entropy(recipe: &Recipe) -> f64 {
                 Capitalize::One => (words.count as f64).log2(),
                 Capitalize::None | Capitalize::First => 0.0,
             };
-            words.count as f64 * (word_count() as f64).log2() + gaps * separator + capitalize
+            words.count as f64 * (word_count(words.list) as f64).log2()
+                + gaps * separator
+                + capitalize
         }
     }
 }
@@ -384,14 +402,23 @@ fn draw_words(words: &Words, source: &mut Source) -> io::Result<Generated> {
     let mut bytes = vec![0u8; width];
     let mut real = vec![0usize; width];
     for w in 0..words.count {
-        let (mut word, len) = pick_word(&rows, &lens, below(rows.len(), source)?);
+        let (mut word, len) = match words.list {
+            WordList::Eff => pick_word(&rows, &lens, below(rows.len(), source)?),
+            WordList::Syllables => {
+                let mut syllable = [0u8; WORD_WIDTH];
+                for (b, letters) in syllable.iter_mut().zip([CONSONANTS, VOWELS, CONSONANTS]) {
+                    *b = pick(letters, below(letters.len(), source)?);
+                }
+                (syllable, 3)
+            }
+        };
         let upper = match words.capitalize {
             Capitalize::None => 0,
             Capitalize::First => usize::MAX,
             Capitalize::One => ct_eq_mask(w, capitalized),
         };
-        // Every word starts with a lowercase ASCII letter, which this makes
-        // uppercase.
+        // Every word and syllable starts with a lowercase ASCII letter, which
+        // this makes uppercase.
         word[0] -= 0x20 & upper as u8;
         for (b, &byte) in word.iter().enumerate() {
             bytes[w * slot + b] = byte;
@@ -651,6 +678,7 @@ mod tests {
         let words = |separator, capitalize| {
             Recipe::Words(Words {
                 count: 5,
+                list: WordList::Eff,
                 separator,
                 capitalize,
             })
@@ -719,6 +747,7 @@ mod tests {
         ] {
             let recipe = Recipe::Words(Words {
                 count: 5,
+                list: WordList::Eff,
                 separator,
                 capitalize,
             });
@@ -763,6 +792,40 @@ mod tests {
             rest = rest.get(end + 1..).unwrap_or("");
         }
         parts
+    }
+
+    #[test]
+    fn syllables_are_consonant_vowel_consonant() {
+        let recipe = Recipe::Words(Words {
+            count: 5,
+            list: WordList::Syllables,
+            separator: Separator::Fixed(b'-'),
+            capitalize: Capitalize::None,
+        });
+        assert_eq!(word_count(WordList::Syllables), 2000);
+        assert_eq!(bits(&recipe), "54.8");
+        let mut fill = stream(6);
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..2000 {
+            let s = draw(&recipe, &mut fill);
+            let parts: Vec<&str> = s.split('-').collect();
+            assert_eq!(parts.len(), 5, "{s}");
+            for part in parts {
+                let b = part.as_bytes();
+                assert!(
+                    b.len() == 3
+                        && CONSONANTS.contains(&b[0])
+                        && VOWELS.contains(&b[1])
+                        && CONSONANTS.contains(&b[2]),
+                    "{s}"
+                );
+                seen.insert(part.to_string());
+            }
+        }
+        // 10,000 draws miss any one of the 2,000 syllables with chance
+        // (1999/2000)^10000, under 1 percent, so a draw that never reaches
+        // some letters shows up as far fewer distinct syllables.
+        assert!(seen.len() > 1950, "{}", seen.len());
     }
 
     #[test]

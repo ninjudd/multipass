@@ -3,7 +3,8 @@
 //! a drawn password into text.
 
 use crate::crypto::generate::{
-    self, Capitalize, Cell, Chars, DIGITS, LOWERCASE, Recipe, SYMBOLS, Separator, UPPERCASE, Words,
+    self, Capitalize, Cell, Chars, DIGITS, LOWERCASE, Recipe, SYMBOLS, Separator, UPPERCASE,
+    WordList, Words,
 };
 
 /// Characters that are easy to misread for one another.
@@ -31,6 +32,7 @@ pub struct Options {
     pub words: Option<Option<usize>>,
     pub separator: Option<String>,
     pub capitalize: Option<String>,
+    pub syllables: bool,
     /// `Some(None)` for `--pin` without a length.
     pub pin: Option<Option<usize>>,
 }
@@ -61,6 +63,7 @@ impl Options {
         [
             (self.separator.is_some(), "--separator"),
             (self.capitalize.is_some(), "--capitalize"),
+            (self.syllables, "--syllables"),
         ]
         .into_iter()
         .filter_map(|(given, flag)| given.then_some(flag))
@@ -131,6 +134,11 @@ impl Options {
         };
         Ok(Recipe::Words(Words {
             count,
+            list: if self.syllables {
+                WordList::Syllables
+            } else {
+                WordList::Eff
+            },
             separator,
             capitalize,
         }))
@@ -240,10 +248,14 @@ pub fn strength(recipe: &Recipe) -> String {
                 Capitalize::First => ", each capitalized",
                 Capitalize::One => ", one capitalized",
             };
+            let unit = match words.list {
+                WordList::Eff => "words",
+                WordList::Syllables => "syllables",
+            };
             format!(
-                "memorable, {} words from {} with {separator}{capitalize}",
+                "memorable, {} {unit} from {} with {separator}{capitalize}",
                 words.count,
-                thousands(generate::word_count())
+                thousands(generate::word_count(words.list))
             )
         }
         Recipe::Pin { length } => format!("PIN, {length} digits"),
@@ -306,6 +318,14 @@ mod tests {
             }),
             "PIN, 6 digits: 19.9 bits -- weak for a password you cannot rate-limit"
         );
+        assert_eq!(
+            strength_of(Options {
+                words: Some(Some(6)),
+                syllables: true,
+                ..Options::default()
+            }),
+            "memorable, 6 syllables from 2,000 with hyphens: 65.8 bits"
+        );
     }
 
     #[test]
@@ -346,6 +366,13 @@ mod tests {
                 ..Options::default()
             }),
             "--separator needs --words"
+        );
+        assert_eq!(
+            err(Options {
+                syllables: true,
+                ..Options::default()
+            }),
+            "--syllables needs --words"
         );
         assert_eq!(
             err(Options {

@@ -92,6 +92,7 @@ multipass: PIN, 6 digits: 19.9 bits -- weak for a password you cannot rate-limit
 | `--words [<n>]` | `5` | Memorable words instead, from 3 to 15, drawn from the EFF's large word list of 7,776 words. |
 | `--separator <sep>` | `hyphen` | With `--words`: `hyphen`, `space`, `period`, `comma`, `underscore`, `digit`, or `digit-or-symbol`. The last two draw a new character for each gap. |
 | `--capitalize <how>` | `none` | With `--words`: `first` capitalizes every word, and `one` capitalizes one word chosen at random. |
+| `--syllables` | | With `--words`: made-up syllables of a consonant, a vowel, and a consonant, such as `fip-wol-ruk-tes-bam`, instead of real words. Each is shorter than a word and weaker, 11.0 bits against 12.9, so use one more for the same strength. |
 | `--pin [<n>]` | `6` | A PIN instead, from 4 to 64 digits. |
 
 Every character, word, and separator is drawn from `/dev/urandom` without bias, and the strength line counts exactly the passwords that meet the options. A password under 64 bits gets a warning: that is too weak to survive an attacker who can guess offline, though a PIN that a bank's servers rate-limit is still fine.

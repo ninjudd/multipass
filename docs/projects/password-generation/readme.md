@@ -63,7 +63,7 @@ The loops in steps 4.1 and 4.3 decide whether to draw again from a value that is
 | `--words [<n>]` | memorable | `5`, or `6` with `--syllables` | Words, from 3 to 15, the range a guide to 1Password gives (§ 7). The count may be left out. The default clears 64 bits either way: 5 words are 64.6 bits, but 5 syllables would be only 54.8, so 6 syllables, 65.8 bits, is the default with `--syllables`. |
 | `--separator <sep>` | memorable | `hyphen` | What goes between words: `hyphen`, `space`, `period`, `comma`, `underscore`, `digit`, or `digit-or-symbol`. The last two draw a new random character for each gap. |
 | `--capitalize <which>` | memorable | `none` | `none`, `first` (the first letter of every word), or `one` (the first letter of one randomly chosen word). |
-| `--syllables` | memorable | off | Uses short pronounceable syllables instead of full words (§ 2.4). |
+| `--syllables` | memorable | off | Uses short pronounceable syllables instead of full words (§ 2.4), such as `fip-wol-ruk-tes-bam`. The strength line counts them as `syllables`. |
 | `--pin [<n>]` | PIN | `6` | Digits, from 4 to 64. The count may be left out. |
 
 With no kind option, `generate` and `add --generate` make random characters. An option for another kind is an error, such as `--separator` with `--length`. 1Password's random type has three toggles, letters, numbers, and symbols. Splitting letters into uppercase and lowercase gives sites that require both a way to say so, and each set that is on must appear at least once, as sites that list required characters expect. The strength line counts only the passwords that meet those requirements.

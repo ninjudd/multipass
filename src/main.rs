@@ -90,6 +90,7 @@ Password options, for generate and add --generate:
                         digit-or-symbol [default: hyphen]
     --capitalize <how>  none, first (every word) or one (one word)
                         [default: none]
+    --syllables         Made-up three-letter syllables instead of real words
   --pin [<n>]           A PIN instead, from 4 to 64 digits [default: 6]
 
 Options:
@@ -317,11 +318,12 @@ fn parse(args: Vec<String>) -> Result<Parsed> {
             "--separator" => options.separator = Some(take_value(&flag, inline, &mut args)?),
             "--capitalize" => options.capitalize = Some(take_value(&flag, inline, &mut args)?),
             "--generate" | "--no-uppercase" | "--no-lowercase" | "--no-digits" | "--no-symbols"
-            | "--no-lookalikes"
+            | "--no-lookalikes" | "--syllables"
                 if inline.is_some() =>
             {
                 return Err(format!("{flag} takes no value"));
             }
+            "--syllables" => options.syllables = true,
             "--generate" => generate = true,
             "--no-uppercase" => options.no_uppercase = true,
             "--no-lowercase" => options.no_lowercase = true,
@@ -1641,6 +1643,8 @@ mod tests {
             "generate --separator space",
             "generate --words --pin",
             "generate --length 3",
+            "generate --syllables",
+            "generate --words --syllables=yes",
         ] {
             assert!(parse(args(bad)).is_err(), "{bad:?} parsed");
         }
