@@ -31,6 +31,7 @@ Commands:
     --set               Store a setup key, an otpauth:// URI or a base32 key,
                         read from stdin when it is piped and from a hidden
                         prompt otherwise. Creates the entry if needed
+      --force           Replace the entry's one-time password if it has one
     --clear             Remove the entry's one-time password
   list                  List entry names, one per line
   rm <name>             Remove an entry
@@ -70,7 +71,7 @@ enum Command {
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum OtpAction {
     Show,
-    Set,
+    Set { force: bool },
     Clear,
 }
 
@@ -183,7 +184,7 @@ fn parse(args: Vec<String>) -> Result<Parsed> {
             }
             "--set" | "--clear" => {
                 let action = if flag == "--set" {
-                    OtpAction::Set
+                    OtpAction::Set { force: false }
                 } else {
                     OtpAction::Clear
                 };
@@ -229,15 +230,23 @@ fn parse(args: Vec<String>) -> Result<Parsed> {
         "rm" => Command::Rm { name: name()? },
         "otp" => Command::Otp {
             name: name()?,
-            action: otp_action.take().unwrap_or(OtpAction::Show),
+            action: match otp_action.take().unwrap_or(OtpAction::Show) {
+                OtpAction::Set { .. } => OtpAction::Set {
+                    force: std::mem::take(&mut force),
+                },
+                other => other,
+            },
         },
         other => return Err(format!("unknown command {other}; see multipass --help")),
     };
     if let Some(extra) = positional.next() {
         return Err(format!("unexpected argument {extra}"));
     }
-    if username.is_some() || notes.is_some() || force {
-        return Err("--username, --notes and --force only apply to add".into());
+    if username.is_some() || notes.is_some() {
+        return Err("--username and --notes only apply to add".into());
+    }
+    if force {
+        return Err("--force only applies to add and otp --set".into());
     }
     if field.is_some() {
         return Err("--field only applies to get".into());
@@ -338,7 +347,8 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
                         eprintln!("expires in {}s", otp.seconds_left(now));
                     }
                 }
-                OtpAction::Set => {
+                OtpAction::Set { force } => {
+                    refuse_otp_replacement(&store, &name, force)?;
                     let key = read_hidden(&format!("Setup key for {name}: "), "setup key")?;
                     let uri = otp::setup_uri(&key, &name).map_err(|e| e.to_string())?;
                     match store.get_mut(&name) {
@@ -387,6 +397,18 @@ fn default_store_path() -> Result<PathBuf> {
     let home =
         std::env::var_os("HOME").ok_or("HOME is not set; pass --store or set MULTIPASS_STORE")?;
     Ok(PathBuf::from(home).join(".multipass").join("store.age"))
+}
+
+/// A replaced setup key cannot be recovered, and losing it can lock you out
+/// of the account, so `otp --set` keeps an existing one unless forced. It
+/// runs before the key is read, so a refusal asks for nothing.
+fn refuse_otp_replacement(store: &Store, name: &str, force: bool) -> Result<()> {
+    if !force && store.get(name).is_some_and(|entry| entry.otp.is_some()) {
+        return Err(format!(
+            "{name} already has a one-time password; pass --force to replace it"
+        ));
+    }
+    Ok(())
 }
 
 fn open(path: &Path) -> Result<(Store, String)> {
@@ -523,9 +545,20 @@ mod tests {
     fn parses_the_otp_command() {
         for (argv, action) in [
             ("otp github.com", OtpAction::Show),
-            ("otp github.com --set", OtpAction::Set),
+            ("otp github.com --set", OtpAction::Set { force: false }),
             ("otp --clear github.com", OtpAction::Clear),
-            ("otp github.com --set --set", OtpAction::Set),
+            (
+                "otp github.com --set --set",
+                OtpAction::Set { force: false },
+            ),
+            (
+                "otp github.com --set --force",
+                OtpAction::Set { force: true },
+            ),
+            (
+                "otp --force github.com --set",
+                OtpAction::Set { force: true },
+            ),
         ] {
             assert_eq!(
                 run_of(argv),
@@ -567,6 +600,11 @@ mod tests {
             "get x --clear",
             "otp x --field otp",
             "get x --field code",
+            "otp x --force",
+            "otp x --clear --force",
+            "otp x --set --force=yes",
+            "get x --force",
+            "rm x --force",
         ] {
             assert!(parse(args(bad)).is_err(), "{bad:?} parsed");
         }
@@ -575,6 +613,28 @@ mod tests {
             let argv = vec![command.to_string(), String::new()];
             assert!(parse(argv).is_err(), "{command} with an empty name parsed");
         }
+    }
+
+    #[test]
+    fn otp_set_replaces_a_one_time_password_only_when_forced() {
+        let entry = |otp: Option<&str>| Entry {
+            secret: Some("s".into()),
+            username: None,
+            notes: None,
+            otp: otp.map(String::from),
+        };
+        let mut store = Store::new();
+        store.insert(
+            "with",
+            entry(Some("otpauth://totp/with?secret=JBSWY3DPEHPK3PXP")),
+        );
+        store.insert("without", entry(None));
+
+        let refusal = refuse_otp_replacement(&store, "with", false).unwrap_err();
+        assert!(refusal.contains("--force"), "{refusal}");
+        assert!(refuse_otp_replacement(&store, "with", true).is_ok());
+        assert!(refuse_otp_replacement(&store, "without", false).is_ok());
+        assert!(refuse_otp_replacement(&store, "missing", false).is_ok());
     }
 
     #[test]
