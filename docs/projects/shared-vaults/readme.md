@@ -74,7 +74,7 @@ signature <base64 ML-DSA-65 signature over every line above>
 | `ends` | Generations whose keys this record ends, so they are never carried forward as `retired` and their store files are no longer merged: every generation the record follows when it removes or replaces anyone, and every generation it reconciles that still lists a revoked member or key. |
 | `signer`, `signature` | The member who rotated, and their ML-DSA-65 signature |
 
-A `removed` or `replaced` line revokes a signing key and a recipient. A revocation binds every generation that does not lead to it: its ancestors keep what they had, and every other generation, descendant, sibling, or cousin, is held to it. A member keeps the union of every revocation in every generation they have accepted, whatever order the generations arrived in, and never drops one.
+A `removed` or `replaced` line revokes a signing key and a recipient. A revocation binds every generation that does not lead to it: its ancestors keep what they had, and every other generation, descendant, sibling, or cousin, is held to it. A member keeps the union of every revocation in every generation they have accepted, whatever order the generations arrived in, and never drops one. When a new revocation arrives, they check rule 5 below again for every generation they had already accepted, so a sibling signed with a key that was revoked later, and that arrived first, is dropped from the generations they trust before any rotation reconciles them.
 
 A member accepts generation `G` at a prompt only when all of these hold:
 
