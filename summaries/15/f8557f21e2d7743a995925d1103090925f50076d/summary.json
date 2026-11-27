@@ -1,0 +1,90 @@
+{
+ "version": 1,
+ "name": "Installer and releases plan",
+ "project": "installer",
+ "pr": {
+  "repo": "ninjudd/multipass",
+  "number": 15,
+  "title": "Plan an installer and releases",
+  "head": "f8557f21e2d7743a995925d1103090925f50076d",
+  "headRef": "installer-spec",
+  "base": "bb6115c8013391f0079e9036b9142e0835eddeb6",
+  "baseRef": "main"
+ },
+ "overview": {
+  "summary": [
+   "multipass is a password manager whose selling point is that it trusts almost nothing: it has no third-party crates, and its README says the only code you trust beyond the repository is the Rust toolchain. Today you install it by cloning the repository and running <code>cargo install --path .</code>, and there are no releases at all.",
+   "This pull request adds one file, the plan for an installer and a release process, at <code>status: ready</code>. Nothing is built yet. The plan has to make installing easy without adding a party you must trust blindly, so most of it is about how each download is checked.",
+   "<ol><li><b>An installer script.</b> <code>install.sh</code> builds the tagged source with your own <code>cargo</code> when you have Rust. Without Rust, it downloads a universal macOS binary and installs it only after <code>gh attestation verify</code> shows that the repository's release workflow built it.</li><li><b>A release workflow.</b> Merging a version bump to <code>main</code> builds the binary twice to prove the build is reproducible, attests it, tags <code>v&lt;version&gt;</code>, and publishes an immutable GitHub release.</li><li><b>A domain.</b> <code>getmultipass.dev</code>, on Vercel, only redirects <code>/install.sh</code> to the release asset on GitHub, so you can run <code>curl -fsSL https://getmultipass.dev/install.sh | bash</code>.</li><li><b>An upgrade command.</b> <code>multipass upgrade</code> downloads the installer, checks its attestation when <code>gh</code> is installed, and runs it. multipass gains no network code of its own and never checks for updates in the background.</li></ol>",
+   "The review found three problems in the design, flagged on the lines they concern: the binary check expects a tag ref that the attestation never records, the installer checks in <code>upgrade</code> and the check-first install need a <code>gh</code> login, and the README's statement about what you trust is left unchanged."
+  ],
+  "cards": [
+   {
+    "id": "terms",
+    "title": "Terms",
+    "html": "<ul class=\"tight\"><li><b>Attestation</b>: a statement, signed through Sigstore by GitHub Actions, that a given workflow run on a given repository, ref, and commit produced a file with a given digest.</li><li><b>Bundle</b>: the attestation saved as a file (<code>.sigstore.json</code>). With <code>--bundle</code>, <code>gh</code> checks it without a login.</li><li><b>Source ref</b>: the Git ref the signing workflow ran on, such as <code>refs/heads/main</code>.</li><li><b>Receipt</b>: the installer's record of what it installed, so <code>status</code>, <code>uninstall</code>, and <code>upgrade</code> touch only that file.</li><li><b>Immutable release</b>: a GitHub setting that locks a published release's tag and assets.</li></ul>"
+   },
+   {
+    "id": "trust",
+    "title": "What each install path trusts",
+    "html": "<div class=\"tblwrap\"><table class=\"tbl\"><thead><tr><th>Path</th><th>Trusts beyond the repository</th></tr></thead><tbody><tr><td>Build from source</td><td>GitHub serving the tagged source, and your own Rust toolchain</td></tr><tr><td>Prebuilt binary</td><td>GitHub's macOS runner and its Xcode, and GitHub's signing of the attestation</td></tr><tr><td>The one-liner</td><td>Whoever controls <code>getmultipass.dev</code> and its Vercel deploy, unless you check the script first</td></tr></tbody></table></div>"
+   }
+  ]
+ },
+ "groups": [
+  {
+   "id": "plan",
+   "title": "The installer and releases plan",
+   "kicker": "How multipass gets installed, released, upgraded, and served from its own domain",
+   "intro": [
+    "The plan is the whole change. Read it in section order: § 2.1 walks through one install step by step, § 2.3 is the upgrade command, § 2.5 is the release workflow, and § 2.9 and § 2.10 cover the domain and how its website deploys. § 3 explains each choice, and § 4 lists the acceptance tests.",
+    "The checks that matter most are the attestation checks, because they are what make a downloaded binary or script trustworthy. Each one names the repository, the workflow that signed, and the ref it ran on. If any of those is wrong, a genuine file fails, and if one is missing, the check accepts more than it should."
+   ],
+   "checks": [
+    {
+     "kind": "context",
+     "text": "Plan readiness: <code>status: ready</code>, <code>priority: next</code>, no owner. Every question in § 7 is decided or deferred, and the facts left unverified each carry a rollout step, so readiness does not depend on an open question."
+    }
+   ],
+   "files": [
+    {
+     "path": "docs/projects/installer/readme.md",
+     "collapsed": false,
+     "note": "The new plan: the installer, the release workflow, <code>multipass upgrade</code>, and the <code>getmultipass.dev</code> redirect.",
+     "checks": [
+      {
+       "kind": "flag",
+       "line": 39,
+       "text": "§ 2.1 step 5.4 checks <code>--source-ref refs/tags/v0.2.0</code>, but <code>release.yml</code> runs on the push to <code>main</code> and creates the tag only afterwards, so the attestation records <code>refs/heads/main</code> and every genuine binary fails with exit 65. Check <code>refs/heads/main</code> instead, and correct § 3 and § 4 to match."
+      },
+      {
+       "kind": "flag",
+       "line": 79,
+       "text": "§ 2.3 step 3 runs <code>gh attestation verify</code> without <code>--bundle</code>, which § 8 says needs <code>gh auth login</code>, so a user with <code>gh</code> installed but not signed in can never run <code>multipass upgrade</code>. The check-first install in § 2.6 has the same problem and names no signing workflow. Publish the bundle under a fixed name and pass it with <code>--bundle</code>."
+      },
+      {
+       "kind": "flag",
+       "line": 173,
+       "text": "The README row changes only the Install section, while the README still says the only code you trust beyond the repository is the Rust toolchain. A binary install also trusts GitHub's runner and its signing, and the one-liner trusts the domain. Revise that paragraph, as the passkeys plan does for its app."
+      },
+      {
+       "kind": "context",
+       "line": 114,
+       "text": "The publish job holds the write, signing, and attestation permissions and never checks out the repository, so no repository code runs while it holds them. The build job, which runs the compiler, has a read-only token."
+      },
+      {
+       "kind": "context",
+       "line": 161,
+       "text": "The session-unlock plan this section cites is in another open pull request. Its § 2.5 \"Same binary\" row does end an agent whose executable changed on disk, as this section says."
+      },
+      {
+       "kind": "context",
+       "line": 217,
+       "text": "The Vercel token lives in a <code>production</code> environment limited to <code>main</code>. A <code>pull_request</code> run has a ref other than <code>main</code>, so it cannot read the token."
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}
