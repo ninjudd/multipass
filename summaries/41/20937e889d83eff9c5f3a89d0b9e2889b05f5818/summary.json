@@ -1,0 +1,161 @@
+{
+ "version": 1,
+ "name": "Installer rollout and site hardening",
+ "project": "installer",
+ "pr": {
+  "repo": "ninjudd/multipass",
+  "number": 41,
+  "title": "Bound the site workflow's API calls, and finish the installer's rollout",
+  "head": "20937e889d83eff9c5f3a89d0b9e2889b05f5818",
+  "headRef": "site-api-hardening",
+  "base": "266709c360bd6be3b2f7a92558d1b763c400b926",
+  "baseRef": "main"
+ },
+ "overview": {
+  "summary": [
+   "multipass's website, <code>getmultipass.dev</code>, holds one page and a few redirects. Its main job is to send <code>curl -fsSL https://getmultipass.dev/install.sh | bash</code> to the installer attached to a GitHub release. The Website workflow, <code>.github/workflows/site.yml</code>, deploys the site to Vercel on each merge to <code>main</code>. It then moves the domain to the new deployment through Vercel's REST API and checks the live redirects. When a check fails, it rolls the domain back to the deployment it served before.",
+   "This pull request does two things:",
+   "<ol><li><b>It hardens that workflow.</b> It takes the three suggestions the review of #38 left: a time limit on every Vercel API call, a format check on every deployment ID the workflow reads back from Vercel, and a fix for a <code>Cache-Control</code> check that passed its test only by crashing under macOS's old bash.</li><li><b>It finishes the installer project.</b> The README's Install section now leads with the one-line install, and the installer plan is marked completed, with a new § 9 that records what shipped and the evidence for it.</li></ol>",
+   "The workflow changes run only on <code>main</code> with the Vercel token, so the next Website run is the first to exercise them. The branch merges <code>main</code> cleanly. The Projector review's finding about the one-liner installing <code>v0.1.0</code> was settled: the owner merges this pull request just before the <code>v0.2.0</code> release pull request. Its suggestion to require a rollback target is taken. One follow-up, a time limit on the live check's <code>curl</code>, appears as a note where it applies."
+  ],
+  "cards": [
+   {
+    "id": "terms",
+    "title": "Terms on this page",
+    "html": "<ul class=\"tight\"><li><b>Deployment</b>: one upload of <code>site/</code> to Vercel. Its ID looks like <code>dpl_…</code>.</li><li><b>Alias</b>: the record saying which deployment the domain serves. <code>GET /v4/aliases/getmultipass.dev</code> returns it as <code>deploymentId</code>.</li><li><b>Promote</b>: point the domain at a new deployment. <b>Rollback</b> points it back at the one recorded before.</li><li><b><code>$GITHUB_OUTPUT</code></b>: the file a step writes <code>name=value</code> lines to, which later steps read. A newline inside a value would start a second line, so a value from outside must not hold one.</li><li><b>Attestation</b>: GitHub's signed record of which workflow built a file, which <code>gh attestation verify</code> checks.</li></ul>"
+   },
+   {
+    "id": "suggestions",
+    "title": "What #38's review suggested, and where it landed",
+    "html": "<div class=\"tblwrap\"><table class=\"tbl\"><thead><tr><th>Suggestion</th><th>Where</th><th>Result</th></tr></thead><tbody><tr><td>Give curl a time limit</td><td><code>vercel-api.sh</code></td><td class=\"r\"><code>--max-time 30</code></td></tr><tr><td>Check deployment IDs before use</td><td><code>site.yml</code></td><td class=\"r\"><code>^dpl_[A-Za-z0-9]+$</code> on both IDs</td></tr><tr><td>Refuse an empty <code>Cache-Control</code> without crashing</td><td><code>check-site.sh</code>, <code>tests/site.sh</code></td><td class=\"r\">Early refusal, and a stricter test</td></tr></tbody></table></div>"
+   }
+  ]
+ },
+ "groups": [
+  {
+   "id": "workflow",
+   "title": "Bounded, checked calls to Vercel",
+   "kicker": "A time limit on each API call, and a format check on each deployment ID",
+   "intro": [
+    "Every call the workflow makes to Vercel's API goes through <code>vercel-api.sh</code>. It sends the token to <code>curl</code> on stdin, so the token never appears in a process's arguments. Before this change, <code>curl</code> had no time limit. A request that never answered could hold the job, and the <code>site</code> concurrency group that blocks the next deploy, for up to GitHub's six-hour job limit. Each request now ends after 30 seconds and counts as a failure.",
+    "The workflow also reads two deployment IDs back from Vercel: the one the domain serves before the deploy, which is the rollback target, and the new one. Both go into <code>$GITHUB_OUTPUT</code> and into later API paths. Each must now match <code>^dpl_[A-Za-z0-9]+$</code>, or its step fails with a message naming the value. The rollback target comes from a new script, <code>serving-deployment.sh</code>. It leaves the target empty only when Vercel answers 404, which means the domain has never been promoted and there is nothing to roll back to. Any other answer without an ID stops the job before it deploys."
+   ],
+   "checks": [
+    {
+     "kind": "verify",
+     "text": "A failed or timed-out call still fails its step, and a failed promotion still triggers the rollback. This was traced through each step: <code>curl</code> exits 28 on a timeout, <code>vercel-api.sh</code> then exits 1, and the rollback step's condition includes <code>steps.promote.outcome == 'failure'</code>."
+    }
+   ],
+   "files": [
+    {
+     "path": ".github/scripts/vercel-api.sh",
+     "note": "Adds <code>--max-time 30</code> to every request. The token still reaches <code>curl</code> only through <code>-H @-</code>.",
+     "checks": [
+      {
+       "kind": "context",
+       "text": "With 30 seconds per request, one 36-try alias wait (five seconds apart) can last about 21 minutes in the worst case, rather than three. That is still far short of the six-hour job limit.",
+       "line": 29
+      }
+     ]
+    },
+    {
+     "path": ".github/scripts/serving-deployment.sh",
+     "note": "New. Prints the ID of the deployment the domain serves, prints an empty line for a 404, and fails on any other answer without a <code>dpl_</code> ID.",
+     "checks": [
+      {
+       "kind": "verify",
+       "line": 39,
+       "text": "<code>tests/site.sh</code> runs this script against a fake <code>curl</code>. Putting back the old exemption for an empty ID made the test fail for a 200 with <code>{\"deploymentId\":null}</code>, with <code>{}</code>, and with a body that is not JSON."
+      }
+     ]
+    },
+    {
+     "path": ".github/workflows/site.yml",
+     "note": "Moves the alias lookup into <code>serving-deployment.sh</code>, adds that script to the trigger paths, and checks the new deployment's ID against <code>^dpl_[A-Za-z0-9]+$</code> before writing it to <code>$GITHUB_OUTPUT</code>.",
+     "checks": [
+      {
+       "kind": "context",
+       "line": 57,
+       "text": "The step assigns the script's output under <code>bash -e</code>, so a failure stops the job here, before the deploy. An empty value still means the rollback step is skipped."
+      },
+      {
+       "kind": "verify",
+       "line": 85,
+       "text": "The pattern matches the whole value. Running it on hostile inputs rejected an ID followed by a newline and <code>deployment=evil</code>, an ID with <code>/../</code> or <code>?</code>, a leading or trailing space, <code>dpl_</code>, and the multi-line output <code>jq -r</code> gives for an array. Because an empty ID also fails it, this one check replaces the old <code>-z</code> test."
+      }
+     ]
+    },
+    {
+     "path": ".github/scripts/check-site.sh",
+     "note": "<code>cache_revalidates</code> refuses an empty <code>Cache-Control</code> value before it splits the value into directives.",
+     "checks": [
+      {
+       "kind": "verify",
+       "text": "Under macOS's <code>/bin/bash</code> 3.2, <code>check-site.sh cache</code> refuses <code>\"\"</code>, <code>\" \"</code>, <code>\",\"</code>, <code>\",,\"</code> and <code>\"public,\"</code> with exit 1 and no output. Before this change, an empty value crashed with <code>directives[@]: unbound variable</code>.",
+       "line": 133
+      },
+      {
+       "kind": "flag",
+       "text": "Follow-up from the review: the live check's <code>curl</code> has no <code>--max-time</code>. A response that never finishes keeps the new deployment live, with its rollback still waiting, until the job's six-hour limit."
+      }
+     ]
+    },
+    {
+     "path": "tests/site.sh",
+     "note": "Adds a <code>\" \"</code> case, fails a refusal that prints anything so a crash no longer counts as a refusal, and runs <code>serving-deployment.sh</code> against the fake <code>curl</code>.",
+     "collapsed": false,
+     "checks": [
+      {
+       "kind": "verify",
+       "text": "With <code>main</code>'s <code>check-site.sh</code>, this test prints <code>FAIL: … failed on \"\" without applying the rule</code> for <code>\"\"</code> and <code>\" \"</code>. With this branch it ends with <code>site checks passed</code>. Both runs used <code>/bin/bash</code> 3.2.",
+       "line": 46
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "rollout",
+   "title": "The installer's rollout, finished",
+   "kicker": "The README leads with the one-line install, and the plan records the outcome",
+   "intro": [
+    "The installer project's last rollout step was to point the README at the one-line install once the release and the domain checked out. The first automatic Website run after #38 deployed, promoted and passed the live check, so this pull request takes that step and marks the plan completed.",
+    "The README now explains each way to install and what it trusts: a build from source, the attested prebuilt binary, and the one-liner through <code>getmultipass.dev</code>. It also gives GitHub's own URL, a pinned release, a check-first install that verifies <code>install.sh</code> before running it, and <code>install.sh verify</code>, which rebuilds a release and compares the bytes."
+   ],
+   "checks": [
+    {
+     "kind": "context",
+     "text": "One planned DNS record is left out on purpose. Rollout step 6 was to add <code>0 issuewild \";\"</code>, but Vercel also issues a wildcard certificate for its default <code>*</code> record, which cannot be removed, and the record would stop that certificate renewing. § 2.9, step 6 and § 6.1 all say so."
+    }
+   ],
+   "files": [
+    {
+     "path": "README.md",
+     "note": "Rewrites the trust paragraph and the Install section around the one-line install.",
+     "collapsed": false,
+     "checks": [
+      {
+       "kind": "verify",
+       "text": "Each claim was checked against <code>install.sh</code> and <code>release.yml</code>. Rust selects the source build, and the prebuilt binary is for macOS only. Without <code>gh</code> the installer stops unless <code>MULTIPASS_UNVERIFIED=1</code> is set, and <code>MULTIPASS_VERSION</code> pins a release. <code>status</code>, <code>uninstall</code> and <code>verify &lt;version&gt;</code> work after <code>bash -s --</code>. The release attests <code>install.sh</code> in <code>multipass.sigstore.json</code>, which the check-first command verifies."
+      },
+      {
+       "kind": "context",
+       "line": 28,
+       "text": "This command installs the newest release, <code>v0.1.0</code>. That release lacks the store package, Touch ID unlock, <code>rekey</code>, <code>history</code> and <code>generate</code>, which the rest of the README describes. The owner merges this pull request just before the <code>v0.2.0</code> release pull request, so the gap lasts only until that release ships."
+      }
+     ]
+    },
+    {
+     "path": "docs/projects/installer/readme.md",
+     "note": "Marks the plan completed, records the first automatic site run and the <code>issuewild</code> decision, and adds § 9 Outcome.",
+     "checks": [
+      {
+       "kind": "context",
+       "text": "§ 9 lists, for each check in § 4, its evidence, or why it has not run yet: the checks that need a second release, the rollback, which needs a bad deployment, and <code>verify</code> against <code>v0.1.0</code>, which needs a Mac with the release's SDK."
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}
