@@ -242,6 +242,10 @@ pub enum Ask<'a> {
     /// Another passphrase, for these key files, which the first one does not
     /// open. `None` opens the store read-only.
     Other(&'a [String]),
+    /// The passphrase of this old single-file store, which changed after the
+    /// move under a passphrase not typed yet, such as the one before a
+    /// `passwd`. `None` leaves it for a later prompt.
+    OldFile(&'a Path),
 }
 
 /// How `open_or_move` found the store.
@@ -631,13 +635,56 @@ impl Vault {
         // package is listed again.
         let mut other: Option<Option<String>> = None;
         let mut attempt = 0;
-        loop {
+        let mut session = loop {
             attempt += 1;
             match self.try_open(&passphrase, &mut other, ask, now_ms) {
                 Err(Error::Vanished) if attempt < ATTEMPTS => continue,
-                result => return result,
+                result => break result?,
+            }
+        };
+        self.ask_for_old_files(&mut session, ask)?;
+        Ok(session)
+    }
+
+    /// Asks for the passphrase of each old single-file store that changed
+    /// since its move record and that no passphrase typed at this prompt
+    /// opens, so `settle` can merge it. That happens after a `passwd`, while
+    /// an older multipass on another Mac keeps saving to the old file under
+    /// the earlier passphrase. A read-only session merges nothing, so it
+    /// asks nothing.
+    fn ask_for_old_files(
+        &self,
+        session: &mut Session,
+        ask: &mut dyn FnMut(Ask) -> io::Result<Option<String>>,
+    ) -> Result<()> {
+        if session.passphrase.is_none() {
+            return Ok(());
+        }
+        let mut olds: Vec<PathBuf> = session
+            .moves
+            .iter()
+            .map(|(_, record)| self.parent().join(&record.file))
+            .collect();
+        if olds.is_empty() {
+            olds.extend(self.old.clone());
+        }
+        olds.sort();
+        olds.dedup();
+        for old in olds {
+            let Ok(bytes) = fs::read(&old) else {
+                continue;
+            };
+            let hash = crypto::sha256::hex_digest(&bytes);
+            if session.moves.iter().any(|(_, r)| r.sha256 == hash)
+                || open_old(&old, &bytes, &session.typed)?.is_some()
+            {
+                continue;
+            }
+            if let Some(passphrase) = ask(Ask::OldFile(&old)).map_err(Error::Io)? {
+                session.typed.push(passphrase);
             }
         }
+        Ok(())
     }
 
     fn try_open(
@@ -1185,7 +1232,7 @@ mod tests {
         move |ask| {
             Ok(match ask {
                 Ask::Passphrase => Some(first.clone()),
-                Ask::Other(_) => second.clone(),
+                Ask::Other(_) | Ask::OldFile(_) => second.clone(),
             })
         }
     }
@@ -1621,6 +1668,7 @@ mod tests {
                         asked += 1;
                         Some(second.to_string())
                     }
+                    Ask::OldFile(_) => panic!("this package has no old file"),
                 })
             };
             let mut session = synced.a.open(&mut both, T0 + 300 * S).unwrap();
@@ -1651,6 +1699,7 @@ mod tests {
                     asked_other = true;
                     None
                 }
+                Ask::OldFile(_) => panic!("this package has no old file"),
             })
         };
         let err = vault.open(&mut ask, T0).err().unwrap();
@@ -1968,7 +2017,17 @@ mod tests {
     }
 
     fn open_or_move(vault: &Vault, pass: &str, now: u64) -> (Session, bool) {
-        let (mut session, opened) = vault.open_or_move(&mut answers(pass, None), now).unwrap();
+        open_or_move_with(vault, pass, None, now)
+    }
+
+    /// `open_or_move`, answering any second prompt with `second`.
+    fn open_or_move_with(
+        vault: &Vault,
+        pass: &str,
+        second: Option<&str>,
+        now: u64,
+    ) -> (Session, bool) {
+        let (mut session, opened) = vault.open_or_move(&mut answers(pass, second), now).unwrap();
         session.settle(vault, now).unwrap();
         (session, matches!(opened, Opened::Moved))
     }
@@ -2205,6 +2264,38 @@ mod tests {
         assert_eq!(secret_of(&session, "bank").as_deref(), Some("2"));
         assert_eq!(secret_of(&session, "card").as_deref(), Some("0"));
         assert_eq!(session.warnings.len(), 1, "{:?}", session.warnings);
+    }
+
+    /// After a `passwd`, an older multipass on another Mac still saves to
+    /// the old file under the earlier passphrase. The prompt asks for that
+    /// passphrase and merges the save; without it, it warns and leaves the
+    /// old file and its record for a later prompt.
+    #[test]
+    fn merges_an_old_file_saved_under_the_passphrase_before_a_passwd() {
+        let (vault, old) = beside_old("multipass 2\nx\n\tsecret 1\n");
+        open_or_move(&vault, "pass", T0);
+        let mut session = vault.open(&mut answers("pass", None), T0 + S).unwrap();
+        session.rotate(&vault, T0 + S, Some("new".into())).unwrap();
+        save_old(
+            &old,
+            "pass",
+            "multipass 2\nx\n\tsecret 1\nz\n\tsecret 3\n",
+            T0 + DAY_MS,
+        );
+
+        let (session, _) = open_or_move_with(&vault, "new", None, T0 + 2 * DAY_MS);
+        assert_eq!(session.store.names().collect::<Vec<_>>(), ["x"]);
+        assert_eq!(session.warnings.len(), 1, "{:?}", session.warnings);
+        assert!(session.warnings[0].contains("this passphrase does not open it"));
+        assert_eq!(count(vault.dir(), "moved."), 1);
+
+        let (session, _) = open_or_move_with(&vault, "new", Some("pass"), T0 + 3 * DAY_MS);
+        assert_eq!(session.store.names().collect::<Vec<_>>(), ["x", "z"]);
+        assert_eq!(session.warnings.len(), 1, "{:?}", session.warnings);
+        assert!(session.warnings[0].ends_with("changed after the move; merged its changes"));
+        // The old file now matches the record, so no prompt asks again.
+        let (session, _) = open_or_move_with(&vault, "new", None, T0 + 3 * DAY_MS + S);
+        assert!(session.warnings.is_empty(), "{:?}", session.warnings);
     }
 
     #[test]

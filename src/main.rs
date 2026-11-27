@@ -560,6 +560,16 @@ fn open(vault: &Vault, now: u64, settle: Settle) -> Result<Session> {
                 let other = terminal_prompt("Other passphrase: ")?;
                 Ok((!other.is_empty()).then_some(other))
             }
+            Ask::OldFile(path) => {
+                eprintln!(
+                    "multipass: {} changed after the move, under a passphrase you have not \
+                     typed, such as the one before a passwd; type it to merge the change, or \
+                     press return to leave it for now",
+                    path.display()
+                );
+                let old = terminal_prompt("Old file's passphrase: ")?;
+                Ok((!old.is_empty()).then_some(old))
+            }
         }
     };
     open_with(vault, now, settle, &mut ask)
