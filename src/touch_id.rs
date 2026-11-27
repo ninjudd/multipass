@@ -177,4 +177,32 @@ mod tests {
         }
         assert_eq!(after_sheet(None), Approval::Denied);
     }
+
+    /// Calls the reply block's `invoke` through the block LocalAuthentication
+    /// receives, with the arguments it passes, and checks that a failed reply
+    /// arrives as a failure and a successful one as a success. Catches a
+    /// block layout or `invoke` signature that reads `success` from the wrong
+    /// argument.
+    #[test]
+    fn the_reply_block_carries_success_and_failure() {
+        let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|p| p.into_inner());
+        let block = objc::global_block(on_reply);
+        for (success, expected) in [(0u8, (false, 0)), (1u8, (true, 0))] {
+            let (sender, receiver) = mpsc::channel();
+            *REPLY.lock().unwrap() = Some(sender);
+            // The block's first field after `isa`, `flags`, and `reserved` is
+            // `invoke`; calling it with the block and a null error is what
+            // LocalAuthentication does for a reply without an error.
+            let invoke = unsafe { (*block).invoke };
+            unsafe { invoke(block, success, std::ptr::null_mut()) };
+            assert_eq!(receiver.recv().unwrap(), expected);
+            assert_eq!(
+                after_sheet(Some(expected)),
+                match success {
+                    0 => Approval::Denied,
+                    _ => Approval::Approved,
+                }
+            );
+        }
+    }
 }

@@ -154,7 +154,7 @@ pub struct Block {
     isa: *const c_void,
     flags: i32,
     reserved: i32,
-    invoke: unsafe extern "C" fn(*const Block, u8, Id),
+    pub(crate) invoke: unsafe extern "C" fn(*const Block, u8, Id),
     descriptor: *const BlockDescriptor,
 }
 
