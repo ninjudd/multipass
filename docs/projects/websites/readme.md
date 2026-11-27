@@ -1,5 +1,5 @@
 ---
-status: draft
+status: ready
 priority: next
 ---
 
@@ -60,7 +60,20 @@ example work
 
 `find` prints each matching entry's name once, sorted, and exits 1 when none matches, so a script can test it. It opens the store, so it asks for the passphrase like `get`.
 
-The matching rule awaits the owner (§ 6).
+When nothing matches, `find` looks for related entries: those with a website whose root domain is the page's root domain, under the same scheme rule. It prints none of them on stdout, so stdout still holds only real matches. It names each on stderr with the website that relates it and the command that would add the page, then exits 1:
+
+```console
+$ multipass find https://admin.example.com/login
+multipass: no entry lists admin.example.com; related: example work (https://portal.example.com/login)
+multipass: to use it here, run: multipass website "example work" --add https://admin.example.com/login
+```
+
+A related entry is a hint for you to confirm, never a match, so nothing fills it in or offers it as a login. That lets the root domain come from a short rule rather than the Public Suffix List, in `website::root(host)`:
+
+1. Take the last two labels of the host, such as `example.com` for `portal.example.com`.
+2. When the last label has two letters, a country code, and the label before it is one of `co`, `com`, `net`, `org`, `gov`, `edu`, `ac`, `ne`, or `or`, take the last three instead, such as `example.co.uk`.
+
+The rule is wrong for some hosts, such as two sites under `github.io`, which it calls related. A wrong hint costs you only a suggestion you ignore.
 
 ### 2.3 Commands
 
@@ -70,7 +83,7 @@ The matching rule awaits the owner (§ 6).
 | `website <name>` | Lists the entry's websites, one per line. |
 | `website <name> --add <url>` | Repeatable in one command. Appends websites. |
 | `website <name> --remove <url>` | Repeatable. Removes websites, matching the normalized value exactly, and fails naming any that is not listed. |
-| `find <url>` | Prints the names of the matching entries (§ 2.2). |
+| `find <url>` | Prints the names of the matching entries, or, when none matches, names the related entries on stderr with the command that adds the page (§ 2.2). |
 | `get <name> --field website` | Prints the websites, one per line, like `website <name>`. |
 
 Changing websites is a change to the entry, so it takes a stamp from `Store::stamp` and merges like any other change. Two Macs that change the same entry's websites before seeing each other's change keep the newer one, as the mergeable store does for every field.
@@ -83,7 +96,7 @@ Adding a field means a new `multipass <n>` header, and `Store::from_text` keeps 
 
 | File | Change |
 | --- | --- |
-| `src/website.rs` | New. `normalize(&str) -> Result<String>` and `matches(stored, page) -> bool`, with no cryptography, since websites are not secrets. |
+| `src/website.rs` | New. `normalize(&str) -> Result<String>`, `matches(stored, page) -> bool`, `root(host) -> &str`, and `related(stored, page) -> bool`, with no cryptography, since websites are not secrets. |
 | `src/store.rs` | `Entry::websites: Vec<String>`, the `website` field line, and the new format number. |
 | `src/main.rs` | `--website` on `add`, the `website` and `find` commands, `--field website`, and `USAGE`. |
 | `README.md` | A section on websites and `find`, and the recovery example shows a `website` line. |
@@ -94,6 +107,7 @@ Adding a field means a new `multipass <n>` header, and `Store::from_text` keeps 
 
 - **A repeatable field, not a list in one line.** Each `website` line is one value, like every other field, so the store text stays readable with `age -d` and needs no separator that a web address could contain.
 - **Match by host and subdomain, without the Public Suffix List.** Matching every host under the same registrable domain, as some password managers do, needs the Public Suffix List to know that `example.co.uk` is one site but `co.uk` is not. That list is a data file of a few hundred kilobytes that its maintainers update often, so multipass would have to ship and refresh it. Matching the stored host and its subdomains needs no list. It also never offers a password across tenants of a shared host, such as two sites under `github.io`, because an entry stores the tenant's own host.
+- **Hints by root domain, matches by host.** The owner chose strict matching with a hint: few unrelated sites share a root domain, so a related entry is usually the right one, but only you can say so. Showing it as a hint with the command to add the page keeps matching exact, and each confirmed hint becomes an exact match from then on.
 - **`www.` ignored.** Sites serve the same login with and without `www.`, so treating them as one host saves you a second line for nearly every site.
 - **HTTPS never downgrades.** Offering a password saved for `https` to an `http` page would send it in the clear.
 - **`find` in the CLI now.** A browser extension, and the app's AutoFill registration, both need "which entries belong to this page". Building it once in Rust, with tests, gives every later caller the same answer.
@@ -108,7 +122,8 @@ Adding a field means a new `multipass <n>` header, and `Store::from_text` keeps 
 | `multipass website x --add github.com` | Fails: `x already lists https://github.com` |
 | `multipass find https://www.github.com/login` | Prints `x` |
 | `multipass find http://github.com` | Exits 1 with no output, because the entry stored `https` |
-| `multipass find https://notgithub.com` | Exits 1 |
+| `multipass find https://notgithub.com` | Exits 1, with no related entry |
+| With `y` listing only `https://portal.example.com`, `multipass find https://admin.example.com` | Exits 1 with nothing on stdout. Stderr names `y`, its website, and `multipass website y --add https://admin.example.com`. |
 | `multipass website x --remove https://github.com`, then `age -d` on the store | The store shows only the `gist.github.com` line for `x`, and the entry's `modified` changed |
 | `multipass add y --website ftp://example.com` | Fails, naming `ftp://example.com` |
 | A store from the previous format | Opens, with no websites on any entry |
@@ -116,6 +131,7 @@ Adding a field means a new `multipass <n>` header, and `Store::from_text` keeps 
 Tests that must fail before the change and pass after it:
 
 - **Matching table.** Each row of § 2.2 as a pair that matches and one that does not, including `example.com` against `notexample.com`, `www.` on either side, a stored `http` against an `https` page, the reverse, and a different port. Catches a suffix test without the dot, which would offer a password to a look-alike domain.
+- **Root domains.** `root` gives `example.com` for `a.b.example.com`, `example.co.uk` for `portal.example.co.uk`, and `example.com` for `example.com`, and `related` never holds where `matches` does. Catches a rule that calls `co.uk` a root domain, which would relate every British site to every other.
 - **Normalizing.** Uppercase hosts, default ports, a bare host, a trailing slash kept, and each refused value. Catches two spellings of one site that would both be stored.
 - **Round trip.** An entry with three websites goes through `to_text` and `from_text` unchanged and in order, and a merge of two versions keeps the newer version's list whole. Catches a merge that interleaves two lists.
 
@@ -125,4 +141,4 @@ Each website adds one short line to its entry. `find` compares the page with eve
 
 ## 6. Open questions
 
-1. **How strictly a website matches.** Recommended: the same host or any subdomain of it, with `www.` ignored, as § 2.2 describes. The alternative is the whole site, every host under the same registrable domain, which needs the Public Suffix List as a data file. Owner: the user.
+1. **How strictly a website matches.** Decided by the owner: the same host or any subdomain of it, with `www.` ignored, and an entry that shares only the page's root domain is shown as a hint you can add, as § 2.2 describes. The rejected alternative was matching the whole site, every host under the same registrable domain, which needs the Public Suffix List as a data file.
