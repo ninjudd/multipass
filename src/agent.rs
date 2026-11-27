@@ -602,6 +602,10 @@ impl<A: Approver> Agent<A> {
         let vault = self.vault.lock().unwrap_or_else(|p| p.into_inner());
         match session.save(&vault, now) {
             Ok(()) => stream.write_all(b"saved\n"),
+            Err(vault::Error::Io(e)) => {
+                let message = format!("could not write to {}: {e}", vault.path().display());
+                write_counted(stream, "failed", message.as_bytes())
+            }
             Err(e) => write_counted(stream, "failed", e.to_string().as_bytes()),
         }
     }
