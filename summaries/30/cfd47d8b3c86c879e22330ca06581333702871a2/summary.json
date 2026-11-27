@@ -1,0 +1,248 @@
+{
+ "version": 1,
+ "name": "Installer and releases",
+ "project": "installer",
+ "pr": {
+  "repo": "ninjudd/multipass",
+  "number": 30,
+  "title": "Serve getmultipass.dev from site/, redirecting install.sh to the release",
+  "head": "cfd47d8b3c86c879e22330ca06581333702871a2",
+  "headRef": "installer-site",
+  "base": "6b1e021aca2a1f4e9979c69453d4ef7e4af5856a",
+  "baseRef": "installer-upgrade",
+  "basePr": 29
+ },
+ "overview": {
+  "summary": [
+   "multipass's installer is a script that the release workflow publishes as a GitHub release asset. This pull request gives it a short address: <code>https://getmultipass.dev/install.sh</code>. The domain serves no code. A small Vercel site redirects each install path to the matching release asset on GitHub, so the file that runs is always the immutable, attested one.",
+   "<ol><li><b>The site.</b> <code>site/</code> holds one static landing page and a <code>vercel.json</code> of redirects: <code>/install.sh</code> to the newest release, <code>/&lt;tag&gt;/install.sh</code> to that release, and <code>www</code> to the apex.</li><li><b>The guard.</b> <code>.github/scripts/check-site.sh</code> fails any <code>vercel.json</code> that could send an install path anywhere but this repository's releases. CI runs it through <code>tests/site.sh</code> on the real site and on sixteen bad sites.</li><li><b>The deploy.</b> A new <code>Website</code> workflow deploys <code>site/</code> from <code>main</code> with a locked Vercel CLI and a token that only the <code>production</code> environment holds. Each deploy is promoted explicitly, so it reaches the domain even after a rollback. The job then checks the live redirects with <code>curl</code>, and rolls back when they fail.</li></ol>",
+   "This is the top layer of a four-layer stack that carries out the installer plan. The README keeps its checkout install until rollout step 7, when the one-liner goes in."
+  ],
+  "cards": [
+   {
+    "id": "terms",
+    "title": "Terms",
+    "html": "<ul class=\"tight\"><li><b>Vercel</b>: the host that serves <code>getmultipass.dev</code> and its DNS.</li><li><b>Redirect</b>: a 3xx answer whose <code>Location</code> header names another URL; <code>curl -L</code> follows it.</li><li><b>Dot segment</b>: a <code>.</code> or <code>..</code> path segment, which <code>curl</code> collapses before sending, so <code>/releases/../../</code> leaves the repository.</li><li><b><code>production</code> environment</b>: a GitHub Actions environment whose secrets only jobs on <code>main</code> can read.</li></ul>"
+   },
+   {
+    "id": "review",
+    "title": "Review so far",
+    "html": "<p>The first review, at <code>eafd7a8</code>, opened four findings and listed three suggestions. This head answers all seven with seven commits, and a rebase onto the moved base. The review of <code>cfd47d8</code> is clean, with one small wording suggestion on the landing page.</p>"
+   }
+  ]
+ },
+ "groups": [
+  {
+   "id": "site",
+   "title": "What the domain serves",
+   "kicker": "The redirects and the landing page in site/",
+   "intro": [
+    "Vercel serves <code>site/</code> as a static site with no build step. <code>vercel.json</code> holds three redirects and one header rule, and <code>index.html</code> is the landing page at <code>/</code>.",
+    "The install redirects are temporary (307), and they send <code>Cache-Control: no-store</code>, so a new release is live through the domain as soon as GitHub publishes it."
+   ],
+   "files": [
+    {
+     "path": "site/vercel.json",
+     "note": "The redirects: install paths to GitHub releases, and www to the apex.",
+     "checks": [
+      {
+       "kind": "verify",
+       "text": "The tag pattern <code>v[0-9]+\\.[0-9]+\\.[0-9]+[0-9A-Za-z.-]*</code> cannot match a <code>/</code> or a <code>%</code>, so a request cannot inject a path into the release URL. Checked by reading the pattern.",
+       "line": 16
+      }
+     ]
+    },
+    {
+     "path": "site/index.html",
+     "note": "The landing page: the one-liner, what multipass is, and installs that avoid the domain.",
+     "checks": [
+      {
+       "kind": "verify",
+       "text": "This item now says what a build from source, the prebuilt binary, and the one-liner each trust, matching the plan's README row.",
+       "line": 66
+      },
+      {
+       "kind": "verify",
+       "text": "Every command under \"Install without this domain\" now uses GitHub's release URLs, so none of them goes through <code>getmultipass.dev</code>.",
+       "line": 74
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "guard",
+   "title": "The redirect guard and its tests",
+   "kicker": "check-site.sh, the bad sites it must reject, and the CI step",
+   "intro": [
+    "<code>check-site.sh static</code> reads a site's <code>vercel.json</code>. A redirect whose source ends in <code>install.sh</code> must go under <code>https://github.com/ninjudd/multipass/releases/</code> with no dot segment, no <code>%</code> at all, and no backslash. Every other redirect must stay on the site. <code>vercel.json</code> must be an object whose redirects are a list with text sources and destinations, and it may set only five keys. The site may hold no file but <code>index.html</code> and <code>vercel.json</code>, so an on-site redirect can reach only the page.",
+    "<code>check-site.sh live</code> asks the deployed site for <code>/install.sh</code> and <code>/v0.0.0/install.sh</code> with <code>curl</code>. It checks for a temporary redirect to exactly the expected release URL, with <code>no-store</code>.",
+    "<code>tests/site.sh</code> runs the static check on <code>site/</code>, which must pass, and on each of the sixteen directories under <code>tests/site/</code>, which must fail with a named problem."
+   ],
+   "checks": [
+    {
+     "kind": "verify",
+     "text": "Each fixture differs from <code>site/vercel.json</code> by exactly the defect it is named for. Checked with <code>diff</code> against the real file, and <code>tests/site.sh</code> passes."
+    }
+   ],
+   "files": [
+    {
+     "path": ".github/scripts/check-site.sh",
+     "note": "The guard, in two modes: static for a checkout and live for the deployed site.",
+     "checks": [
+      {
+       "kind": "verify",
+       "text": "Mixed-case <code>%2E</code>, <code>%252e</code>, <code>%2f</code>, a trailing <code>/..</code>, a lone <code>.</code> segment, and backslashes are all rejected. Checked by running the script on hand-made configs.",
+       "line": 33
+      },
+      {
+       "kind": "verify",
+       "text": "A top-level array, a string <code>redirects</code>, an array destination, a numeric source, and a bad entry ahead of a bad redirect are all rejected, while empty redirects pass. Checked by running the script.",
+       "line": 61
+      },
+      {
+       "kind": "verify",
+       "text": "A redirect from <code>/v0.1.0/install(\\.sh)</code> to an on-site <code>payload.txt</code>, which the previous guard accepted, is now rejected for the file, as are files in subdirectories and hidden files. Only <code>.vercel</code>, which the CLI never uploads, is skipped. Checked by running the script.",
+       "line": 97
+      }
+     ]
+    },
+    {
+     "path": "tests/site.sh",
+     "note": "Runs the guard on the real site and on every bad site."
+    },
+    {
+     "path": ".github/workflows/ci.yml",
+     "note": "Adds <code>tests/site.sh</code> after <code>tests/install.sh</code>; the cargo steps are unchanged."
+    },
+    {
+     "path": "tests/site/build-command/vercel.json"
+    },
+    {
+     "path": "tests/site/catch-all-off-site/vercel.json"
+    },
+    {
+     "path": "tests/site/dot-segments/vercel.json"
+    },
+    {
+     "path": "tests/site/encoded-dot-segments/vercel.json"
+    },
+    {
+     "path": "tests/site/framework/vercel.json"
+    },
+    {
+     "path": "tests/site/installer-copy/install.sh",
+     "note": "A stand-in for a copy of the installer, which the site must never hold."
+    },
+    {
+     "path": "tests/site/installer-copy/vercel.json"
+    },
+    {
+     "path": "tests/site/look-alike-repository/vercel.json"
+    },
+    {
+     "path": "tests/site/other-host/vercel.json"
+    },
+    {
+     "path": "tests/site/outside-releases/vercel.json"
+    },
+    {
+     "path": "tests/site/protocol-relative/vercel.json"
+    },
+    {
+     "path": "tests/site/rewrite/vercel.json"
+    },
+    {
+     "path": "tests/site/second-redirect/vercel.json"
+    },
+    {
+     "path": "tests/site/array-destination/vercel.json"
+    },
+    {
+     "path": "tests/site/encoded-slash/vercel.json"
+    },
+    {
+     "path": "tests/site/on-site-payload/payload.txt",
+     "note": "A script that a redirect could hand to <code>curl | bash</code>, which the guard must find."
+    },
+    {
+     "path": "tests/site/on-site-payload/vercel.json"
+    },
+    {
+     "path": "tests/site/redirects-not-a-list/vercel.json"
+    }
+   ]
+  },
+  {
+   "id": "deploy",
+   "title": "The deploy workflow and the locked Vercel CLI",
+   "kicker": "site.yml and the npm lock it installs from",
+   "intro": [
+    "The <code>Website</code> workflow runs on a push to <code>main</code> that touches the site or its tooling, and by hand. Its job runs in the <code>production</code> environment, which admits only <code>main</code> and holds <code>VERCEL_TOKEN</code>, so no pull request can read the token.",
+    "The job runs the static guard and installs the CLI with <code>npm ci --ignore-scripts</code>. It records which deployment the domain's alias points at, deploys with <code>--skip-domain</code>, and promotes the new deployment explicitly. It then checks that the alias names the new deployment and runs the live guard. When the promotion or a check fails, it rolls back to the recorded deployment."
+   ],
+   "files": [
+    {
+     "path": ".github/workflows/site.yml",
+     "note": "The deploy job, with read-only permissions and checkout pinned by commit SHA.",
+     "checks": [
+      {
+       "kind": "verify",
+       "text": "<code>actions/checkout@11d5960a</code> is the commit the <code>v4.4.0</code> tag names. Checked with <code>gh api</code> on the tag ref.",
+       "line": 36
+      },
+      {
+       "kind": "context",
+       "text": "A Vercel rollback turns off automatic domain assignment until a deployment is promoted. Deploying with <code>--skip-domain</code> and running <code>vercel promote</code> every time works whatever that setting is.",
+       "line": 81
+      },
+      {
+       "kind": "verify",
+       "text": "In the locked <code>vercel@65.14.0</code>, <code>promote</code> takes a deployment URL, <code>--yes</code>, and a timeout. Checked by reading the unpacked package's command definitions.",
+       "line": 92
+      }
+     ]
+    },
+    {
+     "path": ".github/vercel/package.json",
+     "note": "The Vercel CLI at the exact version 65.14.0, and nothing else.",
+     "checks": [
+      {
+       "kind": "verify",
+       "text": "Published 2026-11-09, 17 days before the commit, and the lock's integrity hash matches the registry's. Checked with <code>npm view</code>."
+      }
+     ]
+    },
+    {
+     "path": ".github/vercel/package-lock.json"
+    },
+    {
+     "path": ".gitattributes",
+     "note": "Marks the lock file as generated so GitHub folds it."
+    },
+    {
+     "path": ".gitignore",
+     "note": "Ignores <code>site/.vercel</code>, which the CLI writes when linking."
+    }
+   ]
+  },
+  {
+   "id": "docs",
+   "title": "Agent rules and the plan",
+   "kicker": "AGENTS.md's Website section and the plan's deploy steps",
+   "intro": [
+    "<code>AGENTS.md</code> gains a Website section. It says what <code>site/</code> may hold, that <code>check-site.sh</code> enforces it, and that the Vercel CLI is a deployment tool, not a multipass dependency. The plan's file table, § 2.10 deploy steps, and rollout step 5 are updated to match what was built."
+   ],
+   "files": [
+    {
+     "path": "AGENTS.md",
+     "note": "The Website section, and <code>tests/site.sh</code> among the checks to run."
+    },
+    {
+     "path": "docs/projects/installer/readme.md",
+     "note": "§ 2.8 rows for the new files, § 2.10's eight deploy steps with the explicit promotion, a § 4 row for the run after a rollback, and rollout step 5, which now limits the already-created <code>production</code> environment."
+    }
+   ]
+  }
+ ]
+}
