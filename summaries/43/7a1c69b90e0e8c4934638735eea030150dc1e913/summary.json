@@ -1,0 +1,53 @@
+{
+ "version": 1,
+ "name": "Commands that ask for nothing",
+ "project": "",
+ "pr": {
+  "repo": "ninjudd/multipass",
+  "number": 43,
+  "title": "Say that status and lock ask for nothing either",
+  "head": "7a1c69b90e0e8c4934638735eea030150dc1e913",
+  "headRef": "readme-commands-without-prompts",
+  "base": "17ffd47dd66fbf01e387738e97117ea26c08fb47",
+  "baseRef": "main"
+ },
+ "overview": {
+  "summary": [
+   "multipass is a password manager whose store opens with a passphrase. On a Mac with Touch ID or an Apple Watch, the first command that asks for the passphrase also starts a background <b>session agent</b>, <code>multipass __agent</code>, which holds the store's key. Later commands ask that agent for one entry at a time, and a touch approves each request. The README's Use section tells a reader which commands ask for the passphrase, which ask for a touch, and which ask for neither.",
+   "The sentence on commands that ask for neither named only <code>generate</code> and <code>upgrade</code>, which open no store at all. <code>status</code> and <code>lock</code> ask for nothing either: each only sends one word to the session agent, which answers both without putting a Touch ID sheet on screen, and with no agent running each prints its answer at once. This pull request adds the two commands to the sentence, so the README's three groups of commands, passphrase, touch, and neither, together cover every command in the help text.",
+   "Reviews of the password generation stack suggested the change. The pull request changes one line of <code>README.md</code> and no code."
+  ],
+  "cards": [
+   {
+    "id": "prompts",
+    "title": "What each command asks for",
+    "html": "<div class=\"tblwrap\"><table class=\"tbl\"><thead><tr><th>Commands</th><th>Asks for</th></tr></thead><tbody><tr><td><code>init</code>, <code>passwd</code>, <code>rekey</code></td><td class=\"r\">The passphrase, always</td></tr><tr><td><code>get</code>, <code>list</code>, <code>history</code>, <code>otp</code>, <code>add</code>, <code>rm</code>, <code>restore</code></td><td class=\"r\">The passphrase once, then a touch while the session agent runs</td></tr><tr><td><code>generate</code>, <code>upgrade</code>, <code>status</code>, <code>lock</code></td><td class=\"r\">Nothing</td></tr></tbody></table></div><p class=\"note\">The README's \"Stay unlocked between commands\" section names the first two rows; this pull request completes the third.</p>"
+   }
+  ]
+ },
+ "groups": [
+  {
+   "id": "readme",
+   "title": "The README's sentence about prompts",
+   "kicker": "Names status and lock beside generate and upgrade as commands that ask for nothing",
+   "intro": [
+    "The sentence now reads: <code>generate</code> and <code>upgrade</code> open no store, and <code>status</code> and <code>lock</code> only ask the session agent, so these four ask for neither. \"Neither\" refers back to the sentence before it: the passphrase, and the touch that later commands ask for instead.",
+    "The code bears this out. In <code>src/main.rs</code>, <code>generate</code> returns before the store's path is worked out, and <code>upgrade</code> is parsed apart from every store command and never reaches <code>run</code>. <code>status</code> and <code>lock</code> reach the agent through <code>Ctx::client_any</code>, which only connects to its socket. In <code>src/agent.rs</code>, the agent answers the <code>status</code> and <code>lock</code> requests before the step that asks Touch ID to approve a request. Neither command calls the code that prompts for the passphrase."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": "README.md",
+     "note": "One sentence in the Use section: adds <code>status</code> and <code>lock</code> to the commands that ask for neither the passphrase nor a touch.",
+     "checks": [
+      {
+       "kind": "verify",
+       "line": 57,
+       "text": "Traced each command in <code>src/main.rs</code> at this head: <code>generate</code> returns at the top of <code>run</code>, <code>upgrade</code> exits through <code>run_upgrade</code>, and <code>status</code> and <code>lock</code> call only <code>Ctx::client_any</code>, never <code>open_prompting</code> or another prompt. In <code>src/agent.rs</code>, <code>handle_one</code> answers <code>status</code> and <code>lock</code> and returns before <code>answer</code> calls the Touch ID approver. A release build under an empty temporary <code>HOME</code> printed <code>locked</code> for <code>status</code> and <code>Not unlocked</code> for <code>lock</code>, at once and with no prompt, and did the same against a stale agent socket and a fake agent that hangs up."
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}
