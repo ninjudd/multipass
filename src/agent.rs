@@ -344,7 +344,11 @@ pub struct Agent<A: Approver> {
     approver: A,
     /// The agent's executable and its identity when the agent started.
     exe: Option<(PathBuf, ExeId)>,
-    ended: AtomicBool,
+    /// Set by the first `end`: the session is over, and no request is served.
+    ending: AtomicBool,
+    /// Set once the handler that ended the session has written its reply, so
+    /// `serve` returns, and the process exits, only after that reply is out.
+    stopped: AtomicBool,
     /// Held while a sheet shows, so there is one at a time.
     one_sheet: Mutex<()>,
 }
@@ -358,7 +362,11 @@ pub fn run_agent(vault: Vault, paths: Paths) -> Result<(), String> {
     if !TouchId::available() {
         return Err("neither Touch ID nor an Apple Watch can approve requests".into());
     }
-    let (deadline, keys) = read_start(&mut io::stdin().lock()).map_err(|e| e.to_string())?;
+    // Read the start message without std's stdin buffer, which would keep an
+    // unpinned copy of the keys for the agent's whole life.
+    let mut stdin = fs::File::open("/dev/stdin").map_err(|e| e.to_string())?;
+    let (deadline, keys) = read_start(&mut stdin).map_err(|e| e.to_string())?;
+    drop(stdin);
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let id = ExeId::of(&exe).map_err(|e| e.to_string())?;
     let agent = Arc::new(Agent::new(
@@ -398,7 +406,8 @@ impl<A: Approver> Agent<A> {
             deadline,
             approver,
             exe,
-            ended: AtomicBool::new(false),
+            ending: AtomicBool::new(false),
+            stopped: AtomicBool::new(false),
             one_sheet: Mutex::new(()),
         }
     }
@@ -423,13 +432,14 @@ impl<A: Approver> Agent<A> {
         Ok(listener)
     }
 
-    /// Answers connections, each on its own thread, until the session ends.
+    /// Answers connections, each on its own thread, until the session ends
+    /// and the handler that ended it has replied.
     pub fn serve(self: &Arc<Self>, listener: UnixListener) {
         if listener.set_nonblocking(true).is_err() {
             self.end(Ended::Locked);
             return;
         }
-        while !self.ended.load(Ordering::SeqCst) {
+        while !self.stopped.load(Ordering::SeqCst) {
             if now_ms() / 1000 >= self.deadline {
                 self.end(Ended::Expired);
                 break;
@@ -448,7 +458,7 @@ impl<A: Approver> Agent<A> {
     /// Writes the end note, removes the socket, and wipes the keys. Only
     /// the first call does anything.
     pub fn end(&self, why: Ended) {
-        if self.ended.swap(true, Ordering::SeqCst) {
+        if self.ending.swap(true, Ordering::SeqCst) {
             return;
         }
         let note = format!("{} {}\n", why.word(), now_ms() / 1000);
@@ -464,7 +474,16 @@ impl<A: Approver> Agent<A> {
         vault.open_with_keys(&keys, now_ms())
     }
 
-    fn handle(&self, mut stream: UnixStream) {
+    /// Answers one connection, then lets `serve` return when the answer
+    /// ended the session.
+    fn handle(&self, stream: UnixStream) {
+        self.handle_one(stream);
+        if self.ending.load(Ordering::SeqCst) {
+            self.stopped.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn handle_one(&self, mut stream: UnixStream) {
         if sys::peer_uid(stream.as_raw_fd()).ok() != Some(sys::uid()) {
             return;
         }
@@ -481,7 +500,7 @@ impl<A: Approver> Agent<A> {
         let words: Vec<&str> = line.split(' ').collect();
         let request = match words.as_slice() {
             ["status"] => {
-                if !self.ended.load(Ordering::SeqCst) {
+                if !self.ending.load(Ordering::SeqCst) {
                     let _ = stream.write_all(format!("unlocked {}\n", self.deadline).as_bytes());
                 }
                 return;
@@ -508,7 +527,7 @@ impl<A: Approver> Agent<A> {
     /// Ends the session when something has made this agent unfit to serve:
     /// it has ended already, its executable changed, or its key expired.
     fn unfit(&self) -> bool {
-        if self.ended.load(Ordering::SeqCst) {
+        if self.ending.load(Ordering::SeqCst) {
             return true;
         }
         if let Some((path, id)) = &self.exe {
@@ -526,9 +545,19 @@ impl<A: Approver> Agent<A> {
 
     /// Opens the store for an approved request, replying and ending the
     /// session when a rotation elsewhere has left this agent's key behind.
+    /// When an older Mac has saved to the old single-file store since its
+    /// move record, it replies `unavailable` instead, so the command prompts
+    /// and the prompt merges that change.
     fn open_for(&self, stream: &mut UnixStream) -> io::Result<Option<vault::Session>> {
         match self.open() {
-            Ok(session) => Ok(Some(session)),
+            Ok(session) => {
+                let vault = self.vault.lock().unwrap_or_else(|p| p.into_inner());
+                if session.old_file_changed(&vault) {
+                    stream.write_all(b"unavailable\n")?;
+                    return Ok(None);
+                }
+                Ok(Some(session))
+            }
             Err(vault::Error::Stale) => {
                 self.end(Ended::Changed);
                 stream.write_all(b"stale\n")?;
@@ -667,12 +696,25 @@ pub struct Editing {
     stream: UnixStream,
 }
 
+/// Which checks `connect` makes of the agent at the other end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Peer {
+    /// It runs as this user from this command's own executable, as a
+    /// request that hands over or changes an entry needs.
+    SameBinary,
+    /// It runs as this user. Enough for `status` and `lock`, which send
+    /// nothing and only learn or end the session, whichever multipass
+    /// binary started it.
+    SameUser,
+}
+
 /// Connects to the store's agent. `Err(Tried::NoAgent)` when no agent
-/// answers or the one that does runs as another user, and
-/// `Err(Tried::Updated)` when it runs from another executable than this
-/// command; either way the command asks for the passphrase. A directory
-/// that fails `check_dir` is named on stderr and counts as no agent.
-pub fn connect(paths: &Paths) -> Result<Client, Tried> {
+/// answers or the one that does runs as another user, and, with
+/// `Peer::SameBinary`, `Err(Tried::Updated)` when it runs from another
+/// executable than this command; either way the command asks for the
+/// passphrase. A directory that fails `check_dir` is named on stderr and
+/// counts as no agent.
+pub fn connect(paths: &Paths, peer: Peer) -> Result<Client, Tried> {
     if !paths.dir.exists() {
         return Err(Tried::NoAgent);
     }
@@ -685,13 +727,15 @@ pub fn connect(paths: &Paths) -> Result<Client, Tried> {
     if sys::peer_uid(fd).ok() != Some(sys::uid()) {
         return Err(Tried::NoAgent);
     }
-    let theirs = sys::peer_pid(fd)
-        .and_then(sys::pid_path)
-        .and_then(|path| ExeId::of(&path));
-    let ours = std::env::current_exe().and_then(|path| ExeId::of(&path));
-    match (theirs, ours) {
-        (Ok(theirs), Ok(ours)) if theirs == ours => {}
-        _ => return Err(Tried::Updated),
+    if peer == Peer::SameBinary {
+        let theirs = sys::peer_pid(fd)
+            .and_then(sys::pid_path)
+            .and_then(|path| ExeId::of(&path));
+        let ours = std::env::current_exe().and_then(|path| ExeId::of(&path));
+        match (theirs, ours) {
+            (Ok(theirs), Ok(ours)) if theirs == ours => {}
+            _ => return Err(Tried::Updated),
+        }
     }
     if stream.set_read_timeout(Some(REPLY_WAIT)).is_err()
         || stream.set_write_timeout(Some(REQUEST_WAIT)).is_err()
@@ -793,6 +837,9 @@ impl Editing {
         match words.as_slice() {
             ["saved"] => Ok(()),
             ["refused"] => Err("the session agent refused the change".into()),
+            ["unavailable"] => {
+                Err("an older multipass changed the store meanwhile; run the command again".into())
+            }
             ["stale"] => Err(format!(
                 "{}; run the command again",
                 Ended::Changed.reason()
@@ -962,6 +1009,32 @@ mod tests {
         Client { stream }
     }
 
+    /// Ends the session and stops `serve`, as a handler that ended it would.
+    fn finish(agent: &Arc<Agent<Fake>>) {
+        agent.end(Ended::Locked);
+        agent.stopped.store(true, Ordering::SeqCst);
+    }
+
+    /// `serve` keeps running after `end` until a handler has replied and set
+    /// `stopped`. Catches a `serve` that watches the flag `end` sets, which
+    /// lets the process exit before the ending reply is written.
+    #[test]
+    fn ending_alone_does_not_stop_serve() {
+        let s = setup("end-alone");
+        let agent = agent(&s, Fake::always(Approval::Approved));
+        let listener = agent.bind().unwrap();
+        let serving = {
+            let agent = Arc::clone(&agent);
+            std::thread::spawn(move || agent.serve(listener))
+        };
+        agent.end(Ended::Locked);
+        std::thread::sleep(POLL * 4);
+        assert!(!serving.is_finished(), "serve returned before any reply");
+        agent.stopped.store(true, Ordering::SeqCst);
+        serving.join().unwrap();
+        fs::remove_dir_all(&s.root).unwrap();
+    }
+
     fn wait_until(mut done: impl FnMut() -> bool) {
         for _ in 0..200 {
             if done() {
@@ -1011,7 +1084,7 @@ mod tests {
             fake.reasons(),
             ["read b", "read b", "list your entries", "change x"]
         );
-        agent.end(Ended::Locked);
+        finish(&agent);
         fs::remove_dir_all(&s.root).unwrap();
     }
 
@@ -1042,7 +1115,7 @@ mod tests {
         serving(&agent);
         assert!(matches!(client(&s).read("b").unwrap(), Answer::Unavailable));
         assert_eq!(client(&s).status(), Some(s.deadline));
-        agent.end(Ended::Locked);
+        finish(&agent);
         fs::remove_dir_all(&s.root).unwrap();
     }
 
@@ -1112,7 +1185,7 @@ mod tests {
         let mut reply = Vec::new();
         stream.read_to_end(&mut reply).unwrap();
         assert!(reply.is_empty());
-        agent.end(Ended::Locked);
+        finish(&agent);
         fs::remove_dir_all(&s.root).unwrap();
     }
 
@@ -1219,9 +1292,9 @@ mod tests {
         fs::remove_dir_all(&root).unwrap();
     }
 
-    /// `rekey` while unlocked asked `Passphrase (the session ended): `,
-    /// because the running agent's socket, with no end note, read as a
-    /// session that had ended.
+    /// A running agent leaves a socket and no end note, which is not a
+    /// session that ended, so a prompt that did not ask it, or whose request
+    /// it could not get a touch for, gives no reason.
     #[test]
     fn a_running_agent_gives_the_prompt_no_reason() {
         let s = setup("running");
@@ -1236,7 +1309,7 @@ mod tests {
             prompt(Tried::Updated),
             "Passphrase (multipass was updated): "
         );
-        agent.end(Ended::Locked);
+        finish(&agent);
         fs::remove_dir_all(&s.root).unwrap();
     }
 
@@ -1259,6 +1332,74 @@ mod tests {
         fs::remove_dir_all(&s.root).unwrap();
     }
 
+    /// `serve` returns, and the agent's process exits, only once the
+    /// request that ended the session has its reply, so a `lock`, a decline,
+    /// or a stale key never leaves the command without an answer. Checked by
+    /// reading the reply without blocking once `serve` has returned.
+    #[test]
+    fn serve_returns_only_after_the_ending_reply_is_out() {
+        for (approval, request) in [(Approval::Approved, "lock"), (Approval::Denied, "read")] {
+            let s = setup("reply-first");
+            let agent = agent(&s, Fake::always(approval));
+            let listener = agent.bind().unwrap();
+            let serving = {
+                let agent = Arc::clone(&agent);
+                std::thread::spawn(move || agent.serve(listener))
+            };
+            let mut stream = UnixStream::connect(&s.paths.socket).unwrap();
+            match request {
+                "lock" => stream.write_all(b"lock\n").unwrap(),
+                _ => write_counted(&mut stream, "read", b"b").unwrap(),
+            }
+            serving.join().unwrap();
+            stream.set_nonblocking(true).unwrap();
+            let line = read_line(&mut stream).expect("the reply was written before serve returned");
+            assert_eq!(line, if request == "lock" { "ok" } else { "denied" });
+            assert!(end_note(&s.paths).is_some());
+            assert!(!s.paths.socket.exists());
+            fs::remove_dir_all(&s.root).unwrap();
+        }
+    }
+
+    /// While an older Mac's save to the old single-file store waits to be
+    /// merged, the agent answers `unavailable`, so the command prompts and the
+    /// prompt merges it, and the agent sends nothing from the package alone.
+    #[test]
+    fn a_changed_old_file_sends_the_command_to_the_prompt() {
+        let root = temp("old-file");
+        let old = root.join("store.age");
+        let write_old = |secret: &str| {
+            let text = format!("multipass 2\nb\n\tsecret {secret}\n");
+            fs::write(
+                &old,
+                crate::age::encrypt(b"pw", text.as_bytes(), FAST).unwrap(),
+            )
+            .unwrap();
+        };
+        write_old("one");
+        let package = root.join("store.multipass");
+        let vault = Vault::new(&package, FAST).with_old(Some(old.clone()));
+        let mut ask = |_: vault::Ask| Ok(Some("pw".to_string()));
+        let (session, _) = vault.open_or_move(&mut ask, now_ms()).unwrap();
+        let agent_dir = root.join("agent");
+        store::create_private_dir(&agent_dir).unwrap();
+        let s = Setup {
+            paths: Paths::new(&agent_dir, &package),
+            keys: session.agent_keys(),
+            deadline: session.session_deadline(),
+            root: root.clone(),
+            package,
+        };
+        let agent = agent(&s, Fake::always(Approval::Approved));
+        serving(&agent);
+        assert!(matches!(client(&s).read("b").unwrap(), Answer::Entry(_)));
+        write_old("two");
+        assert!(matches!(client(&s).read("b").unwrap(), Answer::Unavailable));
+        assert!(matches!(client(&s).list().unwrap(), Answer::Unavailable));
+        finish(&agent);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn the_agent_switches_follow_the_environment() {
         assert_eq!(enabled(None, None), cfg!(target_os = "macos"));
@@ -1277,10 +1418,12 @@ mod tests {
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
         let refused = check_dir(&dir).unwrap_err();
         assert!(refused.contains(&dir.display().to_string()), "{refused}");
-        assert!(matches!(
-            connect(&Paths::new(&dir, &root.join("s"))),
-            Err(Tried::NoAgent)
-        ));
+        for peer in [Peer::SameBinary, Peer::SameUser] {
+            assert!(matches!(
+                connect(&Paths::new(&dir, &root.join("s")), peer),
+                Err(Tried::NoAgent)
+            ));
+        }
         fs::remove_dir_all(&root).unwrap();
     }
 }

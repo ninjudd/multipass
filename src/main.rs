@@ -572,6 +572,13 @@ fn run(store: Option<PathBuf>, command: Command) -> Result<()> {
         }
     }
     if let Some((keys, deadline)) = ctx.start.take() {
+        // An agent from another multipass binary would keep the socket, so
+        // the new one could not bind, and every command would prompt.
+        if ctx.tried.get() == agent::Tried::Updated {
+            if let Some(other) = ctx.client_any() {
+                other.lock();
+            }
+        }
         agent::start(&ctx.path, &keys, deadline);
     }
     Ok(())
@@ -626,7 +633,7 @@ impl Ctx {
         if !self.use_agent {
             return None;
         }
-        match agent::connect(self.agent.as_ref()?) {
+        match agent::connect(self.agent.as_ref()?, agent::Peer::SameBinary) {
             Ok(client) => Some(client),
             Err(tried) => {
                 self.tried.set(tried);
@@ -635,10 +642,12 @@ impl Ctx {
         }
     }
 
-    /// The store's agent, whatever the settings say, for `status`, `lock`,
-    /// and replacing the agent after `passwd` and `rekey`.
+    /// The store's agent, whatever the settings say and whichever multipass
+    /// binary started it, for `status`, `lock`, and ending an agent this
+    /// command replaces. Those requests send nothing and only learn or end
+    /// the session.
     fn client_any(&self) -> Option<agent::Client> {
-        agent::connect(self.agent.as_ref()?).ok()
+        agent::connect(self.agent.as_ref()?, agent::Peer::SameUser).ok()
     }
 
     /// Handles an answer that leaves the command to prompt: records why for

@@ -795,22 +795,11 @@ impl Vault {
             return Err(Error::StillSyncing);
         }
 
-        let mut moves = Vec::new();
-        for listed in &listing.moved {
-            let Some((key, _)) = known.get(&listed.generation) else {
-                warnings.push(format!(
-                    "left {} alone: no key this passphrase opens is of its generation",
-                    file_name(&listed.path)
-                ));
-                continue;
-            };
-            let bytes = fs::read(&listed.path)?;
-            let record = age::decrypt(key.text.as_bytes(), &bytes)
-                .ok()
-                .and_then(|plain| String::from_utf8(plain).ok())
-                .and_then(|text| MoveRecord::from_text(&text))
-                .ok_or_else(|| Error::Damaged(file_name(&listed.path)))?;
-            moves.push((listed.path.clone(), record));
+        let (moves, unkeyed) = read_moves(&listing, &known)?;
+        for name in unkeyed {
+            warnings.push(format!(
+                "left {name} alone: no key this passphrase opens is of its generation"
+            ));
         }
 
         let mut typed = vec![passphrase_typed.to_string()];
@@ -874,6 +863,10 @@ impl Vault {
         if stores.is_empty() {
             return Err(Error::StillSyncing);
         }
+        let (moves, unkeyed) = read_moves(&listing, &known)?;
+        if !unkeyed.is_empty() {
+            return Err(Error::Stale);
+        }
         let mut store = Store::merge(&stores);
         store.expire(cutoffs(&known, now_ms));
         Ok(Session {
@@ -882,13 +875,41 @@ impl Vault {
             known,
             key_files: listing.keys.into_iter().map(|l| l.path).collect(),
             store_files,
-            moves: Vec::new(),
+            moves,
             passphrase: None,
             typed: Vec::new(),
             warnings: Vec::new(),
             unlocked: true,
         })
     }
+}
+
+/// Move records with the paths they were read from.
+type Moves = Vec<(PathBuf, MoveRecord)>;
+
+/// Decrypts every move record in `listing` that one of the `known` keys
+/// opens. Returns the records with their paths, and the names of the
+/// records no known key is of.
+fn read_moves(
+    listing: &Listing,
+    known: &BTreeMap<String, (Key, Option<u64>)>,
+) -> Result<(Moves, Vec<String>)> {
+    let mut moves = Vec::new();
+    let mut unkeyed = Vec::new();
+    for listed in &listing.moved {
+        let Some((key, _)) = known.get(&listed.generation) else {
+            unkeyed.push(file_name(&listed.path));
+            continue;
+        };
+        let bytes = fs::read(&listed.path)?;
+        let record = age::decrypt(key.text.as_bytes(), &bytes)
+            .ok()
+            .and_then(|plain| String::from_utf8(plain).ok())
+            .and_then(|text| MoveRecord::from_text(&text))
+            .ok_or_else(|| Error::Damaged(file_name(&listed.path)))?;
+        moves.push((listed.path.clone(), record));
+    }
+    Ok((moves, unkeyed))
 }
 
 /// Decrypts every store file in `listing` that one of the `known` keys
@@ -1037,6 +1058,20 @@ impl Session {
             None if self.unlocked => Ok(()),
             None => Err(Error::ReadOnly),
         }
+    }
+
+    /// True when an old single-file store that a move record names has
+    /// changed since the record, because a Mac on an older multipass saved
+    /// to it. Only a prompt merges that change, so a session an agent opened
+    /// must not answer from the package alone. The hash is of ciphertext, so
+    /// comparing it is public.
+    pub fn old_file_changed(&self, vault: &Vault) -> bool {
+        self.moves.iter().any(
+            |(_, record)| match fs::read(vault.parent().join(&record.file)) {
+                Ok(bytes) => crypto::sha256::hex_digest(&bytes) != record.sha256,
+                Err(_) => false,
+            },
+        )
     }
 
     /// The keys an agent holds to serve this store: the current vault key
@@ -2140,6 +2175,30 @@ mod tests {
         let (mut session, opened) = vault.open_or_move(&mut answers(pass, second), now).unwrap();
         session.settle(vault, now).unwrap();
         (session, matches!(opened, Opened::Moved))
+    }
+
+    /// A session an agent opens with its keys reads the move record, and
+    /// says when an older Mac has saved to the old file since, which only a
+    /// prompt merges. Catches an agent that answers from the package alone
+    /// while the old file holds a newer password.
+    #[test]
+    fn a_session_opened_with_keys_sees_a_changed_old_file() {
+        let (vault, old) = beside_old("multipass 2\nx\n\tsecret one\n");
+        let (session, moved) = open_or_move(&vault, "pass", T0);
+        assert!(moved);
+        let keys = session.agent_keys();
+        let agent_vault = Vault::new(vault.path(), FAST);
+        let unlocked = agent_vault.open_with_keys(&keys, T0 + S).unwrap();
+        assert!(!unlocked.old_file_changed(&agent_vault));
+
+        save_old(&old, "pass", "multipass 2\nx\n\tsecret two\n", T0 + 2 * S);
+        let unlocked = agent_vault.open_with_keys(&keys, T0 + 3 * S).unwrap();
+        assert!(unlocked.old_file_changed(&agent_vault));
+
+        // Once the old file is gone, as after another Mac retired it, there
+        // is nothing left to merge.
+        fs::remove_file(&old).unwrap();
+        assert!(!unlocked.old_file_changed(&agent_vault));
     }
 
     #[test]
