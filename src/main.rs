@@ -13,6 +13,7 @@ mod touch_id;
 #[path = "touch_id_other.rs"]
 mod touch_id;
 mod tty;
+mod upgrade;
 mod vault;
 
 use std::cell::{Cell, RefCell};
@@ -63,17 +64,21 @@ Commands:
   status                Say whether the store is unlocked, and until when
   lock                  End the session, so the next command asks for the
                         passphrase
-
-After a command asks for the passphrase, the store stays unlocked until
-its vault key expires, and each later command asks only for Touch ID or
-an Apple Watch. Set MULTIPASS_NO_AGENT=1 to be asked for the passphrase
-every time.
+  upgrade [<version>]   Install the newest release, or the one named, with
+                        the installer, checking its attestation when gh is
+                        installed. Only this command reaches the network
+    --check             Say whether a newer release is out, and change nothing
 
 Options:
   --store <path>        The store package, or $MULTIPASS_STORE
                         [default: ~/.multipass/store.multipass]
   -h, --help            Print this help
   -V, --version         Print the version
+
+After a command asks for the passphrase, the store stays unlocked until
+its vault key expires, and each later command asks only for Touch ID or
+an Apple Watch. Set MULTIPASS_NO_AGENT=1 to be asked for the passphrase
+every time.
 ";
 
 #[derive(Debug, PartialEq)]
@@ -135,6 +140,11 @@ enum Parsed {
         store: Option<PathBuf>,
         command: Command,
     },
+    /// Opens no store, so it is not a `Command`.
+    Upgrade {
+        version: Option<String>,
+        check: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -149,17 +159,21 @@ fn main() -> ExitCode {
                 _ => Err("usage: multipass __clear-clipboard <change count>".into()),
             }
         }
-        Ok(args) => parse(args).and_then(|parsed| match parsed {
-            Parsed::Help => {
+        Ok(args) => match parse(args) {
+            Err(message) => Err(message),
+            Ok(Parsed::Help) => {
                 print!("{USAGE}");
                 Ok(())
             }
-            Parsed::Version => {
+            Ok(Parsed::Version) => {
                 println!("multipass {}", env!("CARGO_PKG_VERSION"));
                 Ok(())
             }
-            Parsed::Run { store, command } => run(store, command),
-        }),
+            Ok(Parsed::Run { store, command }) => run(store, command),
+            Ok(Parsed::Upgrade { version, check }) => {
+                return run_upgrade(version.as_deref(), check);
+            }
+        },
         Err(_) => Err("arguments must be valid UTF-8".into()),
     };
     match result {
@@ -193,6 +207,7 @@ fn parse(args: Vec<String>) -> Result<Parsed> {
     let mut clip = false;
     let mut previous = None;
     let mut otp_action = None;
+    let mut check = false;
     let mut positional = Vec::new();
 
     let mut args = args.into_iter();
@@ -242,6 +257,8 @@ fn parse(args: Vec<String>) -> Result<Parsed> {
             "--force" if inline.is_none() => force = true,
             "--clip" if inline.is_none() => clip = true,
             "--clip" => return Err("--clip takes no value".into()),
+            "--check" if inline.is_none() => check = true,
+            "--check" => return Err("--check takes no value".into()),
             "--set" | "--clear" if inline.is_some() => {
                 return Err(format!("{flag} takes no value"));
             }
@@ -267,6 +284,30 @@ fn parse(args: Vec<String>) -> Result<Parsed> {
     let Some(command) = positional.next() else {
         return Err("missing command; see multipass --help".into());
     };
+    if command == "upgrade" {
+        let version = positional
+            .next()
+            .map(|v| upgrade::release_version(&v))
+            .transpose()?;
+        if let Some(extra) = positional.next() {
+            return Err(format!("unexpected argument {extra}"));
+        }
+        if check && version.is_some() {
+            return Err("upgrade --check takes no version".into());
+        }
+        let store_flags = store.is_some()
+            || username.is_some()
+            || notes.is_some()
+            || field.is_some()
+            || force
+            || clip
+            || previous.is_some()
+            || otp_action.is_some();
+        if store_flags {
+            return Err("upgrade takes only a version or --check".into());
+        }
+        return Ok(Parsed::Upgrade { version, check });
+    }
     // The store text marks each entry with its name on a line of its own,
     // so an empty name could be saved but never read back.
     let mut name = || {
@@ -339,6 +380,9 @@ fn parse(args: Vec<String>) -> Result<Parsed> {
     }
     if previous.is_some() {
         return Err("--previous only applies to get".into());
+    }
+    if check {
+        return Err("--check only applies to upgrade".into());
     }
     Ok(Parsed::Run { store, command })
 }
@@ -970,6 +1014,28 @@ fn civil_from_days(days: u64) -> (u64, u64, u64) {
     (era * 400 + year_of_era + u64::from(month <= 2), month, day)
 }
 
+/// Runs `upgrade` or `upgrade --check`, which end with their own exit
+/// statuses: the installer's, or 1 from `--check` when a release is newer.
+fn run_upgrade(version: Option<&str>, check: bool) -> ExitCode {
+    let result = upgrade::Tools::system().and_then(|tools| {
+        if check {
+            upgrade::check(&tools, env!("CARGO_PKG_VERSION")).map(|(status, message)| {
+                println!("{message}");
+                status
+            })
+        } else {
+            upgrade::upgrade(&tools, version)
+        }
+    });
+    match result {
+        Ok(status) => ExitCode::from(status),
+        Err(failure) => {
+            eprintln!("multipass: {}", failure.message);
+            ExitCode::from(failure.status)
+        }
+    }
+}
+
 /// Where the store lives. `--store` or `MULTIPASS_STORE` names a package,
 /// or a single-file store from an earlier multipass, whose package is the
 /// same path ending in `.multipass`. Without either, the package is
@@ -1123,6 +1189,9 @@ mod tests {
         assert_eq!(run_of("init"), Command::Init);
         assert_eq!(run_of("list"), Command::List);
         assert_eq!(run_of("rekey"), Command::Rekey);
+        assert_eq!(run_of("status"), Command::Status);
+        assert_eq!(run_of("lock"), Command::Lock);
+        assert_eq!(run_of("--store /tmp/s.multipass __agent"), Command::Agent);
         assert_eq!(
             run_of("restore github.com"),
             Command::Restore {
@@ -1224,10 +1293,65 @@ mod tests {
     }
 
     #[test]
+    fn parses_the_upgrade_command() {
+        let upgrade = |s: &str| parse(args(s)).unwrap();
+        assert_eq!(
+            upgrade("upgrade"),
+            Parsed::Upgrade {
+                version: None,
+                check: false
+            }
+        );
+        assert_eq!(
+            upgrade("upgrade 0.2.0"),
+            Parsed::Upgrade {
+                version: Some("0.2.0".into()),
+                check: false
+            }
+        );
+        assert_eq!(
+            upgrade("upgrade v0.2.0"),
+            Parsed::Upgrade {
+                version: Some("0.2.0".into()),
+                check: false
+            }
+        );
+        assert_eq!(
+            upgrade("upgrade --check"),
+            Parsed::Upgrade {
+                version: None,
+                check: true
+            }
+        );
+        for bad in [
+            "upgrade --check 0.2.0",
+            "upgrade 0.2.0 0.3.0",
+            "upgrade 0.2",
+            "upgrade ../0.2.0",
+            "upgrade --check=yes",
+            "--store /tmp/s.age upgrade",
+            "upgrade --force",
+            "upgrade --clip",
+            "upgrade --previous 1",
+            "list --check",
+            "get x --check",
+        ] {
+            assert!(parse(args(bad)).is_err(), "{bad:?} parsed");
+        }
+    }
+
+    #[test]
     fn rejects_bad_arguments() {
         for bad in [
             "",
             "frobnicate",
+            "status x",
+            "status --check",
+            "lock --force",
+            "lock x",
+            "__agent x",
+            "__agent --clip",
+            "upgrade status",
             "add",
             "get x y",
             "list --force",
