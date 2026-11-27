@@ -1,0 +1,139 @@
+name: Website
+
+# Deploys site/ to Vercel when a merge to main changes it. Vercel gets no
+# access to the repository: this job pushes to Vercel with a token that only
+# main's runs can read. The design is docs/projects/installer/readme.md § 2.10.
+on:
+  push:
+    branches: [main]
+    paths:
+      - site/**
+      - .github/workflows/site.yml
+      - .github/vercel/**
+      - .github/scripts/check-site.sh
+      - .github/scripts/vercel-api.sh
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: site
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # The production environment admits only main and holds VERCEL_TOKEN, so
+    # a pull request's run can never read the token.
+    environment: production
+    env:
+      VERCEL_ORG_ID: ${{ vars.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ vars.VERCEL_PROJECT_ID }}
+      VERCEL_TELEMETRY_DISABLED: "1"
+      DOMAIN: getmultipass.dev
+      VERCEL_CLI: ${{ github.workspace }}/.github/vercel/node_modules/.bin/vercel
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Check the redirects
+        run: .github/scripts/check-site.sh static
+      - name: Install the locked Vercel CLI
+        working-directory: .github/vercel
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          # The CLI runs a native binary from this locked package. Without
+          # it, the CLI would download one at run time, outside the lock.
+          test -d node_modules/@vercel/vc-native-linux-x64
+      # The deployment the domain serves now, from where its alias points,
+      # which after a rollback is not the newest production deployment.
+      - name: Record the deployment the domain serves
+        id: previous
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          set +e
+          alias="$(.github/scripts/vercel-api.sh GET "/v4/aliases/$DOMAIN")"
+          status=$?
+          set -e
+          case "$status" in
+            0) deployment="$(printf '%s\n' "$alias" | jq -r '.deploymentId // empty')" ;;
+            # Before the first promotion, the domain has no alias to roll
+            # back to.
+            4) deployment="" ;;
+            *)
+              echo "::error::could not read which deployment $DOMAIN serves"
+              exit 1
+              ;;
+          esac
+          echo "deployment=$deployment" >>"$GITHUB_OUTPUT"
+      # A rollback turns off the automatic assignment of production domains
+      # until a deployment is promoted, so a plain deploy --prod after one
+      # would never reach the domain. Every run deploys without the domain
+      # and promotes the deployment itself instead.
+      - name: Deploy
+        id: deploy
+        working-directory: site
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          # The CLI prints the deployment's URL, and only that, to stdout.
+          url="$("$VERCEL_CLI" deploy --prod --skip-domain --yes)"
+          if ! [[ "$url" =~ ^https://[a-z0-9.-]+$ ]]; then
+            echo "::error::vercel deploy printed $url, not a deployment URL"
+            exit 1
+          fi
+          echo "url=$url" >>"$GITHUB_OUTPUT"
+      # Through the API, because the CLI's promote and rollback first look up
+      # the token's user, which a team-scoped token cannot read.
+      - name: Promote it to the domain
+        id: promote
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          URL: ${{ steps.deploy.outputs.url }}
+        run: |
+          id="$(.github/scripts/vercel-api.sh GET "/v13/deployments/${URL#https://}" | jq -r '.id // empty')"
+          if [ -z "$id" ]; then
+            echo "::error::Vercel has no deployment at $URL"
+            exit 1
+          fi
+          echo "id=$id" >>"$GITHUB_OUTPUT"
+          .github/scripts/vercel-api.sh POST "/v10/projects/$VERCEL_PROJECT_ID/promote/$id" >/dev/null
+      # Promotion finishes after the request returns, so wait for the alias,
+      # as the CLI's promote waits for up to three minutes.
+      - name: Check that the domain serves the new deployment
+        id: serving
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          NEW: ${{ steps.promote.outputs.id }}
+        run: |
+          for _ in $(seq 36); do
+            serving="$(.github/scripts/vercel-api.sh GET "/v4/aliases/$DOMAIN" | jq -r '.deploymentId // empty')" || serving=""
+            [ "$serving" != "$NEW" ] || exit 0
+            sleep 5
+          done
+          echo "::error::$DOMAIN serves ${serving:-no deployment} after three minutes, not the new deployment $NEW"
+          exit 1
+      # Checked with curl, not the CLI, so a bad redirect the CLI deployed
+      # is caught all the same.
+      - name: Check the live redirects
+        id: live
+        run: .github/scripts/check-site.sh live "https://$DOMAIN"
+      - name: Roll back a deployment that fails its checks
+        if: failure() && (steps.promote.outcome == 'failure' || steps.serving.outcome == 'failure' || steps.live.outcome == 'failure') && steps.previous.outputs.deployment != ''
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          PREVIOUS: ${{ steps.previous.outputs.deployment }}
+        run: |
+          .github/scripts/vercel-api.sh POST "/v1/projects/$VERCEL_PROJECT_ID/rollback/$PREVIOUS" >/dev/null
+          for _ in $(seq 36); do
+            serving="$(.github/scripts/vercel-api.sh GET "/v4/aliases/$DOMAIN" | jq -r '.deploymentId // empty')" || serving=""
+            if [ "$serving" = "$PREVIOUS" ]; then
+              echo "::error::rolled $DOMAIN back to $PREVIOUS"
+              exit 1
+            fi
+            sleep 5
+          done
+          echo "::error::asked Vercel to roll $DOMAIN back to $PREVIOUS, but it still serves ${serving:-no deployment}"
+          exit 1

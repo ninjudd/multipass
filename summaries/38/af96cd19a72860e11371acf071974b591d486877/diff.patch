@@ -1,0 +1,406 @@
+diff --git a/.github/scripts/check-site.sh b/.github/scripts/check-site.sh
+index fbe22c4..74c7b21 100755
+--- a/.github/scripts/check-site.sh
++++ b/.github/scripts/check-site.sh
+@@ -5,13 +5,14 @@
+ #
+ #   check-site.sh static [<site-dir>]   check <site-dir>/vercel.json, default site
+ #   check-site.sh live <url>            check the deployed redirects with curl
++#   check-site.sh cache <value>         check one Cache-Control value, as live does
+ #
+ # A URL passes when it starts with the repository's releases URL and holds no
+ # dot segment and no percent sign, because curl collapses /releases/../../
+ # before it sends the request, so such a URL passes a prefix check and still
+ # leaves the repository. The real URLs hold no percent-encoding at all, so
+-# refusing every % also refuses %2e, %252e, and %2f without naming each. The design is
+-# docs/projects/installer/readme.md § 2.10.
++# refusing every % also refuses %2e, %252e, and %2f without naming each. The
++# design is docs/projects/installer/readme.md § 2.10.
+ 
+ set -euo pipefail
+ 
+@@ -114,10 +115,28 @@ check_redirect() {
+   esac
+   under_releases "$location" || problem "$url redirects to ${location:-nothing}, outside $RELEASES"
+   [ "$location" = "$expected" ] || problem "$url redirects to ${location:-nothing}, not $expected"
+-  case "$cache" in
+-    *no-store*) ;;
+-    *) problem "$url sends cache-control:${cache:- nothing}, not no-store" ;;
+-  esac
++  cache_revalidates "$cache" ||
++    problem "$url sends cache-control:${cache:- nothing}, which lets a cache serve the redirect without asking again"
++}
++
++# True when a Cache-Control value keeps every cache from serving a stored
++# redirect without asking the site again, so none can hand out an old target:
++# no-store, no-cache, or max-age=0 with must-revalidate. Vercel sends its
++# default, public, max-age=0, must-revalidate, on redirects whatever
++# vercel.json's headers say. A positive s-maxage fails, because a shared
++# cache uses it in place of max-age.
++cache_revalidates() {
++  local directive directives max_age="" s_maxage="" must=""
++  IFS=, read -ra directives <<<"$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -d ' \t')"
++  for directive in "${directives[@]}"; do
++    case "$directive" in
++      no-store | no-cache) return 0 ;;
++      max-age=*) max_age="${directive#max-age=}" ;;
++      s-maxage=*) s_maxage="${directive#s-maxage=}" ;;
++      must-revalidate) must=1 ;;
++    esac
++  done
++  [ "$max_age" = 0 ] && [ -n "$must" ] && { [ -z "$s_maxage" ] || [ "$s_maxage" = 0 ]; }
+ }
+ 
+ check_live() {
+@@ -133,8 +152,12 @@ check_live() {
+ case "${1:-}" in
+   static) check_static "${2:-site}" ;;
+   live) check_live "${2:-}" ;;
++  cache)
++    cache_revalidates "${2:-}" || exit 1
++    exit 0
++    ;;
+   *)
+-    echo "usage: check-site.sh static [<site-dir>] | live <url>" >&2
++    echo "usage: check-site.sh static [<site-dir>] | live <url> | cache <value>" >&2
+     exit 64
+     ;;
+ esac
+diff --git a/.github/scripts/vercel-api.sh b/.github/scripts/vercel-api.sh
+new file mode 100755
+index 0000000..0719322
+--- /dev/null
++++ b/.github/scripts/vercel-api.sh
+@@ -0,0 +1,49 @@
++#!/usr/bin/env bash
++#
++# Calls Vercel's REST API on behalf of the team, for the site workflow:
++#
++#   vercel-api.sh <method> <path>
++#
++# The CLI's promote and rollback look up the token's user first, which a
++# team-scoped token cannot read, so the workflow calls these endpoints
++# itself. The token comes from VERCEL_TOKEN and reaches curl on stdin, so it
++# never appears in a process's arguments, and teamId=$VERCEL_ORG_ID is added
++# to the path. Prints the response body and exits 0 for a 2xx answer, 4 for
++# a 404, and 1 for anything else, with the body on stderr.
++# docs/projects/installer/readme.md § 2.10 is the design.
++
++set -euo pipefail
++
++[ $# -eq 2 ] || {
++  echo "usage: vercel-api.sh <method> <path>" >&2
++  exit 64
++}
++method="$1"
++path="$2"
++case "$path" in
++  *\?*) url="https://api.vercel.com$path&teamId=$VERCEL_ORG_ID" ;;
++  *) url="https://api.vercel.com$path?teamId=$VERCEL_ORG_ID" ;;
++esac
++args=(-sS --proto '=https' -H @- -X "$method" -w '\n%{http_code}')
++# The endpoints the workflow posts to take no body, as the CLI sends them.
++[ "$method" = GET ] || args+=(-H 'Content-Type: application/json' --data '{}')
++
++response="$(printf 'Authorization: Bearer %s\n' "$VERCEL_TOKEN" | curl "${args[@]}" "$url")" || {
++  echo "vercel-api.sh: $method $path did not complete" >&2
++  exit 1
++}
++status="${response##*$'\n'}"
++body="${response%$'\n'*}"
++case "$status" in
++  2??)
++    printf '%s\n' "$body"
++    ;;
++  404)
++    printf '%s\n' "$body"
++    exit 4
++    ;;
++  *)
++    printf 'vercel-api.sh: %s %s answered HTTP %s: %s\n' "$method" "$path" "$status" "$body" >&2
++    exit 1
++    ;;
++esac
+diff --git a/.github/workflows/site.yml b/.github/workflows/site.yml
+index edc700c..3568076 100644
+--- a/.github/workflows/site.yml
++++ b/.github/workflows/site.yml
+@@ -11,6 +11,7 @@ on:
+       - .github/workflows/site.yml
+       - .github/vercel/**
+       - .github/scripts/check-site.sh
++      - .github/scripts/vercel-api.sh
+   workflow_dispatch:
+ 
+ permissions:
+@@ -52,17 +53,17 @@ jobs:
+         env:
+           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+         run: |
+-          # The token goes to curl on stdin, never in its arguments.
+-          response="$(printf 'Authorization: Bearer %s\n' "$VERCEL_TOKEN" |
+-            curl -sS --proto '=https' -H @- -w '\n%{http_code}' \
+-              "https://api.vercel.com/v4/aliases/$DOMAIN?teamId=$VERCEL_ORG_ID")"
+-          status="${response##*$'\n'}"
++          set +e
++          alias="$(.github/scripts/vercel-api.sh GET "/v4/aliases/$DOMAIN")"
++          status=$?
++          set -e
+           case "$status" in
+-            200) deployment="$(printf '%s\n' "${response%$'\n'*}" | jq -r '.deploymentId // empty')" ;;
+-            # Before the first deploy, the domain has no alias to roll back to.
+-            404) deployment="" ;;
++            0) deployment="$(printf '%s\n' "$alias" | jq -r '.deploymentId // empty')" ;;
++            # Before the first promotion, the domain has no alias to roll
++            # back to.
++            4) deployment="" ;;
+             *)
+-              echo "::error::could not read which deployment $DOMAIN serves: HTTP $status"
++              echo "::error::could not read which deployment $DOMAIN serves"
+               exit 1
+               ;;
+           esac
+@@ -84,29 +85,36 @@ jobs:
+             exit 1
+           fi
+           echo "url=$url" >>"$GITHUB_OUTPUT"
++      # Through the API, because the CLI's promote and rollback first look up
++      # the token's user, which a team-scoped token cannot read.
+       - name: Promote it to the domain
+         id: promote
+         env:
+           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+           URL: ${{ steps.deploy.outputs.url }}
+-        run: '"$VERCEL_CLI" promote "$URL" --yes'
++        run: |
++          id="$(.github/scripts/vercel-api.sh GET "/v13/deployments/${URL#https://}" | jq -r '.id // empty')"
++          if [ -z "$id" ]; then
++            echo "::error::Vercel has no deployment at $URL"
++            exit 1
++          fi
++          echo "id=$id" >>"$GITHUB_OUTPUT"
++          .github/scripts/vercel-api.sh POST "/v10/projects/$VERCEL_PROJECT_ID/promote/$id" >/dev/null
++      # Promotion finishes after the request returns, so wait for the alias,
++      # as the CLI's promote waits for up to three minutes.
+       - name: Check that the domain serves the new deployment
+         id: serving
+         env:
+           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+-          URL: ${{ steps.deploy.outputs.url }}
++          NEW: ${{ steps.promote.outputs.id }}
+         run: |
+-          api() {
+-            printf 'Authorization: Bearer %s\n' "$VERCEL_TOKEN" |
+-              curl -fsS --proto '=https' -H @- "https://api.vercel.com$1"
+-          }
+-          host="${URL#https://}"
+-          new="$(api "/v13/deployments/$host?teamId=$VERCEL_ORG_ID" | jq -r '.id')"
+-          serving="$(api "/v4/aliases/$DOMAIN?teamId=$VERCEL_ORG_ID" | jq -r '.deploymentId // empty')"
+-          if [ "$serving" != "$new" ]; then
+-            echo "::error::$DOMAIN serves ${serving:-no deployment}, not the new deployment $new"
+-            exit 1
+-          fi
++          for _ in $(seq 36); do
++            serving="$(.github/scripts/vercel-api.sh GET "/v4/aliases/$DOMAIN" | jq -r '.deploymentId // empty')" || serving=""
++            [ "$serving" != "$NEW" ] || exit 0
++            sleep 5
++          done
++          echo "::error::$DOMAIN serves ${serving:-no deployment} after three minutes, not the new deployment $NEW"
++          exit 1
+       # Checked with curl, not the CLI, so a bad redirect the CLI deployed
+       # is caught all the same.
+       - name: Check the live redirects
+@@ -117,4 +125,15 @@ jobs:
+         env:
+           VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+           PREVIOUS: ${{ steps.previous.outputs.deployment }}
+-        run: '"$VERCEL_CLI" rollback "$PREVIOUS" --yes'
++        run: |
++          .github/scripts/vercel-api.sh POST "/v1/projects/$VERCEL_PROJECT_ID/rollback/$PREVIOUS" >/dev/null
++          for _ in $(seq 36); do
++            serving="$(.github/scripts/vercel-api.sh GET "/v4/aliases/$DOMAIN" | jq -r '.deploymentId // empty')" || serving=""
++            if [ "$serving" = "$PREVIOUS" ]; then
++              echo "::error::rolled $DOMAIN back to $PREVIOUS"
++              exit 1
++            fi
++            sleep 5
++          done
++          echo "::error::asked Vercel to roll $DOMAIN back to $PREVIOUS, but it still serves ${serving:-no deployment}"
++          exit 1
+diff --git a/docs/projects/installer/readme.md b/docs/projects/installer/readme.md
+index 58667a0..8e691b0 100644
+--- a/docs/projects/installer/readme.md
++++ b/docs/projects/installer/readme.md
+@@ -185,9 +185,10 @@ curl -fsSL https://github.com/ninjudd/multipass/releases/download/v0.2.0/install
+ | `.github/workflows/site.yml` | New. The deploy workflow in § 2.10. |
+ | `.github/vercel/package.json`, `.github/vercel/package-lock.json` | New. The Vercel CLI at one exact version, with every package it pulls in pinned by the lock file's integrity hashes. They sit outside `site/` so Vercel never reads `site/` as a Node project. |
+ | `tests/site/` | New. The bad sites that `check-site.sh static` must reject, one directory per case in § 4, each holding a `vercel.json` and, for the installer-copy case, an `install.sh`. |
+-| `tests/site.sh` | New. Runs `check-site.sh static` on `site/`, which must pass, and on each directory in `tests/site/`, which must fail with a named problem rather than merely exit nonzero. |
++| `tests/site.sh` | New. Runs `check-site.sh static` on `site/`, which must pass, and on each directory in `tests/site/`, which must fail with a named problem rather than merely exit nonzero. It checks that the `Cache-Control` rule accepts Vercel's default and refuses values that let a cache keep a redirect, such as a positive `s-maxage`. It also runs `vercel-api.sh` against a fake `curl`, and checks that the token never reaches `curl`'s arguments and that a 404 and an error are told apart. |
+ | `.gitattributes` | New. Marks `.github/vercel/package-lock.json` as generated, so GitHub folds it in review. |
+-| `.github/scripts/check-site.sh` | New. The redirect guard in § 2.10: `check-site.sh static [<dir>]` reads `<dir>/vercel.json`, `site/` by default, and `check-site.sh live <url>` reads the responses with `curl`. It needs `jq`, which GitHub's runners include. |
++| `.github/scripts/check-site.sh` | New. The redirect guard in § 2.10: `check-site.sh static [<dir>]` reads `<dir>/vercel.json`, `site/` by default, and `check-site.sh live <url>` reads the responses with `curl`. `check-site.sh cache <value>` applies the live check's `Cache-Control` rule to one value, for `tests/site.sh`. It needs `jq`, which GitHub's runners include. |
++| `.github/scripts/vercel-api.sh` | New. `vercel-api.sh <method> <path>` calls Vercel's REST API for the site workflow, with the token on `curl`'s stdin and `teamId` added, and exits 0, 4 for a 404, or 1. `tests/site.sh` runs it against a fake `curl`. |
+ | `src/upgrade.rs` | New. `upgrade` and `upgrade --check` as § 2.3 describes. It takes the paths of `curl`, `bash`, and `gh` and the base URL as parameters, so tests run it against fake programs in a temporary directory; `main.rs` passes the fixed paths and `https://getmultipass.dev`. |
+ | `src/main.rs` | Adds the `upgrade` command, its optional version, and `--check`, and updates `USAGE`. |
+ 
+@@ -202,9 +203,9 @@ curl -fsSL https://github.com/ninjudd/multipass/releases/download/v0.2.0/install
+ | `https://getmultipass.dev/` | `site/index.html`, the landing page |
+ | `https://www.getmultipass.dev/…` | A permanent redirect to the same path on `getmultipass.dev` |
+ 
+-The domain's DNS answers only for `getmultipass.dev` and `www.getmultipass.dev`. Vercel DNS adds an `ALIAS` for the `*` wildcard by default, and rollout removes it, so a made-up name such as `install.getmultipass.dev` does not resolve and cannot be mistaken for the real one.
++The site answers only on `getmultipass.dev` and `www.getmultipass.dev`. Vercel DNS adds an `ALIAS` for the `*` wildcard by default, and Vercel lets you neither delete that record nor override it: a wildcard `TXT` record added beside it left `install.getmultipass.dev` resolving to Vercel's addresses, as `dig @ns1.vercel-dns.com install.getmultipass.dev` showed. So a made-up name such as `install.getmultipass.dev` resolves, but it reaches Vercel's "not found" page, and only the Vercel team can attach a site to it, by adding that name to one of its projects. The wildcard therefore adds nobody beyond the team, who can already change the real site.
+ 
+-Each redirect carries `Cache-Control: no-store`, so no cache serves an old target. GitHub resolves the newest release and sends `Cache-Control: no-cache` on its own redirect, so a release is live through the domain as soon as it is published. `.dev` is on browsers' HTTPS preload list, so browsers only ever load the domain over HTTPS, and Vercel issues and renews its certificate.
++No cache may serve an old redirect target. `vercel.json` asks for `Cache-Control: no-store` on the install paths, but Vercel sends its documented default, `public, max-age=0, must-revalidate`, on redirects whatever `vercel.json` says, and its `redirects` entries take no headers of their own. That default is as good for this purpose: `max-age=0` makes a stored redirect stale at once, and `must-revalidate` forbids any cache, shared or not, from using a stale response without asking the site again (RFC 9111 § 5.2.2.2). So every request reaches the current target, just as with `no-store`. The live check accepts `no-store`, `no-cache`, or `max-age=0` with `must-revalidate`, and refuses a positive `s-maxage`, which a shared cache would use in place of `max-age`. The `no-store` rule stays in `vercel.json`, because it is stricter if Vercel ever applies it. GitHub resolves the newest release and sends `Cache-Control: no-cache` on its own redirect, so a release is live through the domain as soon as it is published. `.dev` is on browsers' HTTPS preload list, so browsers only ever load the domain over HTTPS, and Vercel issues and renews its certificate.
+ 
+ Whoever controls the registrar account, the Vercel team, or the domain's DNS can point the URL anywhere. These settings protect it:
+ 
+@@ -228,10 +229,10 @@ Without DNSSEC, someone who can forge DNS answers to a certificate authority cou
+ 2. It checks out the pushed commit with `persist-credentials: false`, using `actions/checkout` pinned by commit SHA.
+ 3. It runs `.github/scripts/check-site.sh static`. The guard fails unless every redirect whose source ends in `install.sh` points at a URL that starts with `https://github.com/ninjudd/multipass/releases/` and holds no `..` or `.` segment, no `%` at all, since the real URLs hold no percent-encoding and refusing every `%` also refuses `%2e`, `%252e`, and `%2f`, and no backslash, because `curl` collapses `/releases/../../` before it sends the request, so such a URL passes the prefix check and still leaves the repository. Every other redirect, such as the `www` one, must stay on the site, as `https://getmultipass.dev/…` or a path, so a catch-all such as `/:path*` cannot send `/install.sh` elsewhere either; a protocol-relative `//host/` counts as another host. `vercel.json` may set only `$schema`, `redirects`, `headers`, `cleanUrls`, and `trailingSlash`, which rules out rewrites, routes, a build command, a framework, and functions without naming each one. `site/` may hold only `index.html` and `vercel.json`, apart from the `.vercel` directory that `vercel link` writes and the CLI never uploads. A redirect whose source matches an `install.sh` path without ending in that text, such as `/v0.1.0/install(\\.sh)`, can then send it only to the page, and no file on the site can be a copy of the installer. The guard also fails unless `vercel.json` is an object whose `redirects` are a list of objects with a text `source` and `destination`, so a shape it cannot read never passes unchecked.
+ 4. It runs `npm ci --ignore-scripts` in `.github/vercel/`, which installs exactly the locked Vercel CLI and runs none of its packages' install scripts. The CLI, `vercel@65.14.0`, is a launcher that runs a native binary from a platform package, `@vercel/vc-native-linux-x64` on the runner, which the lock file pins by integrity hash like every other package. When that package is missing, the launcher downloads the binary at run time, outside the lock, so the step fails unless the package was installed.
+-5. It records the deployment the domain serves now, the `deploymentId` that Vercel's `GET /v4/aliases/getmultipass.dev` API returns, sending the token to `curl` on stdin so it never appears in a process's arguments. After a rollback, that is not the newest production deployment, so the job reads the alias rather than the list of deployments. Before the first deploy the API answers 404, and there is nothing to roll back to.
+-6. It runs `vercel deploy --prod --skip-domain --yes` in `site/`, which prints the new deployment's URL and assigns it no domain, and then `vercel promote <url> --yes`, which assigns the production domains to it. A rollback turns off the automatic assignment of production domains until a deployment is promoted, so after one rollback a plain `vercel deploy --prod` would leave the domain on the old deployment while the job stayed green; promoting every deployment explicitly works whatever that setting is. The CLI reads the token from `VERCEL_TOKEN` and the team and project from `VERCEL_ORG_ID` and `VERCEL_PROJECT_ID`, so none of them is an argument.
+-7. It reads the alias again, and the new deployment's ID from `GET /v13/deployments/<host>`, and fails unless the domain now serves the new deployment.
+-8. It runs `.github/scripts/check-site.sh live https://getmultipass.dev`, which fails unless `/install.sh` and `/v0.0.0/install.sh` answer with a temporary redirect (302 or 307) to exactly the release URLs in § 2.9, checked by the same rule as the static check, and `cache-control: no-store`. When the promotion or either check fails, the job runs `vercel rollback` to the deployment step 5 recorded and fails, so a bad redirect stays live only for the seconds between the promotion and the check. The next run's explicit promotion is what brings the domain forward again after that rollback.
++5. It records the deployment the domain serves now, the `deploymentId` that Vercel's `GET /v4/aliases/getmultipass.dev` API returns. Every API call goes through `.github/scripts/vercel-api.sh`, which sends the token to `curl` on stdin so it never appears in a process's arguments, and adds `teamId`. After a rollback, that is not the newest production deployment, so the job reads the alias rather than the list of deployments. Before the first deploy the API answers 404, and there is nothing to roll back to.
++6. It runs `vercel deploy --prod --skip-domain --yes` in `site/`, which prints the new deployment's URL and assigns it no domain. The CLI reads the token from `VERCEL_TOKEN` and the team and project from `VERCEL_ORG_ID` and `VERCEL_PROJECT_ID`, so none of them is an argument. It then reads the new deployment's ID from `GET /v13/deployments/<host>` and promotes it with `POST /v10/projects/<project>/promote/<id>`, which assigns the production domains to it. A rollback turns off the automatic assignment of production domains until a deployment is promoted, so after one rollback a plain `vercel deploy --prod` would leave the domain on the old deployment while the job stayed green; promoting every deployment explicitly works whatever that setting is. The job calls the API rather than `vercel promote` because the CLI's `promote` and `rollback` first look up the token's user through `GET /v2/user`, which a team-scoped token cannot read: the first run failed there with `User not found. (404)`, and `vercel@65.14.0` falls back from that lookup only on a 403.
++7. It reads the alias every five seconds for up to three minutes, as `vercel promote` waits, and fails unless the domain comes to serve the new deployment.
++8. It runs `.github/scripts/check-site.sh live https://getmultipass.dev`, which fails unless `/install.sh` and `/v0.0.0/install.sh` answer with a temporary redirect (302 or 307) to exactly the release URLs in § 2.9, checked by the same rule as the static check, and a `cache-control` that makes every cache ask again, as § 2.9 describes. When the promotion or either check fails, the job rolls back to the deployment step 5 recorded, with `POST /v1/projects/<project>/rollback/<id>`, waits for the alias to point at it, and fails, so a bad redirect stays live only for the seconds between the promotion and the check. The next run's explicit promotion is what brings the domain forward again after that rollback.
+ 
+ The token is created for the Vercel team, with an expiry, and is replaced before it expires. Whether Vercel can scope a token to one project rather than the whole team is unverified; if it can, the token is scoped to this project.
+ 
+@@ -268,7 +269,7 @@ The Vercel CLI is the one piece of third-party code in this design, and it runs
+ | Put another executable named `multipass` earlier on PATH, then run `status` | `shadowed` naming that file |
+ | Change the installed binary by hand, then `uninstall` | `user-owned`, and the file stays |
+ | `uninstall` after a clean install | The binary and the receipt are gone, and `kept` names the stores |
+-| After an install and an uninstall, list files under `HOME` that changed | Nothing remains changed. `~/.multipass` and every shell startup file were never touched. |
++| After an install and an uninstall, list files under `HOME` that changed | Nothing the installer wrote remains changed. `~/.multipass` and every shell startup file were never touched.[^caches] |
+ | `./install.sh` in a checkout with no network | Builds and installs the checkout, with no `fetched` row |
+ | Merge a pull request that raises the version | A published, immutable release `v<version>` with the five assets. `gh attestation verify` on the binary passes with `--signer-workflow`, `--source-ref refs/heads/main`, and `--source-digest` set to the commit the tag names, and fails with `--source-ref refs/tags/v<version>` or with any other commit |
+ | Run the release workflow by hand from a branch other than `main` | `build` fails at its first step, and nothing is published |
+@@ -281,15 +282,17 @@ The Vercel CLI is the one piece of third-party code in this design, and it runs
+ | A pull request that points the `/install.sh` redirect at another host | CI fails on `check-site.sh static`, naming the redirect |
+ | A pull request's workflow that tries to read `VERCEL_TOKEN` | The secret is empty, because the `production` environment admits only `main` |
+ | A push to `main` that changes `site/index.html` | The site workflow deploys it, and `check-site.sh live` passes |
+-| The site workflow's live check against a deployment whose redirect points elsewhere | The job runs `vercel rollback` and fails |
++| The site workflow's live check against a deployment whose redirect points elsewhere | The job rolls the domain back to the deployment it served before, and fails |
+ | The site workflow's next run after that rollback | The domain serves the new deployment, and the job checks that it does |
+-| `dig +short install.getmultipass.dev` | Nothing, because the wildcard record is gone |
+-| `curl -sI https://getmultipass.dev/install.sh` | `HTTP/2 307`, `location: https://github.com/ninjudd/multipass/releases/latest/download/install.sh`, and `cache-control: no-store` |
++| `curl -sI https://install.getmultipass.dev/install.sh` | Vercel's "not found", because no project of the team claims that name; the name itself resolves, through Vercel's fixed wildcard (§ 2.9) |
++| `curl -sI https://getmultipass.dev/install.sh` | `HTTP/2 307`, `location: https://github.com/ninjudd/multipass/releases/latest/download/install.sh`, and a `cache-control` the live check accepts, which from Vercel is `public, max-age=0, must-revalidate` (§ 2.9) |
+ | `curl -sI https://getmultipass.dev/v0.1.0/install.sh` | A 307 to `https://github.com/ninjudd/multipass/releases/download/v0.1.0/install.sh` |
+ | `curl -sI http://getmultipass.dev/install.sh` and `curl -sI https://www.getmultipass.dev/install.sh` | Each redirects to `https://getmultipass.dev/install.sh`, never serving a file over plain HTTP |
+ | `dig +short getmultipass.dev CAA` | Only the authorities § 2.9 names, and `0 issuewild ";"` |
+ | `curl -fsSL https://getmultipass.dev/install.sh \| bash` with `HOME` in a temporary directory | The same rows as the first row of this table |
+ 
++[^caches]: The tools the installer runs keep caches of their own under `HOME`, and those appear: `cargo` writes files such as `~/.cargo/.package-cache` when it builds, and `gh attestation verify` caches Sigstore's trusted root under `~/.cache/gh/.sigstore/`. The installer writes neither, and `uninstall` leaves them, as it leaves any tool's cache.
++
+ Tests that must fail before the change and pass after it:
+ 
+ - **`tests/install.sh`**, run by CI on the checkout. It checks each row from a checkout install, the receipt's fields, that a rerun prints `current` and leaves the file alone, that `status` reports `current`, that `uninstall` refuses a file whose SHA-256 differs from the receipt, and that nothing under `HOME` changes except the binary and the receipt. Catches an installer that edits a startup file or the store directory, a rerun that reinstalls, and an uninstall that deletes someone else's `multipass`.
+@@ -310,11 +313,27 @@ None of this changes the multipass binary, so commands cost what they cost today
+ 1. Merge the installer and the release workflow.
+ 2. In the repository's settings, turn on immutable releases, and add a tag ruleset that blocks updating and deleting tags matching `v*`. Only the repository owner can change these.
+ 3. Publish the first release, `v0.1.0`, from the current version by running the release workflow by hand.
+-4. The domain's nameservers already point at Vercel. Confirm auto-renew and the registrar lock at the registrar, and two-factor sign-in on the registrar account and for every member of the Vercel team. Remove the default `*` `ALIAS` record.
++4. The domain's nameservers already point at Vercel. Confirm auto-renew and the registrar lock at the registrar, and two-factor sign-in on the registrar account and for every member of the Vercel team. Leave the default `*` `ALIAS` record: Vercel lets you neither delete nor override it, so made-up names get Vercel's "not found" (§ 2.9).
+ 5. Create the Vercel project on that team, with the framework preset `Other`, no build command, and an empty root directory, since the workflow uploads `site/` itself, and add `getmultipass.dev` and `www.getmultipass.dev` to it. The merge in step 1 already ran the site workflow once, which created the `production` environment with no branch limit and failed for lack of a token, so limit that environment to `main` rather than creating it. Create a team token with an expiry, and, in that environment, the `VERCEL_TOKEN` secret and the variables `VERCEL_ORG_ID` (the team's ID) and `VERCEL_PROJECT_ID`. Run the site workflow by hand once. Until step 3's release exists, the redirect leads to a missing file.
+ 6. Once `vercel certs ls` shows certificates naming only the two hosts, add `0 issuewild ";"`.
+ 7. Check the release and domain rows of § 4, then point the README's Install section at the one-liner.
+ 
++### 6.1 Rollout results
++
++Steps 1 to 3 are done, and these rows of § 4 are verified:
++
++- **The release.** Release run 45954918064 published `v0.1.0`, immutable, with the five assets. It ran on `macos-15` with Xcode 16.4 from `DEVELOPER_DIR`, and its two builds of each target were byte-identical.
++- **The attestation.** `gh attestation verify` on the binary passes with `--source-ref refs/heads/main` and `--source-digest` set to `e957fd3`, the merge commit `v0.1.0` names. It fails with `--source-ref refs/tags/v0.1.0`, and with the digest of another commit.
++- **The installer from the release.** `install.sh` from the release installs from source, built with rustc 1.97.1, and, without `cargo`, as the attested binary. A rerun prints `current` each way, and `uninstall` removes the binary and the receipt and keeps the stores.
++
++Step 5's first run of the site workflow deployed `site/` and then failed to promote it, because `vercel promote` cannot read a team-scoped token's user (§ 2.10 step 6). The owner promoted that deployment by hand, so the first promotion was manual; the workflow now promotes through Vercel's API. With it live, the domain rows of § 4 pass:
++
++- `/install.sh` answers a 307 to `releases/latest/download/install.sh`, and `/v0.1.0/install.sh` a 307 to `releases/download/v0.1.0/install.sh`.
++- `www` answers a 308 to the apex, plain HTTP a 308 to HTTPS, and `/` a 200 with the page.
++- `curl -fsSL https://getmultipass.dev/install.sh | bash` installed 0.1.0 from source into a temporary `HOME`.
++
++The one exception was the cache header. Vercel sends `public, max-age=0, must-revalidate` on the redirects, not `no-store`, so `check-site.sh live` failed until it accepted that header, as § 2.9 explains. It passes against the live site now.
++
+ ## 7. Open questions
+ 
+ ### 7.1 How the domain's Vercel project deploys
+diff --git a/tests/site.sh b/tests/site.sh
+index f60c582..2778b01 100755
+--- a/tests/site.sh
++++ b/tests/site.sh
+@@ -30,6 +30,69 @@ for dir in "$ROOT"/tests/site/*/; do
+   fi
+ done
+ 
++# The live check's Cache-Control rule. Vercel sends its default on
++# redirects, so that default must pass, and anything that lets a cache serve
++# a stored redirect without asking again must fail.
++for value in "no-store" "No-Cache" "public, max-age=0, must-revalidate" "max-age=0,must-revalidate,s-maxage=0"; do
++  "$CHECK" cache "$value" || {
++    echo "FAIL: check-site.sh cache rejected \"$value\"" >&2
++    FAILURES=$((FAILURES + 1))
++  }
++done
++for value in "" "public" "public, max-age=0" "public, max-age=60, must-revalidate" \
++  "public, max-age=0, must-revalidate, s-maxage=86400" 'no-cache="set-cookie", max-age=600' "max-age=0, proxy-revalidate"; do
++  ! "$CHECK" cache "$value" || {
++    echo "FAIL: check-site.sh cache accepted \"$value\"" >&2
++    FAILURES=$((FAILURES + 1))
++  }
++done
++
++# vercel-api.sh, against a fake curl that logs its arguments and stdin and
++# answers with $FAKE_STATUS, so no request leaves this machine.
++fail() {
++  echo "FAIL: $*" >&2
++  FAILURES=$((FAILURES + 1))
++}
++API="$ROOT/.github/scripts/vercel-api.sh"
++FAKE="$(mktemp -d "${TMPDIR:-/tmp}/multipass-site-test.XXXXXX")"
++trap 'rm -rf "$FAKE"' EXIT
++cat >"$FAKE/curl" <<EOF
++#!/bin/sh
++printf '%s\n' "\$@" >"$FAKE/argv"
++cat >"$FAKE/stdin"
++printf '{"deploymentId":"dpl_1"}\n%s' "\$FAKE_STATUS"
++EOF
++chmod +x "$FAKE/curl"
++api() {
++  set +e
++  OUT="$(env PATH="$FAKE:$PATH" VERCEL_TOKEN=secret-token VERCEL_ORG_ID=team_1 FAKE_STATUS="$1" "$API" "$2" "$3" 2>"$FAKE/stderr")"
++  STATUS=$?
++  set -e
++}
++
++api 200 GET /v4/aliases/example.dev
++[ "$STATUS" = 0 ] || fail "vercel-api.sh exited $STATUS for a 200"
++[ "$OUT" = '{"deploymentId":"dpl_1"}' ] || fail "vercel-api.sh printed $OUT for a 200"
++grep -qx 'https://api.vercel.com/v4/aliases/example.dev?teamId=team_1' "$FAKE/argv" ||
++  fail "vercel-api.sh did not request the path with teamId: $(cat "$FAKE/argv")"
++! grep -q secret-token "$FAKE/argv" || fail "vercel-api.sh put the token in curl's arguments"
++grep -qx 'Authorization: Bearer secret-token' "$FAKE/stdin" || fail "vercel-api.sh did not send the token on stdin"
++! grep -qx -- --data "$FAKE/argv" || fail "vercel-api.sh sent a body with a GET"
++
++api 201 POST "/v10/projects/prj_1/promote/dpl_2?x=1"
++[ "$STATUS" = 0 ] || fail "vercel-api.sh exited $STATUS for a 201"
++grep -qx 'https://api.vercel.com/v10/projects/prj_1/promote/dpl_2?x=1&teamId=team_1' "$FAKE/argv" ||
++  fail "vercel-api.sh did not add teamId to a path with a query: $(cat "$FAKE/argv")"
++grep -qx POST "$FAKE/argv" || fail "vercel-api.sh did not send a POST"
++
++api 404 GET /v4/aliases/example.dev
++[ "$STATUS" = 4 ] || fail "vercel-api.sh exited $STATUS for a 404, not 4"
++
++api 403 POST /v1/projects/prj_1/rollback/dpl_1
++[ "$STATUS" = 1 ] || fail "vercel-api.sh exited $STATUS for a 403, not 1"
++[ -z "$OUT" ] || fail "vercel-api.sh printed the body of a 403 to stdout"
++grep -q 'answered HTTP 403' "$FAKE/stderr" || fail "vercel-api.sh did not name the 403: $(cat "$FAKE/stderr")"
++
+ if [ "$FAILURES" -gt 0 ]; then
+   exit 1
+ fi

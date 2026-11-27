@@ -1,0 +1,153 @@
+{
+ "version": 1,
+ "name": "Site deploy through Vercel's API",
+ "project": "installer",
+ "pr": {
+  "repo": "ninjudd/multipass",
+  "number": 38,
+  "title": "Promote the site through Vercel's API, and accept its revalidating cache header",
+  "head": "af96cd19a72860e11371acf071974b591d486877",
+  "headRef": "site-promote-fix",
+  "base": "e957fd3020d41d32156e05c324a9a67afb1a3aa7",
+  "baseRef": "main"
+ },
+ "overview": {
+  "summary": [
+   "<code>getmultipass.dev</code> is a small Vercel site whose main job is to redirect <code>/install.sh</code> to the installer attached to a GitHub release. The <b>Website</b> workflow (<code>.github/workflows/site.yml</code>) deploys it on each merge to <code>main</code>. The workflow deploys without attaching the domain, then <em>promotes</em> the new deployment (points the domain at it). It checks the live redirects and <em>rolls back</em> (points the domain at the deployment it served before) when a check fails.",
+   "The workflow's first real run failed at the promote step with <code>User not found. (404)</code>. The pinned Vercel CLI, <code>vercel@65.14.0</code>, looks up the token's user through <code>GET /v2/user</code> before it promotes or rolls back. The workflow's token is scoped to a Vercel team and has no user, so both commands fail with it.",
+   "This pull request makes three changes:",
+   "<ol><li><b>Direct API calls.</b> The workflow calls Vercel's promote and rollback endpoints itself, through a new script, <code>.github/scripts/vercel-api.sh</code>, that keeps the token out of every process's arguments. It then polls the domain's alias until the domain serves the deployment it asked for.</li><li><b>A cache rule that matches Vercel.</b> Vercel sends <code>public, max-age=0, must-revalidate</code> on every redirect, whatever <code>vercel.json</code> asks for. So the live check, which demanded <code>no-store</code>, now accepts any header that makes every cache ask the site again.</li><li><b>The plan catches up with rollout.</b> The installer plan records what the first release and the first deploy found.</li></ol>",
+   "The workflow runs only on <code>main</code> with the token, so the new promote, alias wait, and rollback first run on the next Website deploy after the merge. <code>tests/site.sh</code> covers the script and the cache rule without any network access."
+  ],
+  "cards": [
+   {
+    "id": "terms",
+    "title": "Terms on this page",
+    "html": "<ul class=\"tight\"><li><b>Deployment.</b> One upload of <code>site/</code> to Vercel, with an ID such as <code>dpl_…</code> and its own URL.</li><li><b>Alias.</b> Vercel's record that the domain serves a given deployment. Its <code>deploymentId</code> says which.</li><li><b>Promote.</b> Point the production domains at a deployment.</li><li><b>Roll back.</b> Point them back at an earlier deployment.</li><li><b>Team-scoped token.</b> A Vercel API token issued for a team rather than a person, so it has no user record.</li></ul>"
+   },
+   {
+    "id": "review",
+    "title": "Review so far",
+    "html": "<p>A Projector review of <code>af96cd1</code> was clean, with no finding threads. It listed three suggestions: a <code>curl</code> time limit in <code>vercel-api.sh</code>, a format check on deployment IDs read from the API, and an early return for an empty value in the cache rule, which macOS's bash 3.2 otherwise aborts on.</p>"
+   }
+  ]
+ },
+ "groups": [
+  {
+   "id": "api",
+   "title": "Promote and roll back through the API",
+   "kicker": "The workflow calls Vercel's REST API directly instead of the CLI's promote and rollback.",
+   "intro": [
+    "The CLI still uploads the site with <code>vercel deploy --prod --skip-domain</code>, which works with a team token. Every step after the upload calls the API through <code>vercel-api.sh &lt;method&gt; &lt;path&gt;</code>. The script adds <code>teamId</code> to the path and prints the response body. It exits 0 for a 2xx answer, 4 for a 404, and 1 for any other answer, with the status and body on stderr.",
+    "<ol><li><b>Record.</b> Read the domain's alias with <code>GET /v4/aliases/getmultipass.dev</code> and keep its <code>deploymentId</code> as the rollback target. A 404 means the domain was never promoted, so nothing is kept.</li><li><b>Deploy.</b> Upload with the CLI, which prints the new deployment's URL.</li><li><b>Promote.</b> Look the URL up with <code>GET /v13/deployments/&lt;host&gt;</code> to get its <code>id</code>, then call <code>POST /v10/projects/&lt;project&gt;/promote/&lt;id&gt;</code>.</li><li><b>Wait.</b> Read the alias every five seconds, 36 times, until it names the new ID. Promotion completes after the request returns.</li><li><b>Check, and roll back on failure.</b> Run the live redirect check. When the promote, the wait, or the check fails, call <code>POST /v1/projects/&lt;project&gt;/rollback/&lt;previous&gt;</code>, wait the same way for the alias to name the recorded deployment, and fail the job.</li></ol>"
+   ],
+   "checks": [
+    {
+     "kind": "verify",
+     "text": "Each endpoint, method, and field matches Vercel's published OpenAPI spec at <code>openapi.vercel.sh</code>: <code>requestPromote</code> and <code>requestRollback</code> are <code>POST</code> with no request body and a <code>teamId</code> query parameter, <code>getDeployment</code> accepts a hostname and returns <code>id</code>, and <code>getAlias</code> returns a nullable <code>deploymentId</code>. The review read the spec and called none of the endpoints."
+    }
+   ],
+   "files": [
+    {
+     "path": ".github/scripts/vercel-api.sh",
+     "note": "New. The one place the workflow calls Vercel's API, with the token sent to <code>curl</code> on stdin.",
+     "checks": [
+      {
+       "kind": "context",
+       "text": "<code>printf</code> is a shell builtin, so the <code>Authorization</code> line exists only in the pipe to <code>curl -H @-</code>, never in a process's arguments. Nothing from a response is ever written to that stdin, so a response cannot add a header line.",
+       "line": 31
+      },
+      {
+       "kind": "context",
+       "text": "<code>curl</code> runs with no <code>--max-time</code>, so the alias wait is bounded by its count of tries only while each request returns. The review suggested a time limit.",
+       "line": 27
+      }
+     ]
+    },
+    {
+     "path": ".github/workflows/site.yml",
+     "note": "The promote and rollback steps call <code>vercel-api.sh</code>, and both wait for the alias. Permissions, the <code>production</code> environment, concurrency, triggers, and the pinned checkout action are unchanged.",
+     "checks": [
+      {
+       "kind": "context",
+       "text": "Steps run under GitHub's default <code>bash -e</code>, without <code>pipefail</code>, so a failed lookup is caught through the empty <code>id</code> that <code>jq</code> prints, not through the script's exit status.",
+       "line": 96
+      },
+      {
+       "kind": "verify",
+       "text": "The loop runs 36 times with five seconds between tries, about three minutes. It exits 0 as soon as the alias names the new deployment, and otherwise fails the step, which triggers the rollback.",
+       "line": 111
+      },
+      {
+       "kind": "context",
+       "text": "The rollback step always fails the job. It names the deployment it rolled back to, or says that the alias never came back to it.",
+       "line": 129
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "cache",
+   "title": "Accept the cache header Vercel sends",
+   "kicker": "The live check accepts any Cache-Control value that makes every cache ask the site again.",
+   "intro": [
+    "The live check makes sure no cache can serve an old redirect target. It used to require <code>no-store</code>. Vercel ignores <code>vercel.json</code>'s headers on redirects and always sends <code>public, max-age=0, must-revalidate</code>, so every deploy would have failed its live check and rolled back.",
+    "That header is enough: <code>max-age=0</code> makes a stored redirect stale at once, and <code>must-revalidate</code> forbids any cache from using a stale response without asking again (RFC 9111 § 5.2.2.2). The new rule accepts <code>no-store</code>, <code>no-cache</code>, or <code>max-age=0</code> with <code>must-revalidate</code>. It refuses a positive <code>s-maxage</code>, which a shared cache would use in place of <code>max-age</code>. A new <code>check-site.sh cache &lt;value&gt;</code> mode applies the rule to one value, so the tests can reach it."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": ".github/scripts/check-site.sh",
+     "note": "Adds <code>cache_revalidates</code>, the rule above, and the <code>cache</code> mode that runs it on one value.",
+     "checks": [
+      {
+       "kind": "verify",
+       "text": "<code>curl -sI https://getmultipass.dev/install.sh</code> returns a 307 to the release URL with <code>cache-control: public, max-age=0, must-revalidate</code>, and <code>check-site.sh live https://getmultipass.dev</code> exits 0 at this head."
+      },
+      {
+       "kind": "context",
+       "text": "For an empty value the <code>directives</code> array is empty. macOS's bash 3.2 treats that array as unbound under <code>set -u</code>, so the script aborts there instead of returning 1. The answer is still a refusal, and the workflow runs on Linux's bash 5, where the rule runs normally.",
+       "line": 130
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "tests",
+   "title": "Offline tests for the script and the rule",
+   "kicker": "tests/site.sh checks vercel-api.sh against a fake curl and the cache rule against a table of values.",
+   "intro": [
+    "CI runs <code>tests/site.sh</code> on every pull request. The new checks put a fake <code>curl</code> first on <code>PATH</code>. The fake writes its arguments and its stdin to files and answers with a chosen status. The checks then assert that the token is on stdin and not in the arguments, that <code>teamId</code> joins a path with or without a query, that a <code>GET</code> sends no body, and that a 404 and a 403 give their exit codes. A second table feeds header values to <code>check-site.sh cache</code>: Vercel's default and <code>no-store</code> must pass, and values that let a cache keep a redirect must fail."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": "tests/site.sh",
+     "checks": [
+      {
+       "kind": "verify",
+       "text": "The run ends with <code>site checks passed</code> at this head and sends no request over the network."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "plan",
+   "title": "The installer plan records rollout",
+   "kicker": "The plan describes the API calls, the cache header, Vercel's wildcard DNS record, and what rollout verified.",
+   "intro": [
+    "The installer plan, at <code>status: in-progress</code>, changes in four places. § 2.10's steps describe the API calls and say why the CLI cannot make them. § 2.9 explains Vercel's cache header and its fixed wildcard DNS record. The § 4 table changes the rows for the wildcard and the cache header. A new § 6.1 records the <code>v0.1.0</code> release run, its attestation checks, the installs from the release, and the manual first promotion."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": "docs/projects/installer/readme.md",
+     "note": "§ 2.9, § 2.10 steps 5 to 8, the § 4 table, rollout step 4, and the new § 6.1."
+    }
+   ]
+  }
+ ]
+}
