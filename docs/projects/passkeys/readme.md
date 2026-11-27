@@ -144,5 +144,5 @@ These steps run in order. Steps 2 and 4 need the user's Apple developer account 
 
 1. **Prototype.** Build a bare extension that registers and signs with a fixed test key on both platforms, and answer question 5: can the extension open the app's iCloud container directly? Also measure scrypt at work factor 18 inside the iPhone extension's memory limit, and check whether Chrome on the Mac offers the extension. Record the results in § 7, and move this plan to `ready`.
 2. **Apple setup.** The user creates the App Store Connect record and the identifiers the app needs: the bundle IDs for the app and its extensions, the App Group, the iCloud container, and the Keychain access group. App Store Connect also asks whether the app uses encryption. It does, both its own and Apple's, so the user answers the export compliance questions for an app that encrypts only the user's own data.
-3. **Build.** Implement § 2 and pass the tests in § 4, on CI and locally.
+3. **Build.** Implement § 2 and pass the tests in § 4, on CI and locally. The session-unlock plan's Secure Enclave mode (`docs/projects/session-unlock/readme.md`, § 8) lands with this app, and its § 8.5 questions join the prototype in step 1.
 4. **TestFlight.** Upload builds for both platforms. The user installs them from TestFlight on the Mac and the iPhone, and runs the checks in § 4's table.
