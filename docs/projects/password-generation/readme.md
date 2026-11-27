@@ -60,7 +60,7 @@ The loops in steps 4.1 and 4.3 decide whether to draw again from a value that is
 | `--exclude <chars>` | random | none | Characters never to use, from any set. |
 | `--no-lookalikes` | random | off | Leaves out characters that are easy to misread: `0 O o 1 l I \|`. |
 | `--rules <rules>` | random | none | A site's password rules, as § 2.3 describes. |
-| `--words <n>` | memorable | `5` | Words, from 3 to 15, as in 1Password. |
+| `--words <n>` | memorable | `5`, or `6` with `--syllables` | Words, from 3 to 15, as in 1Password. The default clears 64 bits either way: 5 words are 64.6 bits, but 5 syllables would be only 54.8, so 6 syllables, 65.8 bits, is the default with `--syllables`. |
 | `--separator <sep>` | memorable | `hyphen` | What goes between words: `hyphen`, `space`, `period`, `comma`, `underscore`, `digit`, or `digit-or-symbol`. The last two draw a new random character for each gap. |
 | `--capitalize <which>` | memorable | `none` | `none`, `first` (the first letter of every word), or `one` (the first letter of one randomly chosen word). |
 | `--syllables` | memorable | off | Uses short pronounceable syllables instead of full words (§ 2.4). Awaits the owner (§ 6). |
