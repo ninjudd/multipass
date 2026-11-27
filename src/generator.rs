@@ -6,6 +6,7 @@ use crate::crypto::generate::{
     self, Capitalize, Cell, Chars, DIGITS, LOWERCASE, Recipe, SYMBOLS, Separator, UPPERCASE,
     WordList, Words,
 };
+use crate::generate_rules;
 
 /// Characters that are easy to misread for one another.
 const LOOKALIKES: &[u8] = b"0Oo1lI|";
@@ -28,6 +29,7 @@ pub struct Options {
     pub symbols: Option<String>,
     pub exclude: Option<String>,
     pub no_lookalikes: bool,
+    pub rules: Option<String>,
     /// `Some(None)` for `--words` without a count.
     pub words: Option<Option<usize>>,
     pub separator: Option<String>,
@@ -53,6 +55,7 @@ impl Options {
             (self.symbols.is_some(), "--symbols"),
             (self.exclude.is_some(), "--exclude"),
             (self.no_lookalikes, "--no-lookalikes"),
+            (self.rules.is_some(), "--rules"),
         ]
         .into_iter()
         .filter_map(|(given, flag)| given.then_some(flag))
@@ -147,7 +150,103 @@ impl Options {
         }))
     }
 
+    /// The characters `--exclude` and `--no-lookalikes` leave out.
+    fn excluded(&self) -> Vec<u8> {
+        let mut excluded: Vec<u8> = self.exclude.as_deref().unwrap_or("").bytes().collect();
+        if self.no_lookalikes {
+            excluded.extend_from_slice(LOOKALIKES);
+        }
+        excluded
+    }
+
+    /// Random characters that follow a site's `--rules`. The rules replace
+    /// the set options, and `--exclude` and `--no-lookalikes` narrow them.
+    fn rules_recipe(&self, text: &str) -> Result<Recipe, String> {
+        let replaced = [
+            (self.no_uppercase, "--no-uppercase"),
+            (self.no_lowercase, "--no-lowercase"),
+            (self.no_digits, "--no-digits"),
+            (self.no_symbols, "--no-symbols"),
+            (self.symbols.is_some(), "--symbols"),
+        ];
+        if let Some((_, flag)) = replaced.iter().find(|(given, _)| *given) {
+            return Err(format!(
+                "--rules replaces {flag}; say it in the rules instead"
+            ));
+        }
+        let rules = generate_rules::parse(text)?;
+        // The strength count tracks every subset of the requirements met so
+        // far, so it grows as 2 to the number of required rules.
+        if rules.required.len() > 8 {
+            return Err("multipass follows at most 8 required rules".into());
+        }
+        let length = match self.length {
+            Some(length) => {
+                in_range("--length", length, 4, 128)?;
+                length
+            }
+            None => 20,
+        };
+        let min = rules.min_length.unwrap_or(0).max(4);
+        let max = rules.max_length.unwrap_or(128).min(128);
+        if min > max {
+            return Err(format!(
+                "the rules allow no length multipass can make: from {} to {}, and multipass makes 4 to 128",
+                rules.min_length.unwrap_or(0),
+                rules
+                    .max_length
+                    .map_or("any".to_string(), |m| m.to_string())
+            ));
+        }
+        let length = length.clamp(min, max);
+        // A space at the start or end of a password is easy to lose when it
+        // is pasted, so it is never drawn even where a site allows it.
+        let mut excluded = self.excluded();
+        excluded.push(b' ');
+        // Group the allowed characters by which requirements each meets, so
+        // that the cells are disjoint even when required classes overlap.
+        let mut cells: Vec<Cell> = Vec::new();
+        for &b in &rules.allowed {
+            if excluded.contains(&b) {
+                continue;
+            }
+            let satisfies = rules
+                .required
+                .iter()
+                .enumerate()
+                .filter(|(_, set)| set.contains(&b))
+                .fold(0u32, |bits, (i, _)| bits | 1 << i);
+            match cells.iter_mut().find(|cell| cell.satisfies == satisfies) {
+                Some(cell) => cell.chars.push(b),
+                None => cells.push(Cell {
+                    chars: vec![b],
+                    satisfies,
+                }),
+            }
+        }
+        for (i, _) in rules.required.iter().enumerate() {
+            if !cells.iter().any(|cell| cell.satisfies & 1 << i != 0) {
+                return Err(format!(
+                    "required rule {} has no character left to draw",
+                    i + 1
+                ));
+            }
+        }
+        if cells.is_empty() {
+            return Err("the rules leave no character to draw".into());
+        }
+        Ok(Recipe::Chars(Chars {
+            cells,
+            requirements: rules.required.len() as u32,
+            length,
+            max_consecutive: rules.max_consecutive,
+        }))
+    }
+
     fn chars_recipe(&self) -> Result<Recipe, String> {
+        if let Some(text) = &self.rules {
+            return self.rules_recipe(text);
+        }
         let length = self.length.unwrap_or(20);
         in_range("--length", length, 4, 128)?;
         let symbols = match &self.symbols {
@@ -162,10 +261,7 @@ impl Options {
             }
             None => SYMBOLS.to_vec(),
         };
-        let mut excluded: Vec<u8> = self.exclude.as_deref().unwrap_or("").bytes().collect();
-        if self.no_lookalikes {
-            excluded.extend_from_slice(LOOKALIKES);
-        }
+        let excluded = self.excluded();
         let sets = [
             (!self.no_uppercase, UPPERCASE, "uppercase letters"),
             (!self.no_lowercase, LOWERCASE, "lowercase letters"),
@@ -230,10 +326,22 @@ pub fn strength(recipe: &Recipe) -> String {
     let what = match recipe {
         Recipe::Chars(chars) => {
             let alphabet: usize = chars.cells.iter().map(|cell| cell.chars.len()).sum();
-            format!(
-                "random characters, {} from {alphabet}, each set present",
-                chars.length
-            )
+            // The set options make one requirement per cell; anything else
+            // came from --rules.
+            let one_per_cell = chars.requirements as usize == chars.cells.len()
+                && chars
+                    .cells
+                    .iter()
+                    .enumerate()
+                    .all(|(i, cell)| cell.satisfies == 1 << i);
+            let how = if chars.max_consecutive.is_none() && one_per_cell {
+                ", each set present"
+            } else if chars.max_consecutive.is_none() && chars.requirements == 0 {
+                ""
+            } else {
+                ", with rules"
+            };
+            format!("random characters, {} from {alphabet}{how}", chars.length)
         }
         Recipe::Words(words) => {
             let separator = match words.separator {
@@ -439,6 +547,123 @@ mod tests {
                 ..Options::default()
             }),
             "--pin must be from 4 to 64"
+        );
+    }
+
+    fn rules(text: &str) -> Options {
+        Options {
+            rules: Some(text.into()),
+            ..Options::default()
+        }
+    }
+
+    #[test]
+    fn follows_password_rules() {
+        assert_eq!(
+            strength_of(rules(
+                "minlength: 8; maxlength: 16; required: lower; required: upper; required: digit; allowed: [-!#$]; max-consecutive: 2;"
+            )),
+            "random characters, 16 from 66, with rules: 96.6 bits"
+        );
+        // With no class named, every printable character but the space.
+        assert_eq!(
+            strength_of(rules("minlength: 24")),
+            "random characters, 24 from 94: 157.3 bits"
+        );
+        // --length is kept when it fits the bounds, and moved to the nearer
+        // bound when it does not.
+        let length = |text: &str, length: Option<usize>| match (Options {
+            length,
+            ..rules(text)
+        })
+        .recipe()
+        .unwrap()
+        {
+            Recipe::Chars(chars) => chars.length,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(length("minlength: 8; maxlength: 16", Some(12)), 12);
+        assert_eq!(length("minlength: 8; maxlength: 16", Some(30)), 16);
+        assert_eq!(length("minlength: 32", None), 32);
+    }
+
+    #[test]
+    fn splits_overlapping_requirements_into_disjoint_cells() {
+        // `required: upper; required: [A-]` overlaps on A: one requirement
+        // is met by any capital, the other by A or -, and the cells must not
+        // count A twice.
+        let Recipe::Chars(chars) = rules("required: upper; required: [-A]").recipe().unwrap()
+        else {
+            panic!()
+        };
+        let all: Vec<u8> = chars.cells.iter().flat_map(|c| c.chars.clone()).collect();
+        assert_eq!(all.len(), 27);
+        let a = chars
+            .cells
+            .iter()
+            .find(|c| c.chars.contains(&b'A'))
+            .unwrap();
+        assert_eq!((a.chars.clone(), a.satisfies), (b"A".to_vec(), 0b11));
+    }
+
+    #[test]
+    fn narrows_rules_with_exclude_but_not_with_set_options() {
+        let Recipe::Chars(chars) = Options {
+            exclude: Some("$".into()),
+            no_lookalikes: true,
+            ..rules("required: digit; allowed: [$%]")
+        }
+        .recipe()
+        .unwrap() else {
+            panic!()
+        };
+        let all: Vec<u8> = chars.cells.iter().flat_map(|c| c.chars.clone()).collect();
+        assert_eq!(all, b"%23456789".to_vec());
+        assert_eq!(
+            Options {
+                no_digits: true,
+                ..rules("required: digit")
+            }
+            .recipe()
+            .unwrap_err(),
+            "--rules replaces --no-digits; say it in the rules instead"
+        );
+        assert_eq!(
+            Options {
+                words: Some(None),
+                ..rules("required: digit")
+            }
+            .recipe()
+            .unwrap_err(),
+            "--rules applies to random characters, not --words"
+        );
+        assert_eq!(
+            Options {
+                exclude: Some("0123456789".into()),
+                ..rules("required: digit; allowed: lower")
+            }
+            .recipe()
+            .unwrap_err(),
+            "required rule 1 has no character left to draw"
+        );
+        assert_eq!(
+            rules("maxlength: 3").recipe().unwrap_err(),
+            "the rules allow no length multipass can make: from 0 to 3, and multipass makes 4 to 128"
+        );
+        // Four required classes in four characters is possible but narrow;
+        // five in four is not.
+        assert!(
+            rules(
+                "maxlength: 4; required: upper; required: lower; required: digit; required: special"
+            )
+            .recipe()
+            .is_ok()
+        );
+        assert_eq!(
+            rules("maxlength: 4; required: upper; required: lower; required: digit; required: [!]; required: [?]")
+                .recipe()
+                .unwrap_err(),
+            "these options leave too few passwords to draw from"
         );
     }
 

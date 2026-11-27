@@ -89,6 +89,7 @@ multipass: PIN, 6 digits: 19.9 bits -- weak for a password you cannot rate-limit
 | `--symbols <chars>` | all 32 ASCII punctuation characters | The symbols to use, for a site that accepts only some. |
 | `--exclude <chars>` | | Characters never to use. |
 | `--no-lookalikes` | | Leaves out `0`, `O`, `o`, `1`, `l`, `I`, and `\|`. |
+| `--rules <rules>` | | A site's password rules, as below. |
 | `--words [<n>]` | `5`, or `6` with `--syllables` | Memorable words instead, from 3 to 15, drawn from the EFF's large word list of 7,776 words. |
 | `--separator <sep>` | `hyphen` | With `--words`: `hyphen`, `space`, `period`, `comma`, `underscore`, `digit`, or `digit-or-symbol`. The last two draw a new character for each gap. |
 | `--capitalize <how>` | `none` | With `--words`: `first` capitalizes every word, and `one` capitalizes one word chosen at random. |
@@ -96,6 +97,15 @@ multipass: PIN, 6 digits: 19.9 bits -- weak for a password you cannot rate-limit
 | `--pin [<n>]` | `6` | A PIN instead, from 4 to 64 digits. |
 
 Every character, word, and separator is drawn from `/dev/urandom` without bias, and the strength line counts exactly the passwords that meet the options. A password under 64 bits gets a warning: that is too weak to survive an attacker who can guess offline, though a PIN that a bank's servers rate-limit is still fine.
+
+When a site limits what a password may hold, give its rules with `--rules`, in the format Apple defined for the `passwordrules` HTML attribute. Apple's [password-manager-resources](https://github.com/apple/password-manager-resources) repository records such rules for many sites in `quirks/password-rules.json`, so you can often copy a site's line from there:
+
+```console
+$ multipass add bank.example --generate --rules 'minlength: 8; maxlength: 16; required: lower; required: upper; required: digit; allowed: [-!#$]; max-consecutive: 2;'
+multipass: random characters, 16 from 66, with rules: 96.6 bits
+```
+
+`required` names a class the password needs a character from, once per class; `allowed` adds characters it may hold; `minlength`, `maxlength`, and `max-consecutive` bound the length and how often one character repeats in a row. The classes are `upper`, `lower`, `digit`, `special`, `ascii-printable`, and a custom set in brackets such as `[-!#$]`, where a `-` must come first and a `]` is written `]]` at the end. With no class named, any printable character may appear. multipass never draws a space, even where `special` or `ascii-printable` allows one, and refuses `unicode`, `max-repeating`, and `max-sequential`. `--rules` replaces `--no-uppercase`, `--no-lowercase`, `--no-digits`, `--no-symbols`, and `--symbols`, while `--exclude`, `--no-lookalikes`, and `--length` still apply, with the length moved inside the rules' bounds.
 
 ## Stay unlocked between commands
 

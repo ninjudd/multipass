@@ -84,7 +84,17 @@ multipass: random characters, 16 from 66, with rules: 96.6 bits
 | `minlength`, `maxlength` | The length is `--length` when it fits, and otherwise the nearest bound. |
 | `max-consecutive: <n>` | No character repeats more than `n` times in a row. |
 
-The classes are `upper`, `lower`, `digit`, `special` (ASCII punctuation), `ascii-printable`, and a custom set in brackets such as `[-!#$]`. `unicode` is refused, because multipass draws only ASCII. The rules replace the character-set options, so `--rules` with `--no-digits` or `--symbols` is an error. `--exclude` and `--no-lookalikes` still apply on top. Parsing the rules happens in `src/generate_rules.rs`, outside `src/crypto`, because the rules are public text and parsing them branches on every byte.
+The classes are `upper`, `lower`, `digit`, `special` (ASCII punctuation and the space), `ascii-printable` (the space through `~`), and a custom set in brackets such as `[-!#$]`. `unicode` is refused, because multipass draws only ASCII. The rules replace the character-set options, so `--rules` with `--no-digits` or `--symbols` is an error. `--exclude` and `--no-lookalikes` still apply on top. Parsing the rules happens in `src/generate_rules.rs`, outside `src/crypto`, because the rules are public text and parsing them branches on every byte.
+
+`src/generate_rules.rs` follows Apple's own parser, `tools/PasswordRulesParser/PasswordRulesParser.js` in `password-manager-resources`, read in November 2026:
+
+- **What the password may hold.** The allowed characters are the union of every `required` and `allowed` class, or every printable character when the rules name no class. multipass never draws the space, even where a class allows it, because a space at either end of a password is easy to lose when it is pasted.
+- **Repeated rules.** The largest `minlength` wins, and the smallest `maxlength` and `max-consecutive`. Each `required` rule is its own requirement, and a rule with an empty value is ignored.
+- **Custom classes.** A `-` may appear only first, and a literal `]` is written `]]` at the end of a class. Class names ignore case.
+- **What Apple skips, multipass refuses.** Apple's parser drops a `-` that is not first, an unknown class, or an unknown property with a console warning. multipass stops with an error naming it, because a silently dropped character changes what the password may hold.
+- **Newer properties.** Apple's parser also reads `max-repeating` and `max-sequential`. Their meaning is not written down where this plan could check it, so multipass refuses them by name.
+- **Overlapping classes.** When required classes share characters, such as `required: upper; required: [-A]`, the recipe splits the allowed characters into disjoint cells by which requirements each meets, so the count in § 2.5 stays exact. At most 8 `required` rules are accepted, because the count tracks every subset of them.
+- **Length.** The length is `--length`, or 20, moved inside the rules' bounds and within multipass's own 4 to 128.
 
 ### 2.4 Word lists
 

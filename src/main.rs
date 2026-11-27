@@ -2,6 +2,7 @@ mod age;
 mod agent;
 mod clipboard;
 mod crypto;
+mod generate_rules;
 mod generator;
 #[cfg(target_os = "macos")]
 mod objc;
@@ -85,6 +86,9 @@ Password options, for generate and add --generate:
   --symbols <chars>     The symbols to use [default: all ASCII punctuation]
   --exclude <chars>     Characters never to use
   --no-lookalikes       Leave out 0 O o 1 l I and |
+  --rules <rules>       A site's password rules in Apple's passwordrules format,
+                        such as 'minlength: 8; required: digit;'. They replace
+                        the set options above
   --words [<n>]         Memorable words instead, from 3 to 15 [default: 5]
     --separator <sep>   hyphen, space, period, comma, underscore, digit or
                         digit-or-symbol [default: hyphen]
@@ -318,6 +322,7 @@ fn parse(args: Vec<String>) -> Result<Parsed> {
             "--exclude" => options.exclude = Some(take_value(&flag, inline, &mut args)?),
             "--separator" => options.separator = Some(take_value(&flag, inline, &mut args)?),
             "--capitalize" => options.capitalize = Some(take_value(&flag, inline, &mut args)?),
+            "--rules" => options.rules = Some(take_value(&flag, inline, &mut args)?),
             "--generate" | "--no-uppercase" | "--no-lowercase" | "--no-digits" | "--no-symbols"
             | "--no-lookalikes" | "--syllables"
                 if inline.is_some() =>
@@ -1574,6 +1579,35 @@ mod tests {
                 clip: false,
             }
         );
+    }
+
+    #[test]
+    fn parses_rules() {
+        // A rules line holds spaces, so it arrives as one argument.
+        let argv = |rules: &str| {
+            vec![
+                "generate".to_string(),
+                "--rules".to_string(),
+                rules.to_string(),
+            ]
+        };
+        let rules = "minlength: 8; required: digit;";
+        assert_eq!(
+            parse(argv(rules)).unwrap(),
+            Parsed::Run {
+                store: None,
+                command: Command::Generate {
+                    recipe: generator::Options {
+                        rules: Some(rules.into()),
+                        ..Default::default()
+                    }
+                    .recipe()
+                    .unwrap(),
+                    clip: false,
+                },
+            }
+        );
+        assert!(parse(argv("required: unicode;")).is_err());
     }
 
     #[test]
