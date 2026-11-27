@@ -5,7 +5,7 @@ priority: now
 
 # Password generation
 
-multipass makes new passwords itself, as random characters, memorable words, or a PIN, with every option 1Password's generator offers, and stores one in an entry without ever showing it.
+multipass makes new passwords itself, as random characters, memorable words, or a PIN, with every option 1Password documents for its generator, and stores one in an entry without ever showing it. It leaves out the three-letter word list that 1Password's SDK names, because no 1Password page describes what that list produces, so multipass could not match it (§ 7).
 
 ## 1. Problem
 
@@ -60,7 +60,7 @@ The loops in steps 4.1 and 4.3 decide whether to draw again from a value that is
 | `--exclude <chars>` | random | none | Characters never to use, from any set. |
 | `--no-lookalikes` | random | off | Leaves out characters that are easy to misread: `0 O o 1 l I \|`. |
 | `--rules <rules>` | random | none | A site's password rules, as § 2.3 describes. |
-| `--words <n>` | memorable | `5`, or `6` with `--syllables` | Words, from 3 to 15, as in 1Password. The default clears 64 bits either way: 5 words are 64.6 bits, but 5 syllables would be only 54.8, so 6 syllables, 65.8 bits, is the default with `--syllables`. |
+| `--words <n>` | memorable | `5`, or `6` with `--syllables` | Words, from 3 to 15, the range a guide to 1Password gives (§ 7). The default clears 64 bits either way: 5 words are 64.6 bits, but 5 syllables would be only 54.8, so 6 syllables, 65.8 bits, is the default with `--syllables`. |
 | `--separator <sep>` | memorable | `hyphen` | What goes between words: `hyphen`, `space`, `period`, `comma`, `underscore`, `digit`, or `digit-or-symbol`. The last two draw a new random character for each gap. |
 | `--capitalize <which>` | memorable | `none` | `none`, `first` (the first letter of every word), or `one` (the first letter of one randomly chosen word). |
 | `--syllables` | memorable | off | Uses short pronounceable syllables instead of full words (§ 2.4). |
@@ -176,7 +176,7 @@ The owner has decided all three.
 
 - **Types.** `https://1password.com/password-generator` offers Random, Memorable, and PIN. 1Password's SDK names the same three recipes (`https://www.1password.dev/sdks/manage-items`).
 - **Random.** The web page has toggles for characters, numbers, and symbols. The SDK's random recipe has `length`, `includeDigits`, and `includeSymbols`. The CLI's `op item create --generate-password` takes a length from 1 to 64 and defaults to 32 characters of letters, digits, and the symbols `!@.-_*`.
-- **Memorable.** The web page offers "Capitalize the first letter" and "Use full words". The SDK's recipe has `wordCount`, `capitalize` ("Whether to capitalize one section of the generated password"), `separatorType` with the values digits, digits and symbols, spaces, hyphens, underscores, periods, and commas, and `wordListType` with full words, syllables, and three letters. A 1Password staff reply on its community forum lists the same separators. An older guide on ScreenRant gives a range of 3 to 15 words, which no 1Password page confirms.
+- **Memorable.** The web page offers "Capitalize the first letter" and "Use full words". The SDK's recipe has `wordCount`, `capitalize` ("Whether to capitalize one section of the generated password"), `separatorType` with the values digits, digits and symbols, spaces, hyphens, underscores, periods, and commas, and `wordListType` with full words, syllables, and three letters. A 1Password staff reply on its community forum lists the same separators. An older guide on ScreenRant gives a range of 3 to 15 words, which no 1Password page confirms. multipass offers full words and syllables, and leaves out three letters: no 1Password page says what that list holds or how it draws from it, so multipass could not produce the same kind of password.
 - **PIN.** The SDK's recipe has one field, `length`.
 - **Not offered.** None of these pages mentions avoiding look-alike characters or excluding characters, and none gives a range or default beyond the CLI's. `--no-lookalikes`, `--exclude`, `--symbols`, and `--rules` go beyond 1Password, for the per-site rules the owner asked for.
 - **The word list.** The EFF published its large list in 2016 for dice-based passphrases: 7,776 words, five dice rolls each, chosen to be easy to type and remember.
