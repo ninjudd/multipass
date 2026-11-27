@@ -1,0 +1,102 @@
+{
+ "version": 1,
+ "name": "Passkeys on the store package",
+ "project": "passkeys",
+ "pr": {
+  "repo": "ninjudd/multipass",
+  "number": 18,
+  "title": "Fit the passkeys plan to the store package",
+  "head": "9aa705cd4e1ba35777a9e046467821a89f64b7f2",
+  "headRef": "passkeys-vault-key-followup",
+  "base": "094573e38328bd5448687043d41ff8653c77454c",
+  "baseRef": "main"
+ },
+ "overview": {
+  "summary": [
+   "multipass keeps its plans for future work under <code>docs/projects</code>. Three of them were merged together: the mergeable store, which lets two copies of the store combine entry by entry; the vault key, which turns the store into a <em>package</em>, a directory of encrypted files that are written once and never modified; and session unlock. The passkeys plan, which describes an iPhone and Mac app that signs you in with passkeys kept in the store, was written before the package existed. It still described one <code>store.age</code> file synced through iCloud Drive, with a conflict screen for when two devices saved at once.",
+   "This pull request fits the passkeys plan, still a draft, to the package. The extension now opens the package and saves a registration as a new file, the iCloud container holds <code>Documents/store.multipass</code>, and the conflict screen gives way to the merge. § 2.3 now explains why the Keychain item keeps the passphrase rather than the vault key. A one-line edit to the vault-key plan clarifies when a passphrase prompt compacts the package.",
+   "The review found three open problems in the passkeys plan, flagged below on the lines they concern. Nothing in this pull request is code, and nothing is built yet."
+  ],
+  "cards": [
+   {
+    "id": "terms",
+    "title": "Terms",
+    "html": "<ul class=\"tight\"><li><b>Package</b>: the store as a directory, <code>store.multipass</code>, of age-encrypted files that are never modified once written.</li><li><b>Key file</b>: <code>key.&lt;gen&gt;.age</code>, encrypted under your passphrase, holding the random vault key and the keys it replaced.</li><li><b>Store file</b>: <code>store.&lt;gen&gt;.&lt;random&gt;.age</code>, a whole store encrypted under the vault key's text. Each save writes a new one.</li><li><b>Merge</b>: opening decrypts every store file and keeps, for each entry, the version with the newest <code>modified</code> stamp.</li><li><b>Rotation</b>: replacing the vault key, at a prompt when the key is 14 or more days old and on every <code>passwd</code>.</li></ul>"
+   },
+   {
+    "id": "review",
+    "title": "Review so far",
+    "html": "<ul class=\"tight\"><li>One review of this head, which requests changes on three findings in the passkeys plan.</li><li>The vault-key edit and the Keychain reasoning in § 2.3 hold.</li><li>The passkeys plan stays <code>draft</code>, so its open questions do not gate the review.</li></ul>"
+   }
+  ]
+ },
+ "groups": [
+  {
+   "id": "passkeys",
+   "title": "The passkeys plan on the store package",
+   "kicker": "How the app's extension opens, saves, unlocks, and syncs the store now that it is a package",
+   "intro": [
+    "The passkeys app's AutoFill extension is what macOS and iOS call when a site asks for a passkey. It unlocks the store, signs with a passkey from it, and, for a new passkey, saves one. Before this change the plan had it decrypt and replace a single file, and refuse to save while iCloud held two versions of that file.",
+    "With the vault-key package, a save adds a new store file and deletes only the files it read, so iCloud never holds two versions of one file. The plan now relies on the merge instead of a conflict screen, and its acceptance row for two offline devices expects both passkeys to survive.",
+    "The Keychain item still holds the passphrase. The vault key changes at least every 21 days and on every <code>passwd</code>, so an item holding it would go stale, and only the passphrase can encrypt the new key file a rotation writes."
+   ],
+   "checks": [
+    {
+     "kind": "context",
+     "text": "The merge works entry by entry: when two devices change the same entry, the newer version wins and the older change is dropped. Read § 2.4's claims about surviving offline changes with that in mind."
+    }
+   ],
+   "files": [
+    {
+     "path": "docs/projects/passkeys/readme.md",
+     "note": "§ 2.1, § 2.3, § 2.4, § 2.5, § 4, and § 5 now describe the package, the merge, and the passphrase in the Keychain.",
+     "checks": [
+      {
+       "kind": "flag",
+       "line": 74,
+       "text": "§ 2.4 says a passkey registered on each of two offline devices both survive, and that the CLI can save at the same time. The merge keeps only the newer version of an entry, so a registration and another device's change to the same entry, such as a password edit or a second registration under the same name, lose one change silently. A lost passkey leaves the site holding a public key whose private key no device has."
+      },
+      {
+       "kind": "flag",
+       "line": 63,
+       "text": "§ 2.3 says the next sign-in after <code>passwd</code> falls back to the passphrase field. While the old key file is still in the package, the item's old passphrase still opens it, and the vault-key plan's § 2.3 step 3 then asks for the other passphrase or opens read-only. The plan does not say what the extension shows in that case, or whether a registration can save."
+      },
+      {
+       "kind": "flag",
+       "line": 110,
+       "text": "This § 4 row runs one <code>age -d</code> on the store, which is now a directory. Reading it with stock age takes the vault-key plan's § 2.7 steps. § 2 still says the devices \"share one file\", and § 2.5's <code>src/ffi.rs</code> row still opens and saves over <code>Store</code>, whose single-file load and save the vault-key plan removes."
+      },
+      {
+       "kind": "verify",
+       "line": 61,
+       "text": "The item's access control (<code>biometryCurrentSet</code>) and accessibility (<code>whenPasscodeSetThisDeviceOnly</code>) are unchanged. Checked against the vault-key plan's § 2.5 and § 2.8: <code>passwd</code> rotates and deletes the old key file, so once that deletion syncs, an old passphrase in the item opens nothing in the package."
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "vault-key",
+   "title": "When a prompt compacts",
+   "kicker": "A one-line rewording of the vault-key plan's § 2.3 step 7",
+   "intro": [
+    "At a passphrase prompt, opening the package can end with one of two clean-ups. A rotation writes a new key file and one merged store file under the new key. A compaction, when there was no rotation, writes one merged store file under the current key. Both delete the files they read.",
+    "Step 7 used to begin \"Otherwise\". Once a step about the move record sat before it, that read as \"compact only when there is no move record\". It now says \"When it did not rotate\", which is what the plan meant."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": "docs/projects/vault-key/readme.md",
+     "note": "Step 7 of § 2.3 now names rotation as the condition for compacting.",
+     "checks": [
+      {
+       "kind": "verify",
+       "line": 67,
+       "text": "Matches § 2.5, whose step 2 already writes one merged store file during a rotation, and step 3's read-only open still forbids compaction. No test in § 4 depends on the old wording. Checked by reading § 2.3 to § 2.6 and § 4 at this head."
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}
