@@ -1,0 +1,80 @@
+{
+ "version": 1,
+ "name": "Password generation",
+ "project": "password-generation",
+ "pr": {
+  "repo": "ninjudd/multipass",
+  "number": 20,
+  "title": "Plan password generation",
+  "head": "b08bcd18eaa147d551fea9543cc896818031baca",
+  "headRef": "password-generation",
+  "base": "e957fd3020d41d32156e05c324a9a67afb1a3aa7",
+  "baseRef": "main"
+ },
+ "overview": {
+  "summary": [
+   "multipass is a password manager that keeps every secret in one file encrypted with a passphrase. Today it can store a password but not make one, so each new password comes from another app, a shell one-liner, or someone's head. This pull request adds the plan that fixes that, and changes no code.",
+   "The plan adds two commands. <code>multipass generate</code> prints one new password and stores nothing. <code>multipass add &lt;name&gt; --generate</code> makes one and stores it without printing it, and with <code>--clip</code> copies it to the clipboard so you can paste it into a site's form. Each run prints the password's strength in bits on stderr, so a script reading stdout gets only the password.",
+   "<ul><li><b>Random characters</b> are the default: 20 characters with uppercase, lowercase, digits, and symbols each present, 130.9 bits.</li><li><b>Memorable words</b> come from the EFF's large word list of 7,776 words, 5 by default; <code>--syllables</code> uses made-up three-letter syllables instead, 6 by default.</li><li><b>PINs</b> are 6 digits by default.</li><li><b>Per-site rules</b> come through <code>--rules</code>, in the format Apple defined for the <code>passwordrules</code> HTML attribute.</li></ul>",
+   "The plan is marked <code>ready</code>: its three open questions are decided. It is the bottom layer of a stack; #23, #24, and #25 build it and revise its implementation details as they settle."
+  ],
+  "cards": [
+   {
+    "id": "terms",
+    "title": "Terms",
+    "html": "<ul class=\"tight\"><li><b>Rejection sampling</b>: drawing a random value and drawing again when it falls in a range that would favor some outcomes, so every outcome stays equally likely.</li><li><b>Masked read</b>: reading a table by scanning every entry and keeping the wanted one with bit masks, so the memory touched does not reveal which entry was picked.</li><li><b>Strength</b>: the base-2 logarithm of how many passwords the options could produce, each equally likely.</li><li><b>Recipe</b>: the kind of password and its settings, which hold no secret.</li></ul>"
+   },
+   {
+    "id": "review",
+    "title": "Review so far",
+    "html": "<p>The first review found three problems in the plan's prose. This head fixes all three, and the second review found the plan clean:</p><ul class=\"tight\"><li>The headline claims only the options 1Password documents, and names the three-letter word list as left out.</li><li>The 6-digit PIN example in § 2 ends with the weak warning.</li><li>Password history in § 2.6 now depends on the store-merge plan in #22, and the plan says that without it a replaced password cannot be recovered.</li></ul><p class=\"note\">Every strength figure in the plan was recomputed and is right.</p>"
+   }
+  ]
+ },
+ "groups": [
+  {
+   "id": "plan",
+   "title": "The password generation plan",
+   "kicker": "What the commands do, how a password is drawn, and how strong it is",
+   "intro": [
+    "The plan has one design idea at its center: every password, whatever its kind, is a series of picks of one item from a list of <code>n</code>, a character from an alphabet or a word from a word list. So one function in <code>src/crypto/generate.rs</code> makes every pick, without bias and without letting its timing or memory access reveal which item it chose. The repository's rules say that code touching secrets lives in <code>src/crypto</code> and never branches on secret data; the plan keeps to that, and schedules one written exception in <code>AGENTS.md</code>: the decision to draw again, which depends only on a value that is then thrown away.",
+    "When the options require a set, such as at least one digit, or limit repeated characters, the plan draws the whole password again until it meets every rule, rather than placing a required character. That keeps every valid password equally likely, so the strength figure can be exact.",
+    "Read § 2 for the behavior, § 2.5 for how strength is counted, § 4 for the acceptance tests, and § 6 for the decisions that make the plan ready."
+   ],
+   "checks": [
+    {
+     "kind": "verify",
+     "text": "The strength figures were recomputed exactly with a short script: 130.9 bits for 20 characters from 94 with all four sets, 64.6 for five words, 80.2 for five words with digit separators and one capital, 54.8 and 65.8 for five and six syllables, 19.9 for a 6-digit PIN, and 96.6 for the <code>--rules</code> example."
+    },
+    {
+     "kind": "context",
+     "text": "Several implementation details here, such as the draw method, the word list's license, and how strength is computed, are revised in #23 as they settle. Read this layer as the plan the stack started from."
+    }
+   ],
+   "files": [
+    {
+     "path": "docs/projects/password-generation/readme.md",
+     "collapsed": false,
+     "note": "The new plan: problem, design, options, strength, acceptance criteria, cost, and decided questions.",
+     "checks": [
+      {
+       "kind": "context",
+       "line": 8,
+       "text": "The plan covers every option 1Password documents for its generator, except the three-letter word list its SDK names, because no 1Password page says what that list produces."
+      },
+      {
+       "kind": "context",
+       "line": 124,
+       "text": "Password history comes from the store-merge plan in #22, whose § 2.6 has <code>add --force</code> keep the replaced secret and <code>get &lt;name&gt; --previous &lt;n&gt;</code> print it. Until that merges, <code>add --generate --force</code> discards the old secret."
+      },
+      {
+       "kind": "verify",
+       "line": 165,
+       "text": "All three questions in § 6 are decided and none waits on the owner, so <code>status: ready</code> holds. <code>project check</code> passes."
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}
