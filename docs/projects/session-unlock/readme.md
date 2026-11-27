@@ -15,14 +15,14 @@ The cost is a prompt and about 300 ms of scrypt at work factor 18 on every comma
 
 ## 2. Solution
 
-`multipass unlock` asks for the passphrase once, derives the store's file key, and starts a background agent, `multipass agent`, that holds only that file key and the header it belongs to. The agent listens on a Unix socket in a 0700 directory, checks that each client runs as the same user, and answers one useful request: it reads the store file from disk, decrypts it with the file key, and returns the store text. `get`, `list`, and `otp` ask the agent first and fall back to the prompt when no agent is unlocked. Commands that save still ask for the passphrase, because the age format forbids reusing a file key or a salt, so every save needs scrypt and the passphrase. After a save, the command hands the new file key to a fresh agent, so the session stays unlocked. The agent locks by exiting: after 10 minutes without a request, 12 hours after unlock, when the Mac sleeps, when the screen locks, and on `multipass lock`.
+`multipass unlock` asks for the passphrase once, derives the store's file key, and starts a background agent, `multipass __agent`, that holds only that file key and the header it belongs to. The agent listens on a Unix socket in a 0700 directory, checks that each client runs as the same user, and answers one useful request: it reads the store file from disk, decrypts it with the file key, and returns the store text. `get`, `list`, and `otp` ask the agent first and fall back to the prompt when no agent is unlocked. Commands that save still ask for the passphrase, because the age format forbids reusing a file key or a salt, so every save needs scrypt and the passphrase. After a save, the command hands the new file key to a fresh agent, so the session stays unlocked. The agent locks by exiting: after 10 minutes without a request, 12 hours after unlock, when the Mac sleeps, when the screen locks, and on `multipass lock`.
 
 This design depends on the answers to § 6. Until those are settled, this plan stays a draft.
 
 ### 2.1 How a read works
 
 1. You run `multipass unlock`. It asks for the passphrase, reads the store file, and calls `age::unlock`, which runs scrypt, unwraps the file key, and checks the header MAC. A wrong passphrase fails here, and no agent starts.
-2. `unlock` starts `multipass --store <path> agent` as a child, with stdin and stdout piped and stderr discarded. It writes the unlock message (§ 2.4) to the child's stdin and closes it. The file key goes only to a process that `unlock` started itself, never over the socket.
+2. `unlock` starts `multipass --store <path> __agent` as a child, with stdin and stdout piped and stderr discarded. It writes the unlock message (§ 2.4) to the child's stdin and closes it. The file key goes only to a process that `unlock` started itself, never over the socket.
 3. The agent calls `setsid`, so closing the terminal does not end it. It denies debugger attachment and core dumps (§ 2.6), checks the file key against the store on disk, binds its socket (§ 2.3), writes `ready` to stdout, and closes stdout. `unlock` waits for `ready`, prints `Unlocked; locks after 10 minutes idle` to stderr, and exits.
 4. Later you run `multipass get github.com`. `open` connects to the socket for this store, checks the directory and the peer (§ 2.3), and sends `read`.
 5. The agent reads the store file. When the file starts with exactly the header the agent holds, it decrypts the payload with the file key and replies with the store text. When the header differs, because another machine, the passkeys extension, or a prompted save replaced the file, it replies `stale` and exits.
@@ -93,19 +93,22 @@ The README says this plainly beside `unlock`, so you open the window knowingly.
 ### 2.7 Neighbors: passkeys and the clipboard
 
 - **The passkeys Keychain item.** The passkeys plan's extension keeps the passphrase in a Keychain item that only its own access group can read. The CLI is not signed into that group, so the agent cannot use the item, and the extension cannot use the agent. They stay independent. When the extension saves a new passkey, the store's header changes, the agent replies `stale`, and the next command asks for the passphrase. The passkeys plan's § 2.3 says the CLI "still asks for the passphrase every time"; this project changes that sentence to point here.
-- **`--clip`.** Copying with `get --clip` and `otp --clip` is a separate feature still being designed. It reads the value through `open`, so it works the same with or without an agent. Its clearing of the clipboard must not rely on the agent, which may lock first.
+- **`--clip`.** `get --clip` and `otp --clip` are a separate feature, in pull request #9. They copy the value through AppKit's `NSPasteboard`, marked current-host-only and concealed. A detached `multipass __clear-clipboard <count>` process clears the clipboard 30 seconds later, and only if the pasteboard's change count still equals `<count>`. `--clip` reads the value through `open`, so it works the same with or without an agent. The clearing process never touches the store, so it does not depend on the agent, which may lock before it runs.
 
 ### 2.8 Changes by file
+
+This table assumes pull request #9, which adds `--clip` and `src/clipboard.rs`, merges first.
 
 | File | Change |
 | --- | --- |
 | `src/age.rs` | `encrypt` also returns an `Unlocked { header: Vec<u8>, file_key: [u8; 16] }`. New `unlock(passphrase, data) -> Result<Unlocked, Error>` does the header half of `decrypt`, and new `decrypt_unlocked(&Unlocked, data)` checks that `data` starts with exactly `header` and decrypts the payload. `decrypt` becomes `unlock` then `decrypt_unlocked`, so the payload code exists once. |
 | `src/store.rs` | `Store::save` returns the `Unlocked` from `encrypt`. New `Store::from_bytes(Vec<u8>)` runs the UTF-8 check and `from_text` that `decrypt` runs today, and `decrypt` calls it. |
 | `src/agent.rs` | New. The agent half: reads the unlock message from stdin, binds the socket, answers `read`, `status`, and `lock`, and runs the lock thread in § 2.5. The client half: `read`, `status`, `lock`, and `start`, which spawns an agent and writes the unlock message. The socket path and the directory check live here, shared by both halves. The lock decision is a pure function of the deadlines, the two clock readings, and the screen states, so tests can drive it. |
-| `src/sys.rs` | New, and the only `unsafe` code in multipass: `unsafe extern "C"` declarations and safe wrappers for `getuid`, `getpeereid`, `setsid`, `ptrace(PT_DENY_ATTACH)`, and `setrlimit(RLIMIT_CORE)`, under `#[cfg(target_os = "macos")]`. The standard library offers no stable call for any of them at `rust-version = "1.85"`. |
-| `src/main.rs` | Adds `unlock [--timeout <minutes>]`, `lock`, and the hidden `agent` command. `open` asks the agent for the store before it prompts, and returns no passphrase when the agent answered. Saving commands call a new `open_to_save`, which always prompts, and restart a running agent with the new key after `save`. Updates `USAGE`. |
+| `src/sys.rs` | New, and the program's second `unsafe` module, built like `src/clipboard.rs`: `unsafe extern "C"` declarations for `getuid`, `getpeereid`, `setsid`, `ptrace(PT_DENY_ATTACH)`, and `setrlimit(RLIMIT_CORE)` behind safe wrappers, under `#[cfg(target_os = "macos")]`, with a comment on each call saying what it requires of its arguments. The standard library offers no stable call for any of them at `rust-version = "1.85"`. |
+| `src/clipboard.rs` | Its module comment stops calling it the program's only `unsafe` code, and names `src/sys.rs` as the other module. |
+| `src/main.rs` | Adds `unlock [--timeout <minutes>]`, `lock`, and the hidden `__agent` command, named like `__clear-clipboard`. `open` asks the agent for the store before it prompts, and returns no passphrase when the agent answered. Saving commands call a new `open_to_save`, which always prompts, and restart a running agent with the new key after `save`. Updates `USAGE`. |
 | `README.md` | Documents `unlock` and `lock`, when the agent locks, and § 2.6's trade in a few sentences. Changes "Every command asks for the passphrase" and removes "Session unlock" from "Not built yet". |
-| `AGENTS.md` | Allows `unsafe` only in `src/sys.rs`, as thin wrappers over system calls. Adds the agent's rules: the file key reaches an agent only through the stdin of a child the CLI started; the agent never sends a key or the passphrase; store text crosses only a socket whose peer passed the user ID check. |
+| `AGENTS.md` | Changes the rule "Apple's system frameworks count like the standard library", which says `src/clipboard.rs` "holds the program's only `unsafe` code", so it names `src/clipboard.rs` and `src/sys.rs` as the two modules that hold `unsafe` code, each behind a safe interface. Adds the agent's rules: the file key reaches an agent only through the stdin of a child the CLI started; the agent never sends a key or the passphrase; store text crosses only a socket whose peer passed the user ID check. |
 | `docs/projects/passkeys/readme.md` | § 2.3's sentence about the CLI changes as § 2.7 says. |
 
 ## 3. Why this design
@@ -135,7 +138,7 @@ The README says this plainly beside `unlock`, so you open the window knowingly.
 | `multipass lock`, then `multipass lock` again | `Locked`, then `Not unlocked` |
 | `chmod 755 ~/.multipass/agent`, then `multipass list` | Refuses to use the agent, names the directory, and asks for the passphrase |
 | `lldb -p <agent pid>` | Attaching fails |
-| `ps -o args= -p <agent pid>` | Shows `multipass --store <path> agent` and nothing secret |
+| `ps -o args= -p <agent pid>` | Shows `multipass --store <path> __agent` and nothing secret |
 
 Tests that must fail before the change and pass after it:
 
@@ -165,7 +168,7 @@ Recommended: 10 minutes idle, 12 hours at most, `--timeout` from 1 to 720 minute
 
 ### 6.3 Who may connect
 
-Recommended: any process running as you, enforced by the 0700 directory and checked with `getpeereid`, with `src/sys.rs` as multipass's first and only `unsafe` code, which also denies debuggers and core dumps. One alternative is the directory check alone, which needs no `unsafe` but leaves the agent open to a debugger and to a core dump. The other binds the agent to the terminal session that unlocked it, as `sudo` binds its timestamp to a terminal, which needs more system calls and breaks scripts and editors that run multipass outside that terminal. Owner: the user.
+Recommended: any process running as you, enforced by the 0700 directory and checked with `getpeereid`, with `src/sys.rs` as a second `unsafe` module beside `src/clipboard.rs`, following the rule that pull request #9 adds to `AGENTS.md`. The same module denies debuggers and core dumps. One alternative is the directory check alone, which needs no `unsafe` but leaves the agent open to a debugger and to a core dump. The other binds the agent to the terminal session that unlocked it, as `sudo` binds its timestamp to a terminal, which needs more system calls and breaks scripts and editors that run multipass outside that terminal. Owner: the user.
 
 ### 6.4 How it starts
 
