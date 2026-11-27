@@ -1,0 +1,75 @@
+{
+ "version": 1,
+ "name": "Passkeys store in iCloud",
+ "project": "passkeys",
+ "pr": {
+  "repo": "ninjudd/multipass",
+  "number": 19,
+  "title": "Say how a store reaches the passkeys app's iCloud container",
+  "head": "a0be3299f0b8bb0d4821f5b88ddad2df738c6801",
+  "headRef": "passkeys-package-sync-check",
+  "base": "5728b7c8ce71a5e79e6233388eeb95a0cab98319",
+  "baseRef": "main"
+ },
+ "overview": {
+  "summary": [
+   "multipass is a command-line password manager whose store, under the vault-key plan, is a <b>package</b>: a folder, <code>store.multipass</code>, of encrypted files that are written once and never modified. The passkeys plan, still a <code>draft</code>, adds a Mac and iPhone app whose passkey extension reads that package from the app's iCloud Drive folder, its <b>container</b>, at <code>Documents/store.multipass</code>. The plan said the package lives there, but not how a store already on a Mac gets there.",
+   "This pull request fills that gap and settles an open doubt about iCloud:",
+   "<ul><li><b>How a store reaches the container.</b> The Mac app offers, in its settings, to move the whole package into the container with one coordinated rename, then shows the <code>export MULTIPASS_STORE=…</code> line the CLI needs. It refuses while the package still holds a vault-key <b>move record</b>, the file that ties the package to the old single-file store beside it, because moving away from that file would lose saves an older multipass makes to it. A new acceptance row tests both cases.</li><li><b>Whether iCloud syncs a declared package file by file.</b> Once the app declares <code>.multipass</code> as a package type, iCloud might treat the package as one document and resolve conflicts for the whole of it. The prototype step now tests this with two devices, and falls back to not declaring the type. Two new background notes say what Apple documents and what it leaves out.</li></ul>",
+   "The review found two open problems with the move, flagged on the paragraph that describes it: the sandboxed Mac app cannot see <code>~/.multipass</code> without being granted access, and a second device can create a duplicate store before iCloud delivers the moved one."
+  ],
+  "cards": [
+   {
+    "id": "terms",
+    "title": "Terms on this page",
+    "html": "<ul class=\"tight\"><li><b>Package</b>: the store folder, <code>store.multipass</code>, holding a key file and store files.</li><li><b>Container</b>: the app's own iCloud Drive folder, under <code>~/Library/Mobile Documents/</code> on a Mac.</li><li><b>Move record</b>: a <code>moved.*.age</code> file in the package, present while the old single-file <code>store.age</code> still sits beside it. Each passphrase prompt uses it to merge any later saves to the old file, and deletes both once the old file has gone 30 days unchanged.</li><li><b>Declared package type</b>: an extension an installed app registers, so Finder shows such a folder as one item.</li></ul>"
+   }
+  ]
+ },
+ "groups": [
+  {
+   "id": "plan",
+   "title": "The passkeys plan: moving the store and checking iCloud",
+   "kicker": "One plan document gains the move into the container, its acceptance test, and the iCloud package check",
+   "intro": [
+    "Every change is in <code>docs/projects/passkeys/readme.md</code>. Section 2.4 gains a paragraph on how a store reaches the container, § 4 gains a row that tests it, § 7 gains two notes on Apple's documentation, and § 8's prototype step gains the package-sync test.",
+    "Read the move paragraph against the vault-key plan's § 2.6, which builds the package beside the old single file and keeps that file for at least 30 days. The move record's check finds the old file beside the package, and the vault-key plan has no case for a move record without its old file, so the refusal is what keeps those saves mergeable."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": "docs/projects/passkeys/readme.md",
+     "note": "The plan document. Adds the move into the container, its acceptance row, two background notes, and the prototype's package-sync test.",
+     "collapsed": false,
+     "checks": [
+      {
+       "kind": "flag",
+       "line": 69,
+       "text": "Open review finding: TestFlight Mac builds are sandboxed, as the session-unlock plan's § 8.4 says, so the app cannot list or rename <code>~/.multipass</code>, check it for a move record, or read the old file without being granted access. Seeing no store, it would create one in the container while the CLI keeps using <code>~/.multipass/store.multipass</code>, leaving two live stores. The suggested fix is an open panel where you choose the folder, or a move made by the CLI."
+      },
+      {
+       "kind": "flag",
+       "line": 69,
+       "text": "Open review finding: nothing makes the app look in the container before it creates a store. A second device that opens the app before iCloud delivers the moved package can create its own, and iCloud Drive then renames one copy, splitting the devices between two stores. The suggested fix is to wait for an iCloud metadata query and use the package it finds."
+      },
+      {
+       "kind": "verify",
+       "line": 147,
+       "text": "Checked against Apple's iCloud design guide: it says a package's elements \"can be read and written separately\" and that \"only changed elements are uploaded or downloaded\"."
+      },
+      {
+       "kind": "verify",
+       "line": 148,
+       "text": "Checked against TN2336: it describes the winning and losing versions for data-scope conflicts and the renamed copy for a new-file conflict in <code>Documents</code>, and says nothing about the level at which a conflict inside a package is reported."
+      },
+      {
+       "kind": "context",
+       "line": 154,
+       "text": "The two-device test adds files only. A real save also deletes the store files it read, so a test that adds and deletes, as a save does, matches what the vault-key design relies on."
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}
