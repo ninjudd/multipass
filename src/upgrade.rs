@@ -155,9 +155,12 @@ pub fn upgrade(tools: &Tools, version: Option<&str>) -> Result<u8, Failure> {
         .arg("install.sh")
         .current_dir(&work.path)
         .env("MULTIPASS_BIN_DIR", bin_dir);
-    if let Some(v) = version {
-        install.env("MULTIPASS_VERSION", v);
-    }
+    // Without a named version, the installer must install the newest
+    // release, whose installer was just checked, whatever the caller exports.
+    match version {
+        Some(v) => install.env("MULTIPASS_VERSION", v),
+        None => install.env_remove("MULTIPASS_VERSION"),
+    };
     let status = install
         .status()
         .map_err(|e| unavailable(&format!("could not run {}: {e}", tools.bash.display())))?;
@@ -476,6 +479,37 @@ echo "$1" > "$out""#,
             "{log}"
         );
         assert!(log.contains("MULTIPASS_VERSION=0.2.0 "), "{log}");
+    }
+
+    #[test]
+    fn an_exported_version_does_not_reach_the_installer() {
+        // A test cannot safely change its own process's environment, so
+        // without the variable this test runs itself again in a child
+        // process that has it exported.
+        if std::env::var_os("MULTIPASS_VERSION").is_none() {
+            let child = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "upgrade::tests::an_exported_version_does_not_reach_the_installer",
+                ])
+                .env("MULTIPASS_VERSION", "0.1.0")
+                .output()
+                .unwrap();
+            let out = String::from_utf8_lossy(&child.stdout);
+            assert!(child.status.success(), "{out}");
+            assert!(out.contains("1 passed"), "{out}");
+            return;
+        }
+        let fake = Fake::new(Some(0));
+        assert_eq!(upgrade(&fake.tools, None), Ok(7));
+        assert!(fake.log().contains("MULTIPASS_VERSION= "), "{}", fake.log());
+        let fake = Fake::new(Some(0));
+        assert_eq!(upgrade(&fake.tools, Some("0.2.0")), Ok(7));
+        assert!(
+            fake.log().contains("MULTIPASS_VERSION=0.2.0 "),
+            "{}",
+            fake.log()
+        );
     }
 
     #[test]
