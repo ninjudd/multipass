@@ -1,0 +1,76 @@
+{
+ "version": 1,
+ "name": "Find exit statuses",
+ "project": "websites",
+ "pr": {
+  "repo": "ninjudd/multipass",
+  "number": 42,
+  "title": "Have find exit as grep does, and correct a refused-address row",
+  "head": "022917bb9ee434933a47e35503e3c5a423aa6474",
+  "headRef": "websites-find-exit-codes",
+  "base": "108242d29134777b72ff3dc4a829227feb92916b",
+  "baseRef": "main"
+ },
+ "overview": {
+  "summary": [
+   "multipass is a command-line password manager. Its websites plan, which is ready but not built yet, adds a <code>website</code> field to each entry and a <code>multipass find &lt;url&gt;</code> command that prints the names of the entries for a web page, so a browser extension or the Mac app can offer the right login on the right site.",
+   "A script that calls <code>find</code> needs to know whether the page simply has no entry or whether something went wrong, such as a wrong passphrase. Most multipass commands exit with status 1 on every error today, so if <code>find</code> also exited 1 for \"no match\", the script would have to read the error text to tell the two apart. The plan left that choice to the owner.",
+   "This pull request records the owner's answer: <code>find</code> exits as <code>grep</code> does. Every other command keeps the statuses it has today: 1 on any error, except <code>upgrade</code>, which passes the installer's status through and stops with 65 or 69 when its own checks fail. The pull request changes only the plan document.",
+   "<div class=\"tblwrap\"><table class=\"tbl\"><thead><tr><th>Status</th><th>Meaning</th></tr></thead><tbody><tr><td class=\"r\">0</td><td>At least one entry matches.</td></tr><tr><td class=\"r\">1</td><td>No entry matches. Related entries, if any, are named on stderr.</td></tr><tr><td class=\"r\">2</td><td>Any error, such as a usage error, a refused page address, a wrong passphrase, a store that cannot be read, or a declined Touch ID sheet.</td></tr></tbody></table></div>",
+   "While moving the acceptance rows for refused addresses to status 2, the author also fixed one row that contradicted the plan's own parsing rules, as the group below explains."
+  ],
+  "cards": [
+   {
+    "id": "review",
+    "title": "Where the review stands",
+    "html": "<ul class=\"tight\"><li>The first review's finding is fixed: the plan now states <code>upgrade</code>'s statuses correctly, in § 2.2 and § 6 alike.</li><li>All four suggestions from the first review are taken. Status 2 covers every error, the changes-by-file rows for <code>src/main.rs</code> and <code>README.md</code> name the statuses, § 4 has a wrong-passphrase row, and the look-alike address test covers the corrected case.</li><li>One new suggestion: say that <code>find</code>'s usage errors exit 2 and add a row for them, because <code>upgrade</code>'s own usage errors still exit 1.</li><li>One follow-up is still owed: the plan does not say how <code>find</code> opens the store while a Touch ID session is unlocked.</li></ul>"
+   },
+   {
+    "id": "terms",
+    "title": "Terms",
+    "html": "<ul class=\"tight\"><li><b>Exit status</b>: the number a command returns to the shell, which a script tests with <code>if</code> or <code>$?</code>.</li><li><b>Usage error</b>: a command typed wrongly, such as <code>multipass find</code> with no address.</li><li><b>Authority</b>: the part of a web address between <code>://</code> and the first <code>/</code>, <code>?</code>, or <code>#</code>; it holds the host and port.</li><li><b>Refused address</b>: a page address the plan's strict parser rejects because a browser would read its host differently.</li><li><b>Session unlock</b>: the background agent that keeps the store open between commands and asks for a touch of Touch ID instead of the passphrase.</li></ul>"
+   }
+  ]
+ },
+ "groups": [
+  {
+   "id": "plan",
+   "title": "The websites plan",
+   "kicker": "How find reports its result, and one corrected acceptance row",
+   "intro": [
+    "Four parts of the plan change. § 2.2, which describes matching, gains the table of exit statuses and says what every other command keeps. § 2.5, the changes by file, says that <code>src/main.rs</code> returns <code>find</code>'s status itself and that the README gives the statuses. § 4, the acceptance criteria, moves its rows for refused addresses from \"fails\" to \"exits 2\" and adds rows for a match and a wrong passphrase. § 6, the plan's decided questions, records the choice and the alternative the owner rejected: status 1 for every failure.",
+    "The corrected row concerns the address <code>https://evil.example\\@github.com/</code>. The plan refuses an address that holds an <code>@</code> in its authority, because a browser reads the text before the <code>@</code> as a user name and password. It runs that check before every other rule and never repeats such an address in an error, since the text before the <code>@</code> may be a real password. The old row expected an error naming the address because of its backslash, which broke that rule. The row now expects the <code>@</code> error without the address, and a new row covers a backslash on its own, which may be named."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": "docs/projects/websites/readme.md",
+     "note": "The plan for the <code>website</code> field and <code>find</code>: § 2.2 gains the exit-status table, § 2.5 and § 4 follow it, and § 6 records the decision.",
+     "collapsed": false,
+     "checks": [
+      {
+       "kind": "verify",
+       "line": 79,
+       "text": "§ 2.2: checked against <code>src/main.rs</code> and <code>src/upgrade.rs</code>. <code>main</code> returns <code>run_upgrade</code> directly, which exits with the installer's status or with 65 or 69, and every other command's error becomes <code>ExitCode::FAILURE</code>, status 1."
+      },
+      {
+       "kind": "context",
+       "line": 79,
+       "text": "§ 2.2: <code>upgrade</code>'s route does not cover usage errors. <code>parse</code> returns them to <code>main</code> first, so <code>multipass upgrade 0.2</code> exits 1. To make <code>find</code>'s usage errors exit 2, as the table says, the implementation has to handle them in <code>parse</code>'s path too."
+      },
+      {
+       "kind": "verify",
+       "line": 77,
+       "text": "§ 2.2: the quoted Touch ID error matches <code>NOT_APPROVED</code> in <code>src/main.rs</code>."
+      },
+      {
+       "kind": "verify",
+       "line": 150,
+       "text": "§ 4: checked against § 2.1. The authority of <code>https://evil.example\\@github.com/</code> runs to the first <code>/</code>, so it holds the <code>@</code>, the <code>@</code> check runs first, and its error must not name the address. The new row on line 151 holds no <code>@</code>, so naming it is allowed."
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}
