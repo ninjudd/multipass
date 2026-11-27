@@ -25,7 +25,7 @@ This design depends on the answers to § 6. Until those are settled, this plan s
 2. You choose multipass. The system starts the extension and calls `prepareInterface(forPasskeyRegistration:)` for a new passkey, or its assertion counterpart for a sign-in.
 3. The extension asks for Face ID or Touch ID and reads the passphrase from its Keychain item (§ 2.3). When there is no item, or the passphrase in it no longer opens the store, it shows its own passphrase field instead, and saves what you type to a new item. It then decrypts the store through the Rust library, which takes about 300 ms.
 4. For a sign-in, the extension finds the entry whose `passkey` matches the site's relying party ID and the requested credential ID, signs the authenticator data and client data hash with CryptoKit's `P256.Signing`, and returns an `ASPasskeyAssertionCredential`.
-5. For a registration, the extension generates a key pair with CryptoKit, saves a new entry through the Rust library with the store's usual atomic save, and returns an `ASPasskeyRegistrationCredential` with "none" attestation.
+5. For a registration, the extension generates a key pair with CryptoKit and picks the entry by the site's relying party ID, such as `github.com`. With no entry of that name, it creates one. With an entry that has no passkey, it adds the `passkey` field there, beside the entry's password and one-time password. With an entry that already holds a passkey, it uses the entry `<rp id> <user name>`, as § 2.2 describes. It saves through the Rust library with the store's usual atomic save, and returns an `ASPasskeyRegistrationCredential` with "none" attestation.
 6. The extension drops the decrypted store from memory and exits.
 
 ### 2.2 The `passkey` field
@@ -112,6 +112,7 @@ multipass does not merge. When two devices save before iCloud syncs, iCloud keep
 | `multipass rm` the entry, then try the sign-in again | multipass offers no passkey for the site |
 | `multipass passkey github.com --clear` on an entry that also holds a password | The passkey is gone, `get github.com` still prints the password, and the site no longer sees the passkey |
 | `multipass passkey <name> --clear` on an entry that holds only a passkey | Fails, and the entry is unchanged; `rm` removes it |
+| Register a passkey on a site whose entry already holds a password and a one-time password | The passkey joins that entry, and `get` and `otp` still print the password and the code |
 | Register a second account's passkey on a site that already has one | The new passkey lands in its own entry, `<rp id> <user name>`, and both accounts sign in |
 | Register a passkey in Safari on the iPhone, wait for iCloud Drive to sync, then sign in on the Mac | The Mac's extension finds the passkey and signs in |
 | Register on both devices while one is offline, then bring it online | The app reports a conflict and saves nothing until you choose a version. Neither registration is lost. |
@@ -124,7 +125,7 @@ Each sign-in decrypts the store once after the Face ID or Touch ID prompt. That 
 
 ## 6. Open questions
 
-Question 5 blocks the plan until the prototype in § 8 answers it, and question 7 waits on the user. Questions 1 to 4, 6, 8, and 9 are decided.
+Question 5 blocks the plan until the prototype in § 8 answers it. Every other question is decided.
 
 1. **Apple frameworks and "no dependencies".** Decided: sign with CryptoKit. Apple's system frameworks count like the Rust standard library, and third-party code stays banned.
 2. **Platforms.** Decided: the Mac and iPhone together, with the store synced through iCloud Drive as § 2.4 describes.
@@ -132,7 +133,7 @@ Question 5 blocks the plan until the prototype in § 8 answers it, and question 
 4. **Unlocking in the extension.** Decided: Touch ID from the start, with the passphrase kept in the Keychain as § 2.3 describes.
 5. **Reaching the iCloud container from the extension.** § 2.4 has the extension read the store from the app's iCloud container. Whether an AutoFill extension may open that container directly, or needs the app to keep a copy in a shared App Group container, is unverified. Owner: the implementer, through a prototype, before this plan goes `ready`.
 6. **How one project builds both apps.** Decided: a SwiftUI multiplatform app. If the prototype shows that Mac Catalyst would share more of the extension's code, the implementer switches to Catalyst and records why here. The unmodified iPad build on the Mac ("Designed for iPad") is ruled out, because it runs only on Apple-silicon Macs and may not run the extension.
-7. **Naming a new passkey's entry.** When a site registers a passkey, the extension must choose an entry. Recommended: use the site's relying party ID, such as `github.com`, as the name. When an entry with that name exists, add the `passkey` field to it, grouped with its password and one-time password as `otp` is. Owner: the user.
+7. **Naming a new passkey's entry.** Decided: the site's relying party ID, such as `github.com`. A passkey joins an existing entry of that name when the entry holds no passkey yet, beside its password and one-time password, as step 5 of § 2.1 describes.
 8. **One passkey per entry, or several.** Decided: one passkey per entry, with a second account's entry named `<rp id> <user name>`, as § 2.2 describes.
 9. **Removing a passkey without its entry.** Decided: `multipass passkey <name> --clear` removes only the passkey, and fails when that would leave the entry empty.
 
