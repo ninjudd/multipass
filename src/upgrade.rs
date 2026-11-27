@@ -201,19 +201,40 @@ pub fn check(tools: &Tools, current: &str) -> Result<(u8, String), Failure> {
     })
 }
 
-/// Orders two release versions by their numbers. Versions with the same
-/// numbers and different suffixes order by text, which keeps the order
-/// total; releases carry no suffix.
+/// Orders two release versions as SemVer does. Their numbers decide first.
+/// With the same numbers, a version with a suffix, such as `1.0.0-rc.1`, is
+/// a prerelease and comes before the version without one. Two suffixes
+/// compare part by part between the dots: numeric parts by value and before
+/// any other part, other parts by text, and a suffix that runs out first
+/// comes first.
 fn compare(a: &str, b: &str) -> std::cmp::Ordering {
-    let numbers = |v: &str| -> Vec<u64> {
-        v.split('-')
-            .next()
-            .unwrap_or("")
-            .split('.')
-            .map(|n| n.parse().unwrap_or(0))
+    use std::cmp::Ordering;
+    // Number sorts before Text because it is declared first.
+    #[derive(PartialEq, Eq, PartialOrd, Ord)]
+    enum Part<'a> {
+        Number(u64),
+        Text(&'a str),
+    }
+    fn parts(text: &str) -> Vec<Part<'_>> {
+        text.split('.')
+            .map(|p| p.parse().map_or(Part::Text(p), Part::Number))
             .collect()
-    };
-    numbers(a).cmp(&numbers(b)).then_with(|| a.cmp(b))
+    }
+    fn split(version: &str) -> (Vec<Part<'_>>, Option<Vec<Part<'_>>>) {
+        match version.split_once('-') {
+            Some((numbers, pre)) => (parts(numbers), Some(parts(pre))),
+            None => (parts(version), None),
+        }
+    }
+    let ((a_numbers, a_pre), (b_numbers, b_pre)) = (split(a), split(b));
+    a_numbers
+        .cmp(&b_numbers)
+        .then_with(|| match (a_pre, b_pre) {
+            (None, None) => Ordering::Equal,
+            (None, Some(_)) => Ordering::Greater,
+            (Some(_), None) => Ordering::Less,
+            (Some(a_pre), Some(b_pre)) => a_pre.cmp(&b_pre),
+        })
 }
 
 /// Returns the directory the installer installed this executable into, or
@@ -337,7 +358,9 @@ mod tests {
             let log = dir.join("log");
             // The fake curl writes the URL it was given into the file after
             // -o, or prints a redirect for -I, as GitHub's releases/latest
-            // answers.
+            // answers, to the tag in the file `latest`.
+            let latest = dir.join("latest");
+            fs::write(&latest, "v0.3.0").unwrap();
             script(
                 &dir.join("curl"),
                 &format!(
@@ -347,11 +370,14 @@ while [ $# -gt 1 ]; do
   case "$1" in -o) out="$2"; shift ;; -fsSI) head=1 ;; esac
   shift
 done
-if [ -n "$head" ]; then printf 'HTTP/2 302\r\nLocation: {redirect}\r\n\r\n'; exit 0; fi
+if [ -n "$head" ]; then
+  printf 'HTTP/2 302\r\nLocation: https://github.com/ninjudd/multipass/releases/tag/%s\r\n\r\n' "$(cat {latest})"
+  exit 0
+fi
 case "$1" in *fail*) exit 22 ;; esac
 echo "$1" > "$out""#,
                     log = log.display(),
-                    redirect = "https://github.com/ninjudd/multipass/releases/tag/v0.3.0",
+                    latest = latest.display(),
                 ),
             );
             if let Some(status) = gh {
@@ -560,6 +586,48 @@ echo "$1" > "$out""#,
             "curl -fsSI --proto =https https://github.com/ninjudd/multipass/releases/latest"
         ));
         assert!(!fake.log().contains("bash"));
+
+        // A prerelease is older than the release with its numbers.
+        fs::write(fake.dir.join("latest"), "v1.0.0").unwrap();
+        assert_eq!(
+            check(&fake.tools, "1.0.0-rc.1"),
+            Ok((
+                1,
+                "multipass 1.0.0 is out, and this is 1.0.0-rc.1 -- run multipass upgrade".into()
+            ))
+        );
+        fs::write(fake.dir.join("latest"), "v1.0.0-rc.10").unwrap();
+        assert_eq!(
+            check(&fake.tools, "1.0.0-rc.2"),
+            Ok((
+                1,
+                "multipass 1.0.0-rc.10 is out, and this is 1.0.0-rc.2 -- run multipass upgrade"
+                    .into()
+            ))
+        );
+    }
+
+    #[test]
+    fn orders_versions_as_semver_does() {
+        // SemVer 2.0.0's own example of precedence, § 11.4, plus a release
+        // with larger numbers and a numeric part past 9.
+        let ordered = [
+            "1.0.0-alpha",
+            "1.0.0-alpha.1",
+            "1.0.0-alpha.beta",
+            "1.0.0-beta",
+            "1.0.0-beta.2",
+            "1.0.0-beta.11",
+            "1.0.0-rc.1",
+            "1.0.0",
+            "1.0.1",
+            "1.10.0",
+        ];
+        for (i, a) in ordered.iter().enumerate() {
+            for (j, b) in ordered.iter().enumerate() {
+                assert_eq!(compare(a, b), i.cmp(&j), "{a} against {b}");
+            }
+        }
     }
 
     #[test]
