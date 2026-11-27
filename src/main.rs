@@ -631,8 +631,10 @@ mod tests {
         );
         store.insert("without", entry(None));
 
-        let refusal = refuse_otp_replacement(&store, "with", false).unwrap_err();
-        assert!(refusal.contains("--force"), "{refusal}");
+        assert_eq!(
+            refuse_otp_replacement(&store, "with", false).unwrap_err(),
+            "with already has a one-time password; pass --force to replace it"
+        );
         assert!(refuse_otp_replacement(&store, "with", true).is_ok());
         assert!(refuse_otp_replacement(&store, "without", false).is_ok());
         assert!(refuse_otp_replacement(&store, "missing", false).is_ok());
