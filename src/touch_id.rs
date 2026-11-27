@@ -40,7 +40,8 @@ pub struct TouchId;
 fn load() -> Result<(), String> {
     static LOADED: OnceLock<Result<(), String>> = OnceLock::new();
     LOADED
-        .get_or_init(|| objc::load(LOCAL_AUTHENTICATION, "LocalAuthentication"))
+        // `LOCAL_AUTHENTICATION` is the absolute path of a system framework.
+        .get_or_init(|| unsafe { objc::load(LOCAL_AUTHENTICATION, "LocalAuthentication") })
         .clone()
 }
 
