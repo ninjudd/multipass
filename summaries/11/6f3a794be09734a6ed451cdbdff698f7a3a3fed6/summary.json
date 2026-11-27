@@ -1,0 +1,163 @@
+{
+ "version": 1,
+ "name": "Mergeable store and session unlock",
+ "project": "session-unlock",
+ "pr": {
+  "repo": "ninjudd/multipass",
+  "number": 11,
+  "title": "Plan a mergeable store, the vault key, and session unlock",
+  "head": "6f3a794be09734a6ed451cdbdff698f7a3a3fed6",
+  "headRef": "session-unlock-spec",
+  "base": "0405f53b44be7da9dbc3fc58fd70aab53134543d",
+  "baseRef": "main"
+ },
+ "overview": {
+  "summary": [
+   "multipass is a password manager that keeps every secret in one age file, encrypted under a passphrase. Today every command asks for that passphrase and spends about 300 ms on scrypt, the deliberately slow function that turns the passphrase into a key. Looking up a username, a password, and a one-time code means typing it three times. Syncing between Macs is fragile too: a save replaces the whole file, so when two Macs save before sync catches up, one Mac's changes are lost.",
+   "This pull request changes no code. It adds three plans under <code>docs/projects</code>, meant to ship in this order:",
+   "<ol><li><b>Mergeable store</b> (<code>store-merge</code>, <code>ready</code>). Every entry records when it last changed, a removed entry leaves a dated marker, and two copies of the store merge entry by entry, with the same result on every Mac.</li><li><b>Vault key</b> (<code>vault-key</code>, <code>ready</code>). The passphrase unlocks a random key, and that key encrypts the store. The store becomes a folder of files that are never changed once written, so sync can never overwrite one. The key is replaced every 14 to 21 days.</li><li><b>Session unlock</b> (<code>session-unlock</code>, <code>draft</code>). After one passphrase prompt, a background process holds the vault key, and each later command asks for a Touch ID touch or an Apple Watch press that names the entry instead of the passphrase.</li></ol>",
+   "It also adds one sentence to the passkeys plan's rollout, so that the session-unlock plan's Secure Enclave mode is built with the passkeys plan's Mac app.",
+   "The first review found four problems, and this head fixes all four. A <code>passwd</code> now wins over a key change that raced it on another Mac. An old single-file store is kept after the move, and later saves to it are merged. The passkeys plan's field moves to store format 4. The Secure Enclave mode's HKDF and ChaCha20-Poly1305 now live in <code>src/crypto</code>. One new problem is flagged: the move record this head adds isn't among the file names the vault-key plan's <code>open</code> recognizes."
+  ],
+  "cards": [
+   {
+    "id": "terms",
+    "title": "Terms used on this page",
+    "html": "<ul class=\"tight\"><li><b>Store text</b>: the plain text inside the encrypted file, headed <code>multipass &lt;n&gt;</code>, one entry per name.</li><li><b>Stamp</b>: an entry's <code>modified</code> time in milliseconds, which decides which version of an entry wins a merge.</li><li><b>Tombstone</b>: what a removed entry becomes, a name with a stamp and a <code>deleted</code> line, so a merge does not bring the entry back.</li><li><b>Package</b>: the folder <code>store.multipass</code> that replaces <code>store.age</code>.</li><li><b>Key file</b>: <code>key.&lt;gen&gt;.age</code>, encrypted under the passphrase, holding the vault key.</li><li><b>Generation</b>: a vault key's random id, which also names the store files it encrypts.</li><li><b>Rotation</b>: replacing the vault key with a new one and re-encrypting the store under it.</li><li><b>Agent</b>: the background process that holds the vault key during a session.</li></ul>"
+   },
+   {
+    "id": "rules",
+    "title": "Repository rules these plans touch",
+    "html": "<ul class=\"tight\"><li><b>No dependencies</b>, and every cryptographic primitive in <code>src/crypto</code>, tested against its specification's vectors.</li><li><b>Passphrase mode only</b>: no age public-key recipients.</li><li><b>Readable by stock age</b>: <code>age -d</code> recovers the store. With the vault key that takes two steps, and the plan amends the rule to say so.</li><li><b>Header bump</b>: the store text changes only by raising <code>multipass &lt;n&gt;</code>, and older versions still read.</li><li><b>No secrets in argv, the environment, logs, or errors</b>. The vault key reaches the agent only on a child process's stdin.</li><li><b>Atomic writes</b>, which the vault-key plan widens to: write each file once, durably, under a new name.</li></ul>"
+   },
+   {
+    "id": "history",
+    "title": "Review history so far",
+    "html": "<ul class=\"tight\"><li><b><code>e8ccf3c</code></b>: four findings and five suggestions.</li><li><b><code>6f3a794</code></b>: all four findings fixed and every suggestion taken. One new finding, on the move record.</li></ul>"
+   }
+  ]
+ },
+ "groups": [
+  {
+   "id": "store-merge",
+   "title": "Mergeable store",
+   "kicker": "Store format 3: a stamp on every entry, tombstones, and a merge every Mac agrees on.",
+   "intro": [
+    "This plan adds a <code>modified</code> line to every entry in the store text and bumps the header to <code>multipass 3</code>. Entries from formats 1 and 2 read as <code>modified 0</code>, so any later change beats them. Removing an entry leaves a tombstone instead of deleting it, so a merge can tell \"removed\" from \"never seen\". Tombstones older than 90 days are dropped when the store is written.",
+    "<code>Store::merge</code> keeps, for each name, the version with the largest stamp, and breaks a tie by comparing the versions' text. Picking the greatest item under one total order gives the same result in any order and any grouping, so two Macs that merge the same files write the same store. Each change is stamped one millisecond past the newest stamp it saw, so a change made after seeing another always wins, even when the Macs' clocks disagree.",
+    "Nothing calls the merge until the vault-key plan ships."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": "docs/projects/store-merge/readme.md",
+     "collapsed": false,
+     "note": "The new plan: format 3 in § 2.1, how a change is stamped in § 2.2, the merge in § 2.3, and its tests in § 4.",
+     "checks": [
+      {
+       "kind": "verify",
+       "text": "The merge keeps the greatest version under the order (stamp, then text). That is a total order, so the merge is commutative, associative, and idempotent, as § 2.3 claims. Checked by reading the rule against the laws § 4 tests.",
+       "line": 62
+      },
+      {
+       "kind": "verify",
+       "text": "§ 2.1's table gives each format number one definition. The passkeys plan now defines format 4, and the one-time-passwords plan's § 2.4 defines format 2. Checked against both plans at this head.",
+       "line": 29
+      },
+      {
+       "kind": "context",
+       "text": "The 120-day tombstone limit outlasts the 111 days in which a store file can still be merged, as long as some Mac prompts within 21 days of a key's creation. A key is replaced only at a prompt, so after weeks with no prompt a key can be retired later than that.",
+       "line": 70
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "vault-key",
+   "title": "Vault key and the package",
+   "kicker": "A random key between the passphrase and the store, and files that are never modified.",
+   "intro": [
+    "The store becomes a folder, <code>~/.multipass/store.multipass</code>. A key file holds a random 256-bit vault key, encrypted under the passphrase with scrypt's usual work factor 18. Store files hold the whole store, encrypted with the vault key's text as an age passphrase at work factor 10, which is about a millisecond. A random key cannot be guessed, so the extra work would buy nothing.",
+    "Every save writes a new store file and deletes only the files it read. Opening merges every store file it has a key for. A file another Mac writes at the same moment is never touched and is merged next time, so no sync service can lose a change. Every file is still an ordinary passphrase-mode age file: <code>age -d</code> on the key file prints the vault key, and pasting that key at <code>age -d</code>'s prompt for a store file prints the store.",
+    "The vault key lives 21 days. Any passphrase prompt replaces a key 14 or more days old, and <code>passwd</code> and <code>rekey</code> always do. A replaced key travels inside the new key file for 90 days, so a file another Mac saved under the old key still opens. An existing single-file store moves into a package at its first prompt. The move keeps the old file and writes a move record, a snapshot of the old store and a hash of the file, so a save another Mac makes to the old file later is merged rather than lost. Each key file records when its passphrase was set, so after a <code>passwd</code> the newer passphrase always wins."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": "docs/projects/vault-key/readme.md",
+     "collapsed": false,
+     "note": "The new plan: the package layout in § 2.1, opening in § 2.3, saving in § 2.4, rotation in § 2.5, the move from a single file in § 2.6, and recovery with stock age in § 2.7.",
+     "checks": [
+      {
+       "kind": "flag",
+       "text": "§ 2.6's move record, <code>moved.&lt;gen&gt;.&lt;random&gt;.age</code>, matches neither name this step recognizes, so <code>open</code> warns about it and leaves it alone. § 2.1's table doesn't list it either.",
+       "line": 60
+      },
+      {
+       "kind": "verify",
+       "text": "With key files under two passphrases, <code>open</code> rotates under the one with the later <code>passphrase-set</code>, and with only one passphrase it opens read-only. So an older passphrase's lineage never writes again after a <code>passwd</code>. Checked against the race the first review described.",
+       "line": 62
+      },
+      {
+       "kind": "verify",
+       "text": "<code>age::decrypt</code> already accepts work factors up to 22, and the reference fixtures in <code>testdata/</code> were written at work factor 10, so store files at <code>VAULT_WORK_FACTOR</code> open with both. Checked in <code>src/age.rs</code>.",
+       "line": 154
+      },
+      {
+       "kind": "context",
+       "text": "<code>crypto::base64::encode</code> indexes its alphabet with the data today. That is why the plan rewrites it with masked arithmetic before it encodes the vault key.",
+       "line": 155
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "session-unlock",
+   "title": "Session unlock",
+   "kicker": "A background agent that holds the vault key and asks for a touch on every request.",
+   "intro": [
+    "Any command that has to ask for the passphrase also starts <code>multipass __agent</code>, passing it the key file's text on stdin, never over a socket or the command line. The agent listens on a socket in a 0700 directory under <code>$HOME</code>, checks that each client runs as the same user, and serves one entry per request. Each request first shows a Touch ID or Apple Watch sheet that names the entry. So no program running as you, an AI coding agent included, can read the store without a person at the Mac. Declining a request ends the session.",
+    "A session ends when the vault key expires, on a restart, on <code>multipass lock</code>, on a declined request, when the binary is upgraded, or when another Mac replaces the key. The agent denies debuggers, leaves no core file, and locks the key's memory out of swap.",
+    "The plan stays a draft until a prototype confirms that a detached process can show the Touch ID sheet (§ 6.5). § 8 designs a Secure Enclave mode for the passkeys plan's signed Mac app, in which the agent holds the key only wrapped by an enclave ML-KEM-768 key that demands the touch itself. The wrap's HKDF and ChaCha20-Poly1305 run in <code>src/crypto</code>, and only the enclave's ML-KEM calls use CryptoKit."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": "docs/projects/session-unlock/readme.md",
+     "collapsed": false,
+     "note": "The new draft plan: start in § 2.1, reads and changes in § 2.2 and § 2.3, the socket checks in § 2.5, the threat table in § 2.7, the Touch ID policy in § 2.8, and the enclave mode in § 8.",
+     "checks": [
+      {
+       "kind": "context",
+       "text": "<code>MULTIPASS_NO_AGENT</code> and <code>SSH_CONNECTION</code> are the only environment variables the plan reads, and neither carries a secret, so the rule against secrets in the environment holds.",
+       "line": 68
+      },
+      {
+       "kind": "verify",
+       "text": "The wrap now runs in <code>src/crypto</code>: <code>crypto::session_wrap</code> uses <code>crypto::sha256::hkdf</code> and the existing ChaCha20-Poly1305, both tested against their RFC vectors. Only the three enclave ML-KEM calls stay in CryptoKit. Checked in <code>src/crypto</code>.",
+       "line": 277
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "id": "passkeys",
+   "title": "Passkeys plan link",
+   "kicker": "The enclave mode's rollout, and the passkey field's move to format 4.",
+   "intro": [
+    "The passkeys plan's rollout step 3 now says that session unlock's Secure Enclave mode lands with the passkeys app. The <code>passkey</code> field moves to store format 4, on top of the mergeable-store plan's format 3. Its <code>AGENTS.md</code> row now exempts the three enclave ML-KEM calls beside the P-256 ones. The plan still describes a single-file store in iCloud Drive, which the vault-key plan's package supersedes. The first review listed that as a follow-up."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": "docs/projects/passkeys/readme.md",
+     "collapsed": false,
+     "note": "Rollout step 3, format 4 for the <code>passkey</code> field, and the widened <code>AGENTS.md</code> exemption."
+    }
+   ]
+  }
+ ]
+}
