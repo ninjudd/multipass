@@ -1,5 +1,5 @@
 ---
-status: ready
+status: completed
 priority: now
 ---
 
@@ -112,8 +112,8 @@ The strength line prints `log2` of the number of passwords the recipe can produc
 | Recipe | Strength |
 | --- | --- |
 | Random characters, `n` long, from an alphabet of `a`, no requirements | `n × log2(a)` |
-| The same, where sets must each appear | `log2` of the count from inclusion and exclusion over the sets |
-| With `max-consecutive` | `log2` of the count from a small dynamic program over the run length |
+| The same, where sets must each appear | `n × log2(a)` plus `log2` of the share of drawn strings that hold every set, from the dynamic program below |
+| With `max-consecutive` | The same, with the dynamic program also tracking the current run |
 | Memorable, `w` words | `w × log2(list)`, plus `(w − 1) × log2(10)` for `digit` separators or `(w − 1) × log2(10 + symbols)` for `digit-or-symbol`, plus `log2(w)` for `--capitalize one` |
 | PIN, `n` digits | `n × log2(10)` |
 
@@ -123,7 +123,7 @@ The strength line prints `log2` of the number of passwords the recipe can produc
 
 | File | Change |
 | --- | --- |
-| `src/crypto/generate.rs` | New. `Recipe`, `password(&Recipe) -> Generated`, `entropy(&Recipe) -> f64`, `acceptance`, the uniform index draw, the masked table read, and the exact counts. `Generated` holds a fixed buffer and a length. |
+| `src/crypto/generate.rs` | New. `Recipe`, `password(&Recipe) -> Generated`, `entropy(&Recipe) -> f64`, `acceptance`, the dynamic program behind the strength, the uniform index draw, and the masked table read. `Generated` holds a fixed buffer and a length. |
 | `src/generator.rs` | New. `Options`, the options as given; `Options::recipe`, which checks them and builds the recipe; `password`, which turns a drawn buffer into text; and `strength`, the line on stderr. |
 | `src/crypto/wordlist/eff_large.txt` | New. The EFF's large word list, one word per line. |
 | `src/crypto/mod.rs` | Declares `generate`. |
@@ -192,3 +192,19 @@ The owner has decided all three.
 - **PIN.** The SDK's recipe has one field, `length`.
 - **Not offered.** None of these pages mentions avoiding look-alike characters or excluding characters, and none gives a range or default beyond the CLI's. `--no-lookalikes`, `--exclude`, `--symbols`, and `--rules` go beyond 1Password, for the per-site rules the owner asked for.
 - **The word list.** The EFF published its large list in 2016 for dice-based passphrases: 7,776 words, five dice rolls each, chosen to be easy to type and remember.
+
+## 8. Outcome
+
+Shipped, as the stack of pull requests #23, #24, and #25 on top of this plan in #20: #23 adds `generate`, `add --generate`, and the three kinds, #24 adds `--syllables`, and #25 adds `--rules`. The owner answered all three questions in § 6 as recommended. Every file in § 2.6 changed as listed.
+
+Evidence for § 4:
+
+- **The command table.** Each row was run against a release build of #25's head, with `add` and `get` driven through `expect` against a store in a temporary directory. `generate` printed 20 characters and `130.9 bits`. The words row printed five words with a digit in each gap, one capitalized, and `80.2 bits`. `--pin 6` printed six digits and `19.9 bits -- weak for a password you cannot rate-limit`. `add x --generate` printed only the strength line, and `get x` then printed a 20-character password. `--length 3`, `--separator space`, and `--rules 'required: unicode;'` each exited 1 with the error the table names. `add x --generate --clip` was not run, because it copies to the real clipboard; `tests::parses_password_options` checks that `add --generate --clip` reaches `add` with `clip` set, `tests::rejects_bad_arguments` refuses `add x --clip` without `--generate`, and `deliver` is the function `get --clip` uses.
+- **Tests.** Every test the second list in § 4 names exists in `crypto::generate::tests`, `generate_rules::tests`, or `generator::tests`, and passes: `every_16_bit_value_maps_evenly`, `rejects_only_the_biased_remainder`, `draws_are_uniform`, `counts_passwords_that_meet_requirements`, `counts_match_brute_force`, `states_the_plans_strengths`, `counts_runs`, `eff_list_is_the_published_one`, `masked_reads_match_plain_indexing`, `parses_apples_examples`, and `refuses_what_apple_would_skip`.
+- **Cost.** A hundred runs of `generate` took 0.34 s in all, and a hundred of `generate --words 15` 0.30 s, so each run, process start included, takes about 3 ms.
+
+Choices made while building it:
+
+- **6 syllables by default.** `--syllables` without a count makes 6, 65.8 bits, because 5 would be only 54.8 and get the weak warning (§ 2.2).
+- **A run limit past the length is no limit.** `crypto::generate::run_limit` clamps `max-consecutive` to the password's length before the draw's masked comparison, which is correct only below 2^63, and `--rules` drops such a limit from the recipe. Without both, `max-consecutive: 18446744073709551615` made every draw fail and `generate` never returned. `draws_with_any_run_limit` and `drops_a_run_limit_the_password_cannot_reach` were each watched failing before their fix.
+- **Password options are refused elsewhere.** `upgrade`, which reached `main` while this was in review, refuses `--generate` and the other password options rather than ignoring them.
