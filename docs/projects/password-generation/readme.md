@@ -28,7 +28,7 @@ multipass: memorable, 5 words from 7,776 with hyphens: 64.6 bits
 
 $ multipass generate --pin 6
 480213
-multipass: PIN, 6 digits: 19.9 bits
+multipass: PIN, 6 digits: 19.9 bits -- weak for a password you cannot rate-limit
 
 $ multipass add github.com --generate --clip
 multipass: random characters, 20 from 94, each set present: 130.9 bits
