@@ -239,7 +239,10 @@ impl Options {
             cells,
             requirements: rules.required.len() as u32,
             length,
-            max_consecutive: rules.max_consecutive,
+            // No run can be longer than the password, so a limit that large
+            // is no limit. Dropping it also keeps the draw's comparisons on
+            // the small values they are correct for.
+            max_consecutive: rules.max_consecutive.filter(|&n| n < length),
         }))
     }
 
@@ -585,6 +588,21 @@ mod tests {
         assert_eq!(length("minlength: 8; maxlength: 16", Some(12)), 12);
         assert_eq!(length("minlength: 8; maxlength: 16", Some(30)), 16);
         assert_eq!(length("minlength: 32", None), 32);
+    }
+
+    #[test]
+    fn drops_a_run_limit_the_password_cannot_reach() {
+        let limit = |text: &str| match rules(text).recipe().unwrap() {
+            Recipe::Chars(chars) => chars.max_consecutive,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(limit("max-consecutive: 18446744073709551615"), None);
+        assert_eq!(limit("maxlength: 16; max-consecutive: 16"), None);
+        assert_eq!(limit("maxlength: 16; max-consecutive: 15"), Some(15));
+        let recipe = rules("max-consecutive: 18446744073709551615")
+            .recipe()
+            .unwrap();
+        assert_eq!(password(&recipe).unwrap().len(), 20);
     }
 
     #[test]
