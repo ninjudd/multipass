@@ -1,0 +1,75 @@
+{
+ "version": 1,
+ "name": "Passkeys store in iCloud",
+ "project": "passkeys",
+ "pr": {
+  "repo": "ninjudd/multipass",
+  "number": 19,
+  "title": "Say how a store reaches the passkeys app's iCloud container",
+  "head": "0565f26977ea03f527b7f85fb60c6251112e3553",
+  "headRef": "passkeys-package-sync-check",
+  "base": "5728b7c8ce71a5e79e6233388eeb95a0cab98319",
+  "baseRef": "main"
+ },
+ "overview": {
+  "summary": [
+   "multipass is a command-line password manager whose store, under the vault-key plan, is a <b>package</b>: a folder, <code>store.multipass</code>, of encrypted files that are written once and never modified. The passkeys plan, still a <code>draft</code>, adds a Mac and iPhone app whose passkey extension reads that package from the app's iCloud Drive folder, its <b>container</b>, at <code>Documents/store.multipass</code>. The plan said the package lives there, but not how a store already on a Mac gets there.",
+   "This pull request fills that gap and settles an open doubt about iCloud:",
+   "<ul><li><b>Every device looks in iCloud first.</b> On first open, the app runs an <code>NSMetadataQuery</code> over the container and uses a <code>store.multipass</code> it finds, showing a Mac the <code>export MULTIPASS_STORE=…</code> line the CLI needs. Only when the query finds none does it offer to move a package in or create one, and it creates one only after you confirm that no other device has a store. Two devices that each created one would otherwise split between the package and a copy iCloud Drive renames.</li><li><b>A sandboxed Mac app moves a package you choose.</b> TestFlight Mac builds are sandboxed, so the app cannot see <code>~/.multipass</code>. It shows an open panel there, and choosing the folder grants it access. It refuses while the package still holds a vault-key <b>move record</b>, the file that ties it to the old single-file store beside it, because moving away from that file would lose saves an older multipass makes to it. Otherwise it moves the package into iCloud with <code>FileManager.setUbiquitous</code>.</li><li><b>Whether iCloud syncs a declared package file by file.</b> Once the app declares <code>.multipass</code> as a package type, iCloud might treat the package as one document and resolve conflicts for the whole of it. The prototype step tests this with two devices that each save, and falls back to not declaring the type. Two background notes say what Apple documents and what it leaves out.</li></ul>",
+   "Two § 4 rows test the move and a second device's first open, and the § 2.5 rows for <code>apple/</code> and <code>README.md</code> name the move, the sandbox, and the <code>export</code> line. The review's two findings on the first head, the sandbox and the duplicate store, are fixed at this head."
+  ],
+  "cards": [
+   {
+    "id": "terms",
+    "title": "Terms on this page",
+    "html": "<ul class=\"tight\"><li><b>Package</b>: the store folder, <code>store.multipass</code>, holding a key file and store files.</li><li><b>Container</b>: the app's own iCloud Drive folder, under <code>~/Library/Mobile Documents/</code> on a Mac.</li><li><b>Move record</b>: a <code>moved.*.age</code> file in the package, present while the old single-file <code>store.age</code> still sits beside it. Each passphrase prompt uses it to merge any later saves to the old file, and deletes both once the old file has gone 30 days unchanged.</li><li><b>Declared package type</b>: an extension an installed app registers, so Finder shows such a folder as one item.</li></ul>"
+   }
+  ]
+ },
+ "groups": [
+  {
+   "id": "plan",
+   "title": "The passkeys plan: moving the store and checking iCloud",
+   "kicker": "One plan document gains the move into the container, its acceptance tests, and the iCloud package check",
+   "intro": [
+    "Every change is in <code>docs/projects/passkeys/readme.md</code>. Section 2.4 gains two paragraphs on how a store reaches the container, § 2.5 updates its <code>apple/</code> and <code>README.md</code> rows, § 4 gains two rows that test the move and a second device, § 7 gains two notes on Apple's documentation, and § 8's prototype step gains the package-sync test.",
+    "Read the move paragraph against the vault-key plan's § 2.6, which builds the package beside the old single file and keeps that file until it has gone 30 days unchanged. The move record's check finds the old file beside the package, and the vault-key plan has no case for a move record without its old file, so the refusal is what keeps those saves mergeable."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": "docs/projects/passkeys/readme.md",
+     "note": "The plan document. Adds how each device finds or moves the store into the container, its acceptance rows, two background notes, and the prototype's package-sync test.",
+     "collapsed": false,
+     "checks": [
+      {
+       "kind": "context",
+       "line": 69,
+       "text": "The metadata query lists what iCloud Drive holds once the device has its listing, even before the files download. A device that has not yet received the listing could still find nothing, which is why creating a store also waits for you to confirm that no other device has one."
+      },
+      {
+       "kind": "context",
+       "line": 71,
+       "text": "The user-selected read-write entitlement grants access to the folder you choose, so choose the folder that holds the package, <code>~/.multipass</code> by default. That one grant covers the rename out of it, the <code>moved.*.age</code> names, and the old <code>store.age</code> whose last change sets the retirement date."
+      },
+      {
+       "kind": "verify",
+       "line": 150,
+       "text": "Checked against Apple's iCloud design guide: it says a package's elements \"can be read and written separately\" and that \"only changed elements are uploaded or downloaded\"."
+      },
+      {
+       "kind": "verify",
+       "line": 151,
+       "text": "Checked against TN2336: it describes the winning and losing versions for data-scope conflicts and the renamed copy for a new-file conflict in <code>Documents</code>, and says nothing about the level at which a conflict inside a package is reported."
+      },
+      {
+       "kind": "context",
+       "line": 157,
+       "text": "The two-device test does what a vault-key save does: each device adds its own file and deletes the store file both read. A package-level conflict would show as a lost new file or a conflict version, and either one sends the app to the fallback."
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}
