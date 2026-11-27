@@ -121,7 +121,7 @@ The counts are exact, computed with 256-bit integers in `src/crypto/generate.rs`
 | `README.md` | A section on making passwords, the strength line, and the EFF credit. |
 | `AGENTS.md` | Names rejection sampling as the second exception to the constant-time rule, and lists the word list's pinned digest with the test vectors. |
 
-`add <name> --generate --force` on an entry that exists replaces its secret as `add --force` does. Once the mergeable store's password history lands, the old secret moves into history, so `get <name> --previous 1` gets it back. That needs nothing from this plan.
+`add <name> --generate --force` on an entry that exists replaces its secret as `add --force` does. On `main` today that discards the old secret. The store-merge plan, in pull request #22, which has not merged, designs password history (its § 2.6): if it lands, `add --force` keeps the replaced secret in the entry's history, and `get <name> --previous 1` gets it back. `--generate` would need nothing more for that, and until then a replaced password cannot be recovered.
 
 ## 3. Why this design
 
