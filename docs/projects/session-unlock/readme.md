@@ -268,17 +268,21 @@ This section designs a second way for the agent to hold the vault key, for when 
 
 ### 8.1 How it works
 
-1. A command that prompted starts the agent, as § 2.1 describes, except that when `Multipass.app` is installed it starts the app's signed helper, `Multipass.app/Contents/MacOS/multipass-agent`, instead of `multipass __agent`. It still passes the vault key on the helper's stdin.
-2. The helper creates a new P-256 key in the Secure Enclave with `SecKeyCreateRandomKey`, with `kSecAttrTokenIDSecureEnclave`, `kSecAttrIsPermanent` set to false, and an access control of `.biometryCurrentSet` and `.privateKeyUsage`. The key is never saved: the private half lives only in the enclave, the helper holds a `SecKey` reference, and the key is gone when the helper exits, so a restart still ends the session.
-3. It encrypts the vault key to that key's public half with `SecKeyCreateEncryptedData` and `kSecKeyAlgorithmECIESEncryptionCofactorX963SHA256AESGCM`, then wipes the plaintext. From then on it holds only the wrapped blob and the key reference.
-4. For each request, the helper calls `SecKeyCreateDecryptedData` on the blob, passing an `LAContext` with the request's reason, such as `read github.com`, through `kSecUseAuthenticationContext`. The enclave demands the touch before it decrypts. The helper uses the plaintext vault key for that one request, through the same Rust store code, then wipes it.
+1. A command that prompted starts the agent, as § 2.1 describes, except that when `Multipass.app` is installed on macOS 26 or later it starts the app's signed helper, `Multipass.app/Contents/MacOS/multipass-agent`, instead of `multipass __agent`. It still passes the key file's text on the helper's stdin.
+2. The helper creates a new ML-KEM-768 key in the Secure Enclave with CryptoKit's `SecureEnclave.MLKEM768.PrivateKey`, with an access control of `.biometryCurrentSet` and `.privateKeyUsage`. The key is never saved: its private half lives only in the enclave, the helper holds the key object, and the key is gone when the helper exits, so a restart still ends the session.
+3. It calls `encapsulate()` on the key's public half, which returns a shared secret and an encapsulation. It derives a wrapping key from the shared secret with HKDF-SHA256 and the label `multipass session wrap`, seals the key file's text with `ChaChaPoly` under it, and wipes the plaintext, the shared secret, and the wrapping key. From then on it holds only the encapsulation, the sealed box, and the key object.
+4. For each request, the helper calls `decapsulate(_:)` on the encapsulation, with an `LAContext` carrying the request's reason, such as `read github.com`. The enclave demands the touch before it decapsulates. The helper derives the wrapping key again, opens the sealed box, uses the vault key for that one request through the same Rust store code, and wipes the plaintext and both keys.
 5. A cancelled or failed touch ends the session, as in § 2.8. The enclave's touch replaces the agent's own `evaluatePolicy` call, because a software check beside a hardware one adds nothing.
+
+On macOS before 26, or where the prototype in § 8.5 shows that an enclave ML-KEM key cannot carry the biometric access control, the helper runs in this project's protected-memory mode instead. There is no third mode.
 
 The socket, the messages, the one-entry rule, and the end rules stay as § 2.4 to § 2.9 describe, so the CLI's client half changes only in which program it starts and which executable its peer check accepts: the helper, checked by its path inside the app and its code signature.
 
 ### 8.2 Why this shape
 
-- **`SecKeyCreateEncryptedData` rather than CryptoKit.** It does the whole ECIES construction, the ephemeral key, the key agreement, the X9.63 key derivation, and AES-GCM, in one documented call each way. CryptoKit's `SecureEnclave.P256.KeyAgreement` offers only the key agreement, so the helper would have to assemble the rest by hand, which is more code to get wrong.
+- **ML-KEM-768 in the enclave, not P-256.** CryptoKit's Swift interface in the macOS 27.2 SDK declares `SecureEnclave.MLKEM768`, available from macOS 26 and iOS 26, with `encapsulate()` on the public key and `decapsulate(_:)` on the private key. Wrapping the vault key with it keeps the session path free of anything a quantum computer could break. P-256 ECIES would put elliptic-curve cryptography there, and the passkeys app will target recent systems anyway, so the plan drops P-256 rather than keeping it as a fallback.
+- **ML-KEM alone, not a hybrid with X25519.** The enclave holds ML-KEM keys, but the same interface shows no enclave form of the X-Wing hybrid. A hybrid would guard against a flaw in ML-KEM, but the encapsulation and sealed box exist only in the helper's memory, never on disk or in sync, so there is no ciphertext to record now and attack later. An attacker able to read that memory could wait for an approved request instead.
+- **Encapsulate, then seal, rather than HPKE.** CryptoKit's HPKE suites take software private keys, and whether one accepts an enclave key is not visible from the interface. A key encapsulation followed by HKDF and `ChaChaPoly` is what HPKE's base mode does, in three calls, and `ChaChaPoly` matches the rest of multipass.
 - **A non-permanent key.** Nothing about the session touches disk or the Keychain, so a restart ends it as it does today, and there is no item to clean up or leak.
 - **The agent moves into the app as a helper.** The enclave key's access control, and probably the enclave itself, need a binary signed with the app's team and entitlements, which the CLI built by `cargo install` is not. A helper inside the app gets the signature, and keeping the socket protocol means the CLI needs no new code path beyond starting it. The alternative, the CLI asking the app over XPC, would need an XPC client in Rust through `unsafe` code for no gain.
 
@@ -286,13 +290,14 @@ The socket, the messages, the one-entry rule, and the end rules stay as § 2.4 t
 
 | Who | Protected memory (§ 2.7) | Secure Enclave mode |
 | --- | --- | --- |
-| Root, or a kernel exploit | Copies the vault key at any time in the session, and can skip the software check | Finds only the wrapped blob between requests. It must wait for an approved request and copy the plaintext in the moment it exists, or ask the enclave, which still wants a touch. It can still capture the passphrase at the next prompt, as today. |
+| Root, or a kernel exploit | Copies the vault key at any time in the session, and can skip the software check | Finds only the encapsulation and sealed box between requests. It must wait for an approved request and copy the plaintext in the moment it exists, or ask the enclave, which still wants a touch. It can still capture the passphrase at the next prompt, as today. |
 | A memory dump or crash report | No core file, but a dump by root holds the key | Holds only ciphertext |
-| A future quantum computer | Nothing to attack: everything is symmetric | P-256 ECIES now sits in the session path, and a large enough quantum computer could break it given the blob and the public key. Both live only in the helper's memory, never on disk or in sync, so there is nothing to record now and break later. The key file stays passphrase-only age, the quantum-safe copy of the vault key. |
+| A future quantum computer | Nothing to attack: everything is symmetric | Nothing to attack either. The wrap is ML-KEM-768 and ChaCha20-Poly1305, and it lives only in the helper's memory. The key file stays passphrase-only age. |
 | A program running as you | Needs a touch per request | The same, enforced by the enclave |
 
 ### 8.4 What it needs
 
+- **macOS 26 or later**, for `SecureEnclave.MLKEM768`.
 - **Signing and entitlements.** A Developer ID or App Store signature on the helper, and whatever entitlement the enclave key needs, probably `keychain-access-groups`. The passkeys plan already distributes the app through TestFlight, so the helper ships inside that build.
 - **The app sandbox.** TestFlight and App Store builds of a Mac app must be sandboxed. A sandboxed helper may not be able to bind a socket in `~/.multipass/agent/` or read a store package outside its containers. The socket would then move to the app group container, and the store to the iCloud container that the passkeys plan already uses.
 - **The Rust store code** as a library, which the passkeys plan's XCFramework already builds.
@@ -301,8 +306,9 @@ The socket, the messages, the one-entry rule, and the end rules stay as § 2.4 t
 
 The passkeys plan's prototype answers these before this mode is built:
 
-1. Can a sandboxed, TestFlight-signed helper create a non-permanent Secure Enclave key with `.biometryCurrentSet`, and with which entitlements?
-2. Does `SecKeyCreateDecryptedData` ask for a touch on every call when each call gets a fresh `LAContext` whose `touchIDAuthenticationAllowableReuseDuration` is 0?
-3. Can the CLI start the helper from inside the app bundle and pass it the vault key on stdin, and does the sandbox allow that?
-4. Where can the helper bind its socket so that the unsandboxed CLI can reach it, and can it read the store at `MULTIPASS_STORE`?
-5. Does an Apple Watch approval work for an enclave key's `.biometryCurrentSet` access control, or only Touch ID? If only Touch ID, this mode loses the watch, and the plan records whether that is acceptable.
+1. Does `SecureEnclave.MLKEM768.PrivateKey` accept an access control with `.biometryCurrentSet` and `.privateKeyUsage`, as enclave P-256 keys do? The interface shows the type, not which access controls the enclave enforces for it. If it does not, this mode is not built, and the helper runs in protected-memory mode.
+2. Can a sandboxed, TestFlight-signed helper create a non-permanent enclave key, and with which entitlements?
+3. Does `decapsulate(_:)` ask for a touch on every call when each call gets a fresh `LAContext` whose `touchIDAuthenticationAllowableReuseDuration` is 0?
+4. Can the CLI start the helper from inside the app bundle and pass it the key file's text on stdin, and does the sandbox allow that?
+5. Where can the helper bind its socket so that the unsandboxed CLI can reach it, and can it read the store at `MULTIPASS_STORE`?
+6. Does an Apple Watch approval work for the enclave key's access control, or only Touch ID? If only Touch ID, this mode loses the watch, and the plan records whether that is acceptable.
