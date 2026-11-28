@@ -1,0 +1,79 @@
+{
+ "version": 1,
+ "name": "Passkey entry matching",
+ "project": "passkeys",
+ "pr": {
+  "repo": "ninjudd/multipass",
+  "number": 50,
+  "title": "Match a passkey registration on websites and usernames",
+  "head": "0f1a7f892c6bc1a4e5d0bf34c48a5211c42f6f57",
+  "headRef": "passkeys-username-rule",
+  "base": "389315a1ccc42f0b239e8b620e4e44065b295de3",
+  "baseRef": "main"
+ },
+ "overview": {
+  "summary": [
+   "The passkeys plan describes a small Mac and iPhone app whose AutoFill extension creates and signs with passkeys stored in multipass. When a site registers a new passkey, the extension must decide which store entry gets it. This pull request changes only that decision, in the plan's text; no code exists yet, and the plan stays <code>draft</code>.",
+   "Before this change, the extension picked an entry by name alone: the entry named after the site's <b>relying party ID</b> (the domain a passkey belongs to, such as <code>github.com</code>), or a numbered variant. That went wrong in two ways. A password entry with a different name, such as <code>github work</code>, got a second, passkey-only <code>github.com</code> entry beside it. And an entry holding one account's password could take a different account's passkey, mixing two accounts in one entry.",
+   "<ol><li><b>The same account registering again</b> still replaces its passkey in place, matched by relying party ID and user handle.</li><li><b>An existing entry of the site's</b> now takes the passkey when it holds no passkey, has no <code>username</code> or the registering account's, and belongs to the site, by its name or by a <code>website</code> line that matches <code>https://&lt;rp id&gt;</code> under the websites plan's <code>website::matches</code>. The <code>username</code> compares ignoring ASCII case. A matching <code>username</code> wins a tie; within that, the entry named exactly the relying party ID comes first, then names that begin with it and a space, then entries matched only by <code>website</code>, then name order. The <code>website</code> rule applies only once the websites plan has shipped.</li><li><b>Otherwise a new entry</b> is created under the first unused name of <code>&lt;rp id&gt;</code>, <code>&lt;rp id&gt; &lt;user name&gt;</code>, <code>&lt;rp id&gt; &lt;user name&gt; 2</code>, and so on, with the account's user name as its <code>username</code>.</li></ol>"
+  ],
+  "cards": [
+   {
+    "id": "terms",
+    "title": "Terms",
+    "html": "<ul class=\"tight\"><li><b>Relying party ID</b>: the domain a passkey is registered for, such as <code>github.com</code>. A page on <code>login.github.com</code> may use it.</li><li><b>User handle</b>: the site's opaque ID for the account, which identifies the same account registering again.</li><li><b>User name</b>: the readable account name the site sends, such as <code>octocat</code>.</li><li><b><code>website::matches(stored, page)</code></b>: the websites plan's one matching function. Here the stored side is the entry's <code>website</code> line and the page is <code>https://&lt;rp id&gt;</code>.</li></ul>"
+   },
+   {
+    "id": "review",
+    "title": "Review so far",
+    "html": "<p>The first review, of <code>fcc9eae</code>, requested changes with two findings: the tie order let <code>github work</code> beat <code>github.com</code>, and the plan did not say it depends on the websites plan. Both are fixed at <code>0f1a7f8</code>, which also takes the five suggestions, and the second review found this head clean, with two small wording suggestions.</p>"
+   }
+  ]
+ },
+ "groups": [
+  {
+   "id": "plan",
+   "title": "Choosing a registration's entry",
+   "kicker": "The passkeys plan's registration rule, and the sections that restate it",
+   "intro": [
+    "The change rewrites § 2.1 step 5 as three rules tried in order, then brings the rest of the plan into line: § 2.2 says a passkey never joins another account's entry, § 2.5's <code>src/ffi.rs</code> row lets the extension find a site's entries by name and by <code>website</code>, § 4 adds one acceptance row per new case, and § 6 questions 7 and 8 record the owner's decisions. § 2.2 also says that if the websites plan ships first, it takes format 4 and the <code>passkey</code> field moves to format 5.",
+    "Joining an entry only adds a <code>passkey</code> field, so the entry's password, <code>username</code>, notes, one-time password, and history stay as they were. A passkey is replaced only for the same relying party ID and user handle."
+   ],
+   "checks": [
+    {
+     "kind": "context",
+     "text": "With <code>https://&lt;rp id&gt;</code> as the page, a stored <code>https://github.com</code> matches the relying party IDs <code>github.com</code> and <code>login.github.com</code>, but a stored <code>https://login.github.com</code> does not match <code>github.com</code>. A tenant such as <code>alice.github.io</code> never matches <code>evil.github.io</code>."
+    }
+   ],
+   "files": [
+    {
+     "path": "docs/projects/passkeys/readme.md",
+     "note": "The passkeys plan: § 2.1 step 5's three rules, and the matching edits to § 2.2, § 2.5, § 4, and § 6.",
+     "collapsed": false,
+     "checks": [
+      {
+       "kind": "verify",
+       "line": 30,
+       "text": "The tie order is total: the <code>username</code> tier, then the name class (exact, prefix, <code>website</code> only), then name order, and store names are unique, so two devices holding the same store pick the same entry. Checked by walking <code>github.com</code> against <code>github work</code> with and without usernames."
+      },
+      {
+       "kind": "verify",
+       "line": 30,
+       "text": "The match direction agrees with the websites plan's <code>website::matches</code>: a stored <code>https://github.com</code> matches <code>login.github.com</code>, and a stored <code>https://accounts.google.com</code> does not match <code>google.com</code>. Checked against its § 2.2 step 4."
+      },
+      {
+       "kind": "context",
+       "line": 38,
+       "text": "The two sentences here describe two cases: format 5 if the websites plan ships first, format 4 otherwise. The review suggests opening the second with \"Otherwise\"."
+      },
+      {
+       "kind": "verify",
+       "line": 155,
+       "text": "Question 8's \"an entry of that name exists that the account cannot join\" agrees with step 5's \"that no entry uses\": the second rule already takes any joinable entry of that name, so the third rule adds at most one entry per registration. Checked by walking the three rules over the § 4 cases."
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}
