@@ -1,0 +1,89 @@
+{
+ "version": 1,
+ "name": "Passkey entry rules",
+ "project": "passkeys",
+ "pr": {
+  "repo": "ninjudd/multipass",
+  "number": 48,
+  "title": "Record how a passkey registration picks its entry",
+  "head": "93353833e6dcfdf375b26a1559a91822a95c7010",
+  "headRef": "passkeys-entry-rules",
+  "base": "70cfac8fe4978129f918ba9ada89248d082611b4",
+  "baseRef": "main"
+ },
+ "overview": {
+  "summary": [
+   "The passkeys plan designs a small Mac and iPhone app whose AutoFill extension creates passkeys and signs in with them, keeping each one as a <code>passkey</code> field on an entry in the multipass store. The plan is a <code>draft</code>, waiting on a prototype.",
+   "When a site asks the extension to register a new passkey, the extension has to choose which entry the passkey goes into. The owner already decided most of that in the plan's open questions, § 6 questions 7 to 9, but the design sections an implementer reads, § 2 and § 4, never said it. This pull request writes those decisions into the design, and records two newer rules in § 6 question 8.",
+   "<ul><li><b>The same account registering again.</b> When an entry's passkey has the same relying party ID and user handle as the new one, the new passkey replaces it in place, as WebAuthn has an authenticator do.</li><li><b>Any other registration.</b> The passkey goes into the first of <code>&lt;rp id&gt;</code>, <code>&lt;rp id&gt; &lt;user name&gt;</code>, <code>&lt;rp id&gt; &lt;user name&gt; 2</code>, and so on, that holds no passkey. It joins that entry, beside its password and one-time password, when the entry exists, and creates it when it does not.</li><li><b>One passkey per entry.</b> Each entry holds at most one <code>passkey</code> field, so each entry still describes one account, and every entry holds at least one of <code>secret</code>, <code>otp</code>, and <code>passkey</code>.</li><li><b>Checks to match.</b> Three acceptance rows and two store-reader tests cover joining an existing entry, a second account's entry, and the same account registering again.</li></ul>",
+   "The plan stays <code>draft</code>. The first review's finding, that re-registering an account split it across entries, is fixed at this head, and the review signed the head off."
+  ],
+  "cards": [
+   {
+    "id": "terms",
+    "title": "Terms on this page",
+    "html": "<ul class=\"tight\"><li><b>Relying party ID (rp ID)</b>: the domain a passkey belongs to, such as <code>github.com</code>. The system checks it against the page.</li><li><b>User handle</b>: the opaque account ID the site sends when it registers a passkey, stored as the field's <code>user</code> part. It differs between two accounts on one site.</li><li><b>User name</b>: the readable account name the site sends, such as <code>octocat</code>.</li><li><b>Entry</b>: one named record in the store, holding a password, a one-time password, a passkey, or several of them.</li></ul>"
+   },
+   {
+    "id": "context",
+    "title": "Related plans",
+    "html": "<ul class=\"tight\"><li><b>Websites</b> (<code>ready</code>, not built) adds a <code>website</code> field in format 4 and moves the passkey field to format 5 when it ships. This plan still says format 4, which matches that order.</li><li><b>Mergeable store</b> (completed) merges whole entries, newest wins, and its history keeps no passkey, so a replaced passkey is gone for good, and two devices that register on the same site while one is offline keep only the newer passkey, as § 2.4 says.</li><li><b>Session unlock</b> (completed): the extension opens the store itself and never asks the session agent.</li></ul>"
+   },
+   {
+    "id": "history",
+    "title": "Review history",
+    "html": "<ul class=\"tight\"><li><b><code>ffebbc7</code></b>: changes requested. Registering the same account again put the live passkey in a second entry, and a third registration had no defined entry.</li><li><b><code>cad3a27</code></b>: clean. Step 5 replaces the same account's passkey by user handle and numbers later entries. Two follow-ups stay with the owner: picking the entry by <code>website</code> lines, and skipping an entry whose <code>username</code> names another account.</li><li><b><code>9335383</code></b>: clean. § 6 question 8 now records the replacement and numbered-name rules. One suggestion: say there that only an account whose <code>&lt;rp id&gt; &lt;user name&gt;</code> already holds a passkey takes a numbered name.</li></ul>"
+   }
+  ]
+ },
+ "groups": [
+  {
+   "id": "plan",
+   "title": "The passkeys plan",
+   "kicker": "Step 5 of § 2.1, § 2.2, the § 2.5 file table, § 4's rows and tests, and § 6 question 8",
+   "intro": [
+    "Every change is in the one plan file. Read step 5 of § 2.1 first: it is the rule an implementer would follow, in order, when a site registers a passkey. § 2.2 then gives the store's side of it, at most one <code>passkey</code> field per entry, § 2.5 names the library calls the rule needs, § 4 adds the checks that prove it, and § 6 question 8 records the decision."
+   ],
+   "checks": [],
+   "files": [
+    {
+     "path": "docs/projects/passkeys/readme.md",
+     "note": "The plan: the registration rule in § 2.1 step 5, the one-passkey rule in § 2.2, and matching rows in § 2.5 and § 4.",
+     "collapsed": false,
+     "checks": [
+      {
+       "kind": "verify",
+       "line": 28,
+       "text": "§ 2.1 step 5: the replacement keys on the relying party ID and the user handle, which differs between accounts, so a second account's registration never overwrites the first one's passkey, and every later registration has a defined entry. Checked by walking the rule for a re-registration of <code>octocat</code>, a second account <code>octocat-work</code>, and a reused user name."
+      },
+      {
+       "kind": "context",
+       "line": 51,
+       "text": "§ 2.2: an entry's name is the only key the rule uses besides the passkey itself. The rule neither reads the websites plan's <code>website</code> lines nor compares an entry's <code>username</code>, so a passkey can join an entry that describes another account. The review left both as follow-ups for the owner."
+      },
+      {
+       "kind": "context",
+       "line": 89,
+       "text": "§ 2.5: the <code>src/ffi.rs</code> row now names every call step 5 needs: finding an entry by name, adding a <code>passkey</code> field to an existing entry, and replacing an entry's passkey."
+      },
+      {
+       "kind": "verify",
+       "line": 90,
+       "text": "§ 2.5: the <code>src/store.rs</code> row still names format 4, which matches the websites plan's § 2.4. That plan takes format 4 when it is built and moves this plan to format 5 then. Checked by reading both plans and <code>AGENTS.md</code> at the base."
+      },
+      {
+       "kind": "context",
+       "line": 121,
+       "text": "§ 4: the new row checks the replacement end to end: after you remove the passkey on the site, registering the same account again leaves one entry, and the sign-in works."
+      },
+      {
+       "kind": "context",
+       "line": 148,
+       "text": "§ 6 question 8: records step 5's replacement and numbered names. Read \"a further account\" as one whose <code>&lt;rp id&gt; &lt;user name&gt;</code> already holds a passkey: step 5 gives an account with its own user name the plain <code>&lt;rp id&gt; &lt;user name&gt;</code> entry. The review suggests saying so here."
+      }
+     ]
+    }
+   ]
+  }
+ ]
+}
