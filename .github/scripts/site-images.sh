@@ -25,7 +25,7 @@ FG='#1d1c1a'
 MUTED='#5f5c55'
 ACCENT='#1f5f8b'
 
-# Three offset cards, the store's small folder of files, with a keyhole in
+# Three offset cards, the store's folder of files, with a keyhole in
 # the front one.
 mark() {
   cat <<EOF
@@ -75,7 +75,7 @@ render og 1200 630 "<div style=\"box-sizing:border-box;width:1200px;height:630px
   $(mark 300)
   <div style=\"display:flex;flex-direction:column;gap:26px\">
     <div style=\"font-size:104px;font-weight:700;letter-spacing:-0.03em;line-height:1\">multipass</div>
-    <div style=\"font-size:36px;line-height:1.3;color:$MUTED;max-width:640px\">A minimal password manager for the secrets you never want on someone else's server.</div>
+    <div style=\"font-size:36px;line-height:1.3;color:$MUTED;max-width:640px\">A minimal, zero-dependency password manager for the secrets you never want on someone else's server.</div>
     <div style=\"font-size:30px;font-weight:600;color:$ACCENT\">getmultipass.dev</div>
   </div>
 </div>" "$BG"
