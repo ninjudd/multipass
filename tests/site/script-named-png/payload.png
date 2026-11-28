@@ -1,0 +1,2 @@
+#!/bin/sh
+echo "a script the site serves under an image name"

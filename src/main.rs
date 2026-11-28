@@ -30,7 +30,7 @@ use store::{Entry, Store, Version};
 use vault::{Ask, Opened, Session, Vault};
 
 const USAGE: &str = "\
-multipass: a small single-user password manager
+multipass: a single-user password manager
 
 Usage: multipass [--store <path>] <command>
 
