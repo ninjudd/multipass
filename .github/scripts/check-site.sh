@@ -89,26 +89,13 @@ check_static() {
         ;;
     esac
   done <<<"$redirects"
-  # The site serves only its page and its PNG images, so a redirect to
-  # anywhere on it, from a source that matches an install.sh path without
-  # ending in that text, still reaches nothing a shell would run, and no file
-  # can be a copy of the installer. An image must be a top-level .png that
-  # starts with PNG's signature, which no shell script does; an SVG is text
-  # and could hold one. The CLI never uploads .vercel, which `vercel link`
-  # writes.
+  # The site serves only its page, so a redirect to anywhere on it, from a
+  # source that matches an install.sh path without ending in that text,
+  # still reaches nothing a shell would run, and no file can be a copy of
+  # the installer. The CLI never uploads .vercel, which `vercel link` writes.
   while IFS= read -r file; do
-    file="${file#./}"
-    case "$file" in
-      */*) ;;
-      *.png) is_png "$dir/$file" && continue ;;
-    esac
-    problem "${dir%/}/$file is not index.html, vercel.json, or a PNG image beside them, the only files the site serves; a redirect could hand it to curl | bash"
+    problem "${dir%/}/${file#./} is not index.html or vercel.json, the only files the site serves; a redirect could hand it to curl | bash"
   done < <(cd "$dir" && find . -path ./.vercel -prune -o ! -type d ! -path ./index.html ! -path ./vercel.json -print)
-}
-
-# True when the file's first eight bytes are PNG's signature.
-is_png() {
-  [ "$(head -c 8 "$1" | od -An -tx1 | tr -d ' \n')" = 89504e470d0a1a0a ]
 }
 
 # Checks that GET <url><path> answers with a temporary redirect to exactly

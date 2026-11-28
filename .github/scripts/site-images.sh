@@ -2,14 +2,17 @@
 #
 # Renders the website's images from the logo's SVG with headless Chrome:
 #
-#   site/og.png                1200x630, the link preview
-#   site/apple-touch-icon.png  180x180, the home-screen icon
-#   site/favicon.png           64x64, the tab icon for browsers without SVG icons
+#   assets/og.png                1200x630, the link preview
+#   assets/apple-touch-icon.png  180x180, the home-screen icon
+#   assets/favicon.png           64x64, the tab icon for browsers without SVG icons
 #
-# Run it on a Mac with Google Chrome after changing the logo, and commit the
-# images it writes. site/index.html draws the same marks inline, so change
-# them there too. The favicon uses two cards rather than three, because at
-# 16 pixels the third blurs into the second.
+# The images live in assets/, never site/, and the page links to their
+# GitHub raw URLs on main: a file the site serves could be handed to
+# `curl | bash` by a redirect, and a valid PNG can still carry lines a shell
+# would run. Run this on a Mac with Google Chrome after changing the logo,
+# and commit the images it writes. site/index.html draws the same marks
+# inline, so change them there too. The favicon uses two cards rather than
+# three, because at 16 pixels the third blurs into the second.
 #
 #   .github/scripts/site-images.sh
 
@@ -53,7 +56,7 @@ EOF
 # render <name> <width> <height> <body html> <page background>
 render() {
   local name="$1" width="$2" height="$3" body="$4" background="$5" out
-  out="$ROOT/site/$name.png"
+  out="$ROOT/assets/$name.png"
   printf '<!doctype html><meta charset="utf-8"><style>html,body{margin:0;width:%spx;height:%spx;overflow:hidden;background:%s}</style>%s' \
     "$width" "$height" "$background" "$body" >"$WORK/$name.html"
   "$CHROME" --headless=new --disable-gpu --hide-scrollbars --force-device-scale-factor=1 \
@@ -63,7 +66,7 @@ render() {
     echo "site-images.sh: $out is not ${width}x$height" >&2
     exit 1
   }
-  echo "wrote site/$name.png (${width}x$height)"
+  echo "wrote assets/$name.png (${width}x$height)"
 }
 
 render favicon 64 64 "$(favicon_mark 64)" transparent
