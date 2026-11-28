@@ -5,6 +5,18 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>multipass</title>
 <meta name="description" content="A minimal password manager for the few secrets you never want on someone else's server: one passphrase, a few age-encrypted files, no dependencies.">
+<link rel="icon" href="/favicon.png" sizes="64x64" type="image/png">
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cstyle%3E.b%7Bfill:%231f5f8b%7D.f%7Bfill:%231d1c1a%7D.k%7Bfill:%23fbfaf7%7D@media (prefers-color-scheme:dark)%7B.b%7Bfill:%237fb6dd%7D.f%7Bfill:%23ecebe6%7D.k%7Bfill:%23141414%7D%7D%3C/style%3E%3Crect class='b' x='19' y='6' width='38' height='44' rx='7' opacity='.55'/%3E%3Crect class='f' x='7' y='14' width='38' height='44' rx='7'/%3E%3Ccircle class='k' cx='26' cy='32' r='5.4'/%3E%3Crect class='k' x='23.6' y='34.5' width='4.8' height='11.5' rx='1.4'/%3E%3C/svg%3E">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://getmultipass.dev/">
+<meta property="og:title" content="multipass">
+<meta property="og:description" content="A minimal password manager for the few secrets you never want on someone else's server: one passphrase, a few age-encrypted files, no dependencies.">
+<meta property="og:image" content="https://getmultipass.dev/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="The multipass logo, three stacked cards with a keyhole in the front one, beside the name and a one-line description.">
+<meta name="twitter:card" content="summary_large_image">
 <style>
   :root {
     color-scheme: light dark;
@@ -33,7 +45,12 @@
     font: 17px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
   }
   main { max-width: 44rem; margin: 0 auto; padding: 4rem 1rem 5rem; }
-  h1 { font-size: 2.4rem; letter-spacing: -0.02em; margin: 0 0 0.5rem; }
+  h1 { font-size: 2.4rem; letter-spacing: -0.02em; margin: 0 0 0.5rem; display: flex; align-items: center; gap: 0.6rem; }
+  .logo { width: 1.25em; height: 1.25em; flex: none; }
+  .logo .back { fill: var(--accent); opacity: 0.3; }
+  .logo .middle { fill: var(--accent); opacity: 0.6; }
+  .logo .front { fill: var(--fg); }
+  .logo .keyhole { fill: var(--bg); }
   h2 { font-size: 1.15rem; margin: 2.75rem 0 0.5rem; }
   p { margin: 0.6rem 0; }
   .lede { font-size: 1.2rem; color: var(--muted); margin-bottom: 2rem; }
@@ -54,7 +71,7 @@
 </head>
 <body>
 <main>
-  <h1>multipass</h1>
+  <h1><svg class="logo" viewBox="0 0 64 64" aria-hidden="true"><rect class="back" x="20" y="5" width="34" height="40" rx="6"/><rect class="middle" x="15" y="11" width="34" height="40" rx="6"/><rect class="front" x="10" y="18" width="34" height="40" rx="6"/><circle class="keyhole" cx="27" cy="34" r="4.6"/><rect class="keyhole" x="25" y="36" width="4" height="10" rx="1.2"/></svg>multipass</h1>
   <p class="lede">A minimal password manager for the few secrets you never want on someone else's server, such as recovery codes, seed phrases, and the master password of your everyday password manager.</p>
 
   <pre><code>curl -fsSL https://getmultipass.dev/install.sh | bash</code></pre>
